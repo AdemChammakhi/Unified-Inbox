@@ -68,6 +68,15 @@ const Login = () => {
         <p className="auth-link">
           Don't have an account? <Link to="/signup">Create one</Link>
         </p>
+
+        <div style={{ marginTop: 20, fontSize: 12, textAlign: "center" }}>
+          <Link to="/terms" style={{ color: "#666", marginRight: 15 }}>
+            Terms of Service
+          </Link>
+          <Link to="/privacy" style={{ color: "#666" }}>
+            Privacy Policy
+          </Link>
+        </div>
       </div>
     </div>
   );
