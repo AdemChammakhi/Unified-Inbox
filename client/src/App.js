@@ -12,6 +12,7 @@ import ManagerDashboard from "./pages/ManagerDashboard";
 import MarketingDashboard from "./pages/MarketingDashboard";
 import TermsOfService from "./pages/TermsOfService";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
+import Inbox from "./pages/Inbox";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { useAuth } from "./context/AuthContext";
 
@@ -32,6 +33,15 @@ function App() {
           <Route path="/signup" element={<Signup />} />
           <Route path="/terms" element={<TermsOfService />} />
           <Route path="/privacy" element={<PrivacyPolicy />} />
+
+          <Route
+            path="/inbox"
+            element={
+              <ProtectedRoute>
+                <Inbox />
+              </ProtectedRoute>
+            }
+          />
 
           <Route
             path="/admin"

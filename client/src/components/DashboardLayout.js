@@ -1,6 +1,6 @@
 import React from "react";
 import { useAuth } from "../context/AuthContext";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 
 const DashboardLayout = ({ children }) => {
   const { user, logout } = useAuth();
@@ -16,6 +16,28 @@ const DashboardLayout = ({ children }) => {
       <nav className="dashboard-nav">
         <div className="nav-brand">Unified Inbox</div>
         <div className="nav-right">
+          <Link
+            to="/inbox"
+            style={{
+              color: "#fff",
+              textDecoration: "none",
+              marginRight: 15,
+              fontWeight: 600,
+            }}
+          >
+            📥 Inbox
+          </Link>
+          <Link
+            to={`/${user?.role}`}
+            style={{
+              color: "#fff",
+              textDecoration: "none",
+              marginRight: 15,
+              fontWeight: 600,
+            }}
+          >
+            📊 Dashboard
+          </Link>
           <div className="user-info">
             <strong>
               {user?.firstName} {user?.lastName}

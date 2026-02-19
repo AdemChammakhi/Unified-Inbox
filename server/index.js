@@ -1,9 +1,11 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const path = require("path");
 const connectDB = require("./config/db");
 
-dotenv.config();
+// Load .env from project root (one level up from server/)
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 // Connect to MongoDB
 connectDB();
@@ -18,6 +20,7 @@ app.use(express.json());
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/webhooks", require("./routes/webhooks"));
+app.use("/api/instagram", require("./routes/instagram"));
 
 // Health check
 app.get("/", (req, res) => {

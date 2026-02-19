@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const Message = require("../models/Message");
 
 // GET - Webhook verification (Facebook/Meta verifies your endpoint)
 router.get("/whatsapp", (req, res) => {
@@ -28,22 +29,43 @@ router.post("/whatsapp", (req, res) => {
 
           // Handle incoming messages
           if (value.messages) {
-            value.messages.forEach((message) => {
+            value.messages.forEach(async (message) => {
               const from = message.from; // sender phone number
               const timestamp = message.timestamp;
               const type = message.type;
 
               console.log(`New WhatsApp message from ${from} at ${timestamp}`);
 
+              let content = "";
+              let messageType = "text";
+              let attachmentUrl = "";
+
               if (type === "text") {
-                console.log(`Text: ${message.text.body}`);
+                content = message.text.body;
               } else if (type === "image") {
-                console.log(`Image received: ${message.image.id}`);
+                messageType = "image";
+                attachmentUrl = message.image.id;
               } else if (type === "document") {
-                console.log(`Document received: ${message.document.id}`);
+                messageType = "document";
+                attachmentUrl = message.document.id;
               }
 
-              // TODO: Save message to database
+              // Save message to database
+              try {
+                await Message.create({
+                  platform: "whatsapp",
+                  conversationId: from,
+                  senderId: from,
+                  content,
+                  messageType,
+                  attachmentUrl,
+                  direction: "incoming",
+                  externalId: message.id,
+                  timestamp: new Date(timestamp * 1000),
+                });
+              } catch (err) {
+                console.error("Error saving WhatsApp message:", err.message);
+              }
             });
           }
 
@@ -82,14 +104,14 @@ router.get("/instagram", (req, res) => {
 });
 
 // POST - Receive incoming Instagram messages and reactions
-router.post("/instagram", (req, res) => {
+router.post("/instagram", async (req, res) => {
   const body = req.body;
 
   if (body.object === "instagram") {
-    body.entry?.forEach((entry) => {
+    for (const entry of body.entry || []) {
       // Handle messaging events
       if (entry.messaging) {
-        entry.messaging.forEach((event) => {
+        for (const event of entry.messaging) {
           const senderId = event.sender?.id;
           const timestamp = event.timestamp;
 
@@ -100,18 +122,36 @@ router.post("/instagram", (req, res) => {
               `New Instagram message from ${senderId} at ${timestamp}`,
             );
 
+            let content = "";
+            let messageType = "text";
+            let attachmentUrl = "";
+
             if (message.text) {
-              console.log(`Text: ${message.text}`);
+              content = message.text;
             }
             if (message.attachments) {
               message.attachments.forEach((att) => {
-                console.log(
-                  `Attachment type: ${att.type}, URL: ${att.payload?.url}`,
-                );
+                messageType = att.type || "other";
+                attachmentUrl = att.payload?.url || "";
               });
             }
 
-            // TODO: Save message to database
+            // Save message to database
+            try {
+              await Message.create({
+                platform: "instagram",
+                conversationId: senderId,
+                senderId: senderId,
+                content,
+                messageType,
+                attachmentUrl,
+                direction: "incoming",
+                externalId: message.mid,
+                timestamp: new Date(timestamp),
+              });
+            } catch (err) {
+              console.error("Error saving Instagram message:", err.message);
+            }
           }
 
           // Handle message reactions
@@ -120,11 +160,25 @@ router.post("/instagram", (req, res) => {
               `Reaction from ${senderId}: ${event.reaction.reaction} on message ${event.reaction.mid}`,
             );
 
-            // TODO: Save reaction to database
+            // Save reaction to database
+            try {
+              await Message.create({
+                platform: "instagram",
+                conversationId: senderId,
+                senderId: senderId,
+                content: event.reaction.reaction,
+                messageType: "reaction",
+                direction: "incoming",
+                externalId: event.reaction.mid,
+                timestamp: new Date(timestamp),
+              });
+            } catch (err) {
+              console.error("Error saving Instagram reaction:", err.message);
+            }
           }
-        });
+        }
       }
-    });
+    }
 
     return res.status(200).json({ status: "ok" });
   }
