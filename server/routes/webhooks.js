@@ -66,4 +66,70 @@ router.post("/whatsapp", (req, res) => {
   return res.status(404).json({ message: "Not a WhatsApp event" });
 });
 
+// GET - Instagram Webhook verification (reuses FACEBOOK_VERIFY_TOKEN)
+router.get("/instagram", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === process.env.FACEBOOK_VERIFY_TOKEN) {
+    console.log("Instagram webhook verified successfully");
+    return res.status(200).send(challenge);
+  }
+
+  console.error("Instagram webhook verification failed");
+  return res.status(403).json({ message: "Verification failed" });
+});
+
+// POST - Receive incoming Instagram messages and reactions
+router.post("/instagram", (req, res) => {
+  const body = req.body;
+
+  if (body.object === "instagram") {
+    body.entry?.forEach((entry) => {
+      // Handle messaging events
+      if (entry.messaging) {
+        entry.messaging.forEach((event) => {
+          const senderId = event.sender?.id;
+          const timestamp = event.timestamp;
+
+          // Handle incoming messages
+          if (event.message) {
+            const message = event.message;
+            console.log(
+              `New Instagram message from ${senderId} at ${timestamp}`,
+            );
+
+            if (message.text) {
+              console.log(`Text: ${message.text}`);
+            }
+            if (message.attachments) {
+              message.attachments.forEach((att) => {
+                console.log(
+                  `Attachment type: ${att.type}, URL: ${att.payload?.url}`,
+                );
+              });
+            }
+
+            // TODO: Save message to database
+          }
+
+          // Handle message reactions
+          if (event.reaction) {
+            console.log(
+              `Reaction from ${senderId}: ${event.reaction.reaction} on message ${event.reaction.mid}`,
+            );
+
+            // TODO: Save reaction to database
+          }
+        });
+      }
+    });
+
+    return res.status(200).json({ status: "ok" });
+  }
+
+  return res.status(404).json({ message: "Not an Instagram event" });
+});
+
 module.exports = router;
