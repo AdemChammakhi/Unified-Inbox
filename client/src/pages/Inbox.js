@@ -13,67 +13,205 @@ const Inbox = () => {
   const [sending, setSending] = useState(false);
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
+  const [unreadCounts, setUnreadCounts] = useState({
+    instagram: 0,
+    facebook: 0,
+    whatsapp: 0,
+  });
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const activeTabRef = useRef(activeTab);
+  const selectedConvRef = useRef(selectedConv);
+  const conversationsRef = useRef(conversations);
 
-  // Connect to Socket.IO
+  // Keep refs in sync with state
   useEffect(() => {
-    socketRef.current = io("http://localhost:5000", {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+  useEffect(() => {
+    selectedConvRef.current = selectedConv;
+  }, [selectedConv]);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  // Connect to Socket.IO — ONCE, not on every tab change
+  useEffect(() => {
+    const socket = io("http://localhost:5000", {
       transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 10,
     });
+    socketRef.current = socket;
 
-    socketRef.current.on("connect", () => {
-      console.log("Socket connected:", socketRef.current.id);
+    socket.on("connect", () => {
+      console.log("Socket connected:", socket.id);
       setConnectionStatus("connected");
-
-      // Join user room
       if (user?._id) {
-        socketRef.current.emit("join", user._id);
+        socket.emit("join", user._id);
       }
     });
 
-    socketRef.current.on("disconnect", () => {
+    socket.on("disconnect", () => {
       console.log("Socket disconnected");
       setConnectionStatus("disconnected");
     });
 
-    // Listen for new messages
-    socketRef.current.on("newMessage", (data) => {
-      console.log("New message received:", data);
-      if (data.platform === activeTab) {
-        fetchConversations();
+    socket.on("reconnect", () => {
+      console.log("Socket reconnected");
+      setConnectionStatus("connected");
+    });
+
+    // Listen for new messages — update UI inline without refetching
+    socket.on("newMessage", (data) => {
+      console.log("Real-time message received:", data);
+      const { platform, message } = data;
+      const currentTab = activeTabRef.current;
+      const currentConv = selectedConvRef.current;
+      const currentConvs = conversationsRef.current;
+
+      if (platform === currentTab) {
+        // Check if this message belongs to the currently selected conversation
+        const matchesSelected =
+          currentConv &&
+          (currentConv.id === data.conversationId ||
+            currentConv.participants?.some((p) => p.id === data.senderId));
+
+        if (matchesSelected) {
+          // Append message to the selected conversation inline
+          setSelectedConv((prev) => {
+            if (!prev) return prev;
+            const newMsg = {
+              id: message.id,
+              text: message.text,
+              from: message.from,
+              fromId: message.fromId,
+              time: message.time,
+            };
+            // Avoid duplicates
+            const exists = prev.messages?.some((m) => m.id === message.id);
+            if (exists) return prev;
+            return {
+              ...prev,
+              messages: [...(prev.messages || []), newMsg],
+              lastMessage: {
+                text: message.text,
+                from: message.from,
+                time: message.time,
+              },
+            };
+          });
+
+          // Also update the conversation list's lastMessage
+          setConversations((prev) =>
+            prev.map((c) => {
+              if (c.id === currentConv.id) {
+                return {
+                  ...c,
+                  lastMessage: {
+                    text: message.text,
+                    from: message.from,
+                    time: message.time,
+                  },
+                };
+              }
+              return c;
+            }),
+          );
+        } else {
+          // Message is for a different conversation on the same tab — refetch the list
+          fetchConversationsQuiet();
+        }
+      } else {
+        // Message is for a different platform tab — show unread badge
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [platform]: (prev[platform] || 0) + 1,
+        }));
       }
+
+      // Play notification sound
+      try {
+        const audio = new Audio(
+          "data:audio/wav;base64,UklGRl9vT19teleVhZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQ==",
+        );
+        audio.volume = 0.3;
+        audio.play().catch(() => {});
+      } catch {}
     });
 
     // Listen for message status updates
-    socketRef.current.on("messageStatus", (data) => {
+    socket.on("messageStatus", (data) => {
       console.log("Message status update:", data);
     });
 
+    // Listen for sent message confirmations — update UI when we send
+    socket.on("messageSent", (data) => {
+      console.log("Message sent confirmation:", data);
+      const { platform, message } = data;
+      const currentTab = activeTabRef.current;
+      const currentConv = selectedConvRef.current;
+
+      if (platform === currentTab && currentConv) {
+        // Check if this sent message belongs to current conversation
+        const matchesSelected = currentConv.participants?.some(
+          (p) => p.id === data.recipientId,
+        );
+        if (matchesSelected) {
+          // Replace optimistic message or add the sent message
+          setSelectedConv((prev) => {
+            if (!prev) return prev;
+            // Remove any temp optimistic messages with same text
+            const filtered = (prev.messages || []).filter(
+              (m) =>
+                !(m.id && m.id.startsWith("temp_") && m.text === message.text),
+            );
+            // Add the real message if not already there
+            const exists = filtered.some((m) => m.id === message.id);
+            if (exists) return { ...prev, messages: filtered };
+            return {
+              ...prev,
+              messages: [...filtered, message],
+              lastMessage: {
+                text: message.text,
+                from: message.from,
+                time: message.time,
+              },
+            };
+          });
+        }
+      }
+    });
+
     // Listen for reactions
-    socketRef.current.on("messageReaction", (data) => {
+    socket.on("messageReaction", (data) => {
       console.log("Message reaction:", data);
     });
 
     return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
+      socket.disconnect();
     };
-  }, [activeTab]); // eslint-disable-line
+  }, []); // eslint-disable-line
 
-  // Scroll to bottom of messages
+  // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [selectedConv]);
+  }, [selectedConv?.messages?.length]);
 
-  const fetchConversations = async () => {
+  // Full fetch (with loading spinner)
+  const fetchConversations = useCallback(async () => {
     try {
       setLoading(true);
       const token = user?.token;
 
       if (activeTab === "instagram") {
         const res = await axios.get("/api/instagram/conversations", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        setConversations(res.data.conversations || []);
+      } else if (activeTab === "facebook") {
+        const res = await axios.get("/api/facebook/conversations", {
           headers: { Authorization: `Bearer ${token}` },
         });
         setConversations(res.data.conversations || []);
@@ -84,26 +222,114 @@ const Inbox = () => {
         setConversations(res.data.messages || []);
       }
     } catch (error) {
-      console.error("Failed to fetch conversations:", error);
+      console.error(
+        "Failed to fetch conversations:",
+        error.response?.status,
+        error.response?.data || error.message,
+      );
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeTab, user?.token]);
 
+  // Quiet fetch (no loading spinner — used for background real-time updates)
+  const fetchConversationsQuiet = useCallback(async () => {
+    try {
+      const token = user?.token;
+      const tab = activeTabRef.current;
+      let newConvs = [];
+
+      if (tab === "instagram") {
+        const res = await axios.get("/api/instagram/conversations", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        newConvs = res.data.conversations || [];
+      } else if (tab === "facebook") {
+        const res = await axios.get("/api/facebook/conversations", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        newConvs = res.data.conversations || [];
+      }
+
+      setConversations(newConvs);
+
+      // Also update selectedConv if it's currently open
+      const currentConv = selectedConvRef.current;
+      if (currentConv) {
+        const updated = newConvs.find((c) => c.id === currentConv.id);
+        if (updated) {
+          setSelectedConv(updated);
+        }
+      }
+    } catch (error) {
+      console.error("Background fetch error:", error.message);
+    }
+  }, [user?.token]);
+
+  // Fetch on tab change
   useEffect(() => {
     fetchConversations();
-  }, [activeTab]);
+    // Clear unread count for this tab
+    setUnreadCounts((prev) => ({ ...prev, [activeTab]: 0 }));
+  }, [activeTab, fetchConversations]);
+
+  // When selecting a conversation, keep it in sync with latest data
+  const handleSelectConv = useCallback((conv) => {
+    setSelectedConv(conv);
+  }, []);
 
   const sendReply = async () => {
     if (!replyText.trim() || !selectedConv) return;
+
+    const messageText = replyText.trim();
+    setReplyText("");
+    const tempId = "temp_" + Date.now();
 
     try {
       setSending(true);
       const token = user?.token;
 
       // Find the other participant (not the page)
-      const recipient = selectedConv.participants?.find(
-        (p) => p.id !== process.env.REACT_APP_PAGE_ID,
+      const recipient = selectedConv.participants?.[0];
+
+      // Optimistic update — show the message immediately
+      const optimisticMsg = {
+        id: tempId,
+        text: messageText,
+        from: "You",
+        fromId: "page",
+        time: new Date().toISOString(),
+        sending: true,
+      };
+
+      setSelectedConv((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: [...(prev.messages || []), optimisticMsg],
+          lastMessage: {
+            text: messageText,
+            from: "You",
+            time: optimisticMsg.time,
+          },
+        };
+      });
+
+      // Update conversation list preview
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id === selectedConv.id) {
+            return {
+              ...c,
+              lastMessage: {
+                text: messageText,
+                from: "You",
+                time: optimisticMsg.time,
+              },
+            };
+          }
+          return c;
+        }),
       );
 
       if (activeTab === "instagram") {
@@ -111,23 +337,48 @@ const Inbox = () => {
           "/api/instagram/send",
           {
             recipientId: recipient?.id || selectedConv.id,
-            message: replyText,
+            message: messageText,
           },
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+      } else if (activeTab === "facebook") {
+        await axios.post(
+          "/api/facebook/send",
           {
-            headers: { Authorization: `Bearer ${token}` },
+            recipientId: recipient?.id || selectedConv.id,
+            message: messageText,
           },
+          { headers: { Authorization: `Bearer ${token}` } },
         );
       }
 
-      setReplyText("");
-      // Refresh conversations
-      fetchConversations();
+      // Mark optimistic message as sent (remove sending state)
+      setSelectedConv((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: (prev.messages || []).map((m) =>
+            m.id === tempId ? { ...m, sending: false } : m,
+          ),
+        };
+      });
+
+      // Background refresh to sync real data after a short delay
+      setTimeout(() => fetchConversationsQuiet(), 2000);
     } catch (error) {
       console.error("Failed to send reply:", error);
       alert(
         "Failed to send message: " +
           (error.response?.data?.message || error.message),
       );
+      // Revert optimistic update
+      setSelectedConv((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: (prev.messages || []).filter((m) => m.id !== tempId),
+        };
+      });
     } finally {
       setSending(false);
     }
@@ -161,6 +412,21 @@ const Inbox = () => {
             }}
           >
             📸 Instagram
+            {unreadCounts.instagram > 0 && (
+              <span style={styles.unreadBadge}>{unreadCounts.instagram}</span>
+            )}
+          </button>
+          <button
+            style={activeTab === "facebook" ? styles.activeTab : styles.tab}
+            onClick={() => {
+              setActiveTab("facebook");
+              setSelectedConv(null);
+            }}
+          >
+            💬 Facebook
+            {unreadCounts.facebook > 0 && (
+              <span style={styles.unreadBadge}>{unreadCounts.facebook}</span>
+            )}
           </button>
           <button
             style={activeTab === "whatsapp" ? styles.activeTab : styles.tab}
@@ -170,6 +436,9 @@ const Inbox = () => {
             }}
           >
             💬 WhatsApp
+            {unreadCounts.whatsapp > 0 && (
+              <span style={styles.unreadBadge}>{unreadCounts.whatsapp}</span>
+            )}
           </button>
         </div>
 
@@ -196,7 +465,7 @@ const Inbox = () => {
                     backgroundColor:
                       selectedConv?.id === conv.id ? "#e3f2fd" : "#fff",
                   }}
-                  onClick={() => setSelectedConv(conv)}
+                  onClick={() => handleSelectConv(conv)}
                 >
                   <div style={styles.convAvatar}>
                     {(conv.participants?.[0]?.name || "?")[0].toUpperCase()}
@@ -252,6 +521,7 @@ const Inbox = () => {
                             msg.from === selectedConv.participants?.[0]?.name
                               ? "#000"
                               : "#fff",
+                          opacity: msg.sending ? 0.6 : 1,
                         }}
                       >
                         <small style={styles.msgFrom}>{msg.from}</small>
@@ -464,6 +734,19 @@ const styles = {
   },
   loading: { padding: "20px", textAlign: "center", color: "#999" },
   empty: { padding: "20px", textAlign: "center", color: "#999" },
+  unreadBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f44336",
+    color: "#fff",
+    borderRadius: "50%",
+    width: "20px",
+    height: "20px",
+    fontSize: "11px",
+    fontWeight: "bold",
+    marginLeft: "8px",
+  },
 };
 
 export default Inbox;

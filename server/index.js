@@ -49,6 +49,7 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/webhooks", require("./routes/webhooks"));
 app.use("/api/instagram", require("./routes/instagram"));
+app.use("/api/facebook", require("./routes/facebook"));
 
 // Health check
 app.get("/", (req, res) => {

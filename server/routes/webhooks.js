@@ -64,11 +64,19 @@ router.post("/whatsapp", async (req, res) => {
 
               console.log("WhatsApp message saved:", newMessage._id);
 
-              // Emit real-time event
+              // Emit real-time event with formatted data
               if (io) {
                 io.emit("newMessage", {
                   platform: "whatsapp",
-                  message: newMessage,
+                  message: {
+                    id: msg.id,
+                    text: msg.text?.body || "",
+                    from: msg.from,
+                    fromId: msg.from,
+                    time: new Date().toISOString(),
+                  },
+                  conversationId: msg.from,
+                  senderId: msg.from,
                 });
               }
             }
@@ -140,11 +148,19 @@ router.post("/instagram", async (req, res) => {
 
             console.log("Instagram message saved:", newMessage._id);
 
-            // Emit real-time event
+            // Emit real-time event with formatted data for instant UI update
             if (io) {
               io.emit("newMessage", {
                 platform: "instagram",
-                message: newMessage,
+                message: {
+                  id: event.message.mid,
+                  text: event.message.text || "",
+                  from: event.sender.id,
+                  fromId: event.sender.id,
+                  time: new Date().toISOString(),
+                },
+                conversationId: event.sender.id,
+                senderId: event.sender.id,
               });
             }
           }
@@ -166,6 +182,95 @@ router.post("/instagram", async (req, res) => {
     return res.sendStatus(200);
   } catch (error) {
     console.error("Instagram webhook error:", error);
+    return res.sendStatus(200);
+  }
+});
+
+// ============ FACEBOOK MESSENGER WEBHOOKS ============
+
+// GET - Facebook Messenger webhook verification
+router.get("/facebook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === process.env.FACEBOOK_VERIFY_TOKEN) {
+    console.log("Facebook Messenger webhook verified");
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// POST - Receive Facebook Messenger messages
+router.post("/facebook", async (req, res) => {
+  try {
+    const body = req.body;
+    const io = req.app.get("io");
+
+    if (body.object === "page") {
+      for (const entry of body.entry || []) {
+        const messaging = entry.messaging || [];
+
+        for (const event of messaging) {
+          const senderId = event.sender?.id;
+          const recipientId = event.recipient?.id;
+
+          // Skip messages sent by the page itself
+          if (senderId === process.env.FACEBOOK_PAGE_ID) continue;
+
+          // Handle incoming messages
+          if (event.message) {
+            const message = event.message;
+            console.log(
+              `New Facebook message from ${senderId}: ${message.text}`,
+            );
+
+            const newMessage = await Message.create({
+              platform: "facebook",
+              conversationId: senderId,
+              senderId: senderId,
+              recipientId: recipientId,
+              content: message.text || "",
+              messageType: message.attachments ? "attachment" : "text",
+              direction: "incoming",
+              status: "delivered",
+              externalId: message.mid,
+            });
+
+            console.log("Facebook message saved:", newMessage._id);
+
+            // Emit real-time event with formatted data for instant UI update
+            if (io) {
+              io.emit("newMessage", {
+                platform: "facebook",
+                message: {
+                  id: message.mid,
+                  text: message.text || "",
+                  from: senderId,
+                  fromId: senderId,
+                  time: new Date().toISOString(),
+                },
+                conversationId: senderId,
+                senderId: senderId,
+              });
+            }
+          }
+
+          // Handle message deliveries
+          if (event.delivery) {
+            console.log("Facebook message delivered:", event.delivery.mids);
+          }
+
+          // Handle message reads
+          if (event.read) {
+            console.log("Facebook message read at:", event.read.watermark);
+          }
+        }
+      }
+    }
+    return res.sendStatus(200);
+  } catch (error) {
+    console.error("Facebook webhook error:", error);
     return res.sendStatus(200);
   }
 });

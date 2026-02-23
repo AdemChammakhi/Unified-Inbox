@@ -4,7 +4,14 @@ const messageSchema = new mongoose.Schema(
   {
     platform: {
       type: String,
-      enum: ["instagram", "whatsapp", "messenger", "email", "tiktok"],
+      enum: [
+        "instagram",
+        "whatsapp",
+        "messenger",
+        "facebook",
+        "email",
+        "tiktok",
+      ],
       required: true,
     },
     conversationId: {

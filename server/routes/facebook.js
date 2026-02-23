@@ -6,24 +6,24 @@ const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
-// GET /api/instagram/conversations - Fetch Instagram conversations
+// GET /api/facebook/conversations - Fetch Facebook Page conversations
 router.get("/conversations", protect, async (req, res) => {
   try {
-    const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
     if (!accessToken || !pageId) {
       return res.status(400).json({
-        message: "INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
+        message:
+          "FACEBOOK_PAGE_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
       });
     }
 
-    console.log("Using Facebook Page ID:", pageId);
+    console.log("Fetching Facebook conversations for Page:", pageId);
 
-    // Fetch conversations using the Facebook Page ID (not Instagram Account ID)
+    // Fetch conversations from the Page
     const convRes = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
       params: {
-        platform: "instagram",
         fields:
           "participants,messages{message,from,to,created_time,attachments}",
         access_token: accessToken,
@@ -38,28 +38,28 @@ router.get("/conversations", protect, async (req, res) => {
       const messages = conv.messages?.data || [];
       const lastMessage = messages[0];
 
+      // Filter out the Page from participants to show only the user
+      const otherParticipants = participants.filter((p) => p.id !== pageId);
+
       return {
         id: conv.id,
-        participants: participants.map((p) => ({
+        participants: otherParticipants.map((p) => ({
           id: p.id,
-          name: p.username || p.name || "Unknown",
+          name: p.name || "Unknown",
         })),
         lastMessage: lastMessage
           ? {
               text: lastMessage.message || "[Attachment]",
-              from:
-                lastMessage.from?.username ||
-                lastMessage.from?.name ||
-                "Unknown",
+              from: lastMessage.from?.name || "Unknown",
               time: lastMessage.created_time,
             }
           : null,
         messages: messages.map((m) => ({
           id: m.id,
           text: m.message || "",
-          from: m.from?.username || m.from?.name || "Unknown",
+          from: m.from?.name || "Unknown",
           fromId: m.from?.id,
-          to: m.to?.data?.[0]?.username || m.to?.data?.[0]?.name || "Unknown",
+          to: m.to?.data?.[0]?.name || "Unknown",
           time: m.created_time,
           attachments: m.attachments?.data || [],
         })),
@@ -69,35 +69,37 @@ router.get("/conversations", protect, async (req, res) => {
     return res.json({ conversations: formatted });
   } catch (error) {
     console.error(
-      "Instagram API error:",
+      "Facebook API error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
     return res.status(500).json({
-      message: "Failed to fetch Instagram conversations",
+      message: "Failed to fetch Facebook conversations",
       error: error.response?.data?.error?.message || error.message,
     });
   }
 });
 
-// POST /api/instagram/send - Send an Instagram message
+// POST /api/facebook/send - Send a Facebook Messenger message
 router.post("/send", protect, async (req, res) => {
   try {
     const { recipientId, message } = req.body;
-    const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
     if (!accessToken || !pageId) {
       return res.status(400).json({
-        message: "INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
+        message:
+          "FACEBOOK_PAGE_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
       });
     }
 
-    // Send message via Instagram Messaging API
+    // Send message via Messenger Send API
     const sendRes = await axios.post(
       `${GRAPH_API}/${pageId}/messages`,
       {
         recipient: { id: recipientId },
         message: { text: message },
+        messaging_type: "RESPONSE",
       },
       {
         params: { access_token: accessToken },
@@ -109,7 +111,7 @@ router.post("/send", protect, async (req, res) => {
     // Save to database (non-blocking — don't let DB errors fail the response)
     try {
       await Message.create({
-        platform: "instagram",
+        platform: "facebook",
         conversationId: recipientId,
         senderId: pageId,
         recipientId: recipientId,
@@ -127,7 +129,7 @@ router.post("/send", protect, async (req, res) => {
     const io = req.app.get("io");
     if (io) {
       io.emit("messageSent", {
-        platform: "instagram",
+        platform: "facebook",
         message: {
           id: messageId,
           text: message,
@@ -143,7 +145,7 @@ router.post("/send", protect, async (req, res) => {
     return res.json({ success: true, messageId });
   } catch (error) {
     console.error(
-      "Instagram send error:",
+      "Facebook send error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
     return res.status(500).json({
@@ -153,55 +155,10 @@ router.post("/send", protect, async (req, res) => {
   }
 });
 
-// POST /api/instagram/extend-token - Exchange short-lived token for a 60-day token
-router.post("/extend-token", protect, async (req, res) => {
-  try {
-    const appId = process.env.FACEBOOK_APP_ID;
-    const appSecret = process.env.FACEBOOK_APP_SECRET;
-    const shortToken = process.env.INSTAGRAM_ACCESS_TOKEN;
-
-    if (!appId || !appSecret) {
-      return res.status(400).json({
-        message:
-          "FACEBOOK_APP_ID or FACEBOOK_APP_SECRET not configured in .env",
-      });
-    }
-
-    const response = await axios.get(`${GRAPH_API}/oauth/access_token`, {
-      params: {
-        grant_type: "fb_exchange_token",
-        client_id: appId,
-        client_secret: appSecret,
-        fb_exchange_token: shortToken,
-      },
-    });
-
-    const longLivedToken = response.data.access_token;
-    const expiresIn = response.data.expires_in; // seconds (usually ~5184000 = 60 days)
-
-    return res.json({
-      success: true,
-      longLivedToken,
-      expiresIn,
-      expiresInDays: Math.round(expiresIn / 86400),
-      note: "Copy this token into your .env as INSTAGRAM_ACCESS_TOKEN (and WHATSAPP_ACCESS_TOKEN if same page)",
-    });
-  } catch (error) {
-    console.error(
-      "Token extension error:",
-      error.response?.data || error.message,
-    );
-    return res.status(500).json({
-      message: "Failed to extend token",
-      error: error.response?.data?.error?.message || error.message,
-    });
-  }
-});
-
-// GET /api/instagram/messages - Get stored messages from database
+// GET /api/facebook/messages - Get stored Facebook messages from database
 router.get("/messages", protect, async (req, res) => {
   try {
-    const messages = await Message.find({ platform: "instagram" })
+    const messages = await Message.find({ platform: "facebook" })
       .sort({ timestamp: -1 })
       .limit(100);
     return res.json({ messages });
