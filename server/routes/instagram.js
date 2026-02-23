@@ -10,29 +10,25 @@ const GRAPH_API = "https://graph.facebook.com/v24.0";
 router.get("/conversations", protect, async (req, res) => {
   try {
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
-    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+    const pageId = process.env.FACEBOOK_PAGE_ID;
 
-    if (!accessToken || !igAccountId) {
+    if (!accessToken || !pageId) {
       return res.status(400).json({
-        message:
-          "INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCOUNT_ID missing in .env",
+        message: "INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
       });
     }
 
-    console.log("Using Instagram Account ID:", igAccountId);
+    console.log("Using Facebook Page ID:", pageId);
 
-    // Fetch conversations for this Instagram Business Account
-    const convRes = await axios.get(
-      `${GRAPH_API}/${igAccountId}/conversations`,
-      {
-        params: {
-          platform: "instagram",
-          fields:
-            "participants,messages{message,from,to,created_time,attachments}",
-          access_token: accessToken,
-        },
+    // Fetch conversations using the Facebook Page ID (not Instagram Account ID)
+    const convRes = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
+      params: {
+        platform: "instagram",
+        fields:
+          "participants,messages{message,from,to,created_time,attachments}",
+        access_token: accessToken,
       },
-    );
+    });
 
     const conversations = convRes.data.data || [];
 
@@ -46,21 +42,24 @@ router.get("/conversations", protect, async (req, res) => {
         id: conv.id,
         participants: participants.map((p) => ({
           id: p.id,
-          name: p.name || p.username || "Unknown",
+          name: p.username || p.name || "Unknown",
         })),
         lastMessage: lastMessage
           ? {
               text: lastMessage.message || "[Attachment]",
-              from: lastMessage.from?.name || "Unknown",
+              from:
+                lastMessage.from?.username ||
+                lastMessage.from?.name ||
+                "Unknown",
               time: lastMessage.created_time,
             }
           : null,
         messages: messages.map((m) => ({
           id: m.id,
           text: m.message || "",
-          from: m.from?.name || "Unknown",
+          from: m.from?.username || m.from?.name || "Unknown",
           fromId: m.from?.id,
-          to: m.to?.data?.[0]?.name || "Unknown",
+          to: m.to?.data?.[0]?.username || m.to?.data?.[0]?.name || "Unknown",
           time: m.created_time,
           attachments: m.attachments?.data || [],
         })),
@@ -85,18 +84,17 @@ router.post("/send", protect, async (req, res) => {
   try {
     const { recipientId, message } = req.body;
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
-    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+    const pageId = process.env.FACEBOOK_PAGE_ID;
 
-    if (!accessToken || !igAccountId) {
+    if (!accessToken || !pageId) {
       return res.status(400).json({
-        message:
-          "INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCOUNT_ID missing in .env",
+        message: "INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
       });
     }
 
     // Send message via Instagram Messaging API
     const sendRes = await axios.post(
-      `${GRAPH_API}/${igAccountId}/messages`,
+      `${GRAPH_API}/${pageId}/messages`,
       {
         recipient: { id: recipientId },
         message: { text: message },
@@ -110,7 +108,7 @@ router.post("/send", protect, async (req, res) => {
     const newMessage = new Message({
       platform: "instagram",
       conversationId: recipientId,
-      senderId: igAccountId,
+      senderId: pageId,
       recipientId: recipientId,
       content: message,
       messageType: "text",
