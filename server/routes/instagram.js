@@ -4,45 +4,24 @@ const router = express.Router();
 const Message = require("../models/Message");
 const { protect } = require("../middleware/auth");
 
-const GRAPH_API = "https://graph.facebook.com/v21.0";
+const GRAPH_API = "https://graph.facebook.com/v24.0";
 
 // GET /api/instagram/conversations - Fetch Instagram conversations
 router.get("/conversations", protect, async (req, res) => {
   try {
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
 
-    let igAccountId;
-
-    // Detect token type and get Instagram account ID
-    if (accessToken.startsWith("IG")) {
-      // Instagram User Token - call /me directly on Instagram Graph API
-      const meRes = await axios.get(`${GRAPH_API}/me`, {
-        params: {
-          fields: "id,username",
-          access_token: accessToken,
-        },
+    if (!accessToken || !igAccountId) {
+      return res.status(400).json({
+        message:
+          "INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCOUNT_ID missing in .env",
       });
-      igAccountId = meRes.data.id;
-    } else {
-      // Facebook Page Token - get linked Instagram business account
-      const meRes = await axios.get(`${GRAPH_API}/me`, {
-        params: {
-          fields: "instagram_business_account",
-          access_token: accessToken,
-        },
-      });
-      igAccountId = meRes.data.instagram_business_account?.id;
     }
 
-    if (!igAccountId) {
-      return res
-        .status(400)
-        .json({ message: "No Instagram Business Account found" });
-    }
+    console.log("Using Instagram Account ID:", igAccountId);
 
-    console.log("Instagram Account ID:", igAccountId);
-
-    // Fetch conversations
+    // Fetch conversations for this Instagram Business Account
     const convRes = await axios.get(
       `${GRAPH_API}/${igAccountId}/conversations`,
       {
@@ -92,7 +71,7 @@ router.get("/conversations", protect, async (req, res) => {
   } catch (error) {
     console.error(
       "Instagram API error:",
-      error.response?.data || error.message,
+      JSON.stringify(error.response?.data, null, 2) || error.message,
     );
     return res.status(500).json({
       message: "Failed to fetch Instagram conversations",
@@ -106,31 +85,16 @@ router.post("/send", protect, async (req, res) => {
   try {
     const { recipientId, message } = req.body;
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
 
-    let igAccountId;
-
-    if (accessToken.startsWith("IG")) {
-      const meRes = await axios.get(`${GRAPH_API}/me`, {
-        params: { fields: "id,username", access_token: accessToken },
+    if (!accessToken || !igAccountId) {
+      return res.status(400).json({
+        message:
+          "INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCOUNT_ID missing in .env",
       });
-      igAccountId = meRes.data.id;
-    } else {
-      const meRes = await axios.get(`${GRAPH_API}/me`, {
-        params: {
-          fields: "instagram_business_account",
-          access_token: accessToken,
-        },
-      });
-      igAccountId = meRes.data.instagram_business_account?.id;
     }
 
-    if (!igAccountId) {
-      return res
-        .status(400)
-        .json({ message: "No Instagram Business Account found" });
-    }
-
-    // Send message via Instagram API
+    // Send message via Instagram Messaging API
     const sendRes = await axios.post(
       `${GRAPH_API}/${igAccountId}/messages`,
       {
@@ -160,10 +124,55 @@ router.post("/send", protect, async (req, res) => {
   } catch (error) {
     console.error(
       "Instagram send error:",
-      error.response?.data || error.message,
+      JSON.stringify(error.response?.data, null, 2) || error.message,
     );
     return res.status(500).json({
       message: "Failed to send message",
+      error: error.response?.data?.error?.message || error.message,
+    });
+  }
+});
+
+// POST /api/instagram/extend-token - Exchange short-lived token for a 60-day token
+router.post("/extend-token", protect, async (req, res) => {
+  try {
+    const appId = process.env.FACEBOOK_APP_ID;
+    const appSecret = process.env.FACEBOOK_APP_SECRET;
+    const shortToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+
+    if (!appId || !appSecret) {
+      return res.status(400).json({
+        message:
+          "FACEBOOK_APP_ID or FACEBOOK_APP_SECRET not configured in .env",
+      });
+    }
+
+    const response = await axios.get(`${GRAPH_API}/oauth/access_token`, {
+      params: {
+        grant_type: "fb_exchange_token",
+        client_id: appId,
+        client_secret: appSecret,
+        fb_exchange_token: shortToken,
+      },
+    });
+
+    const longLivedToken = response.data.access_token;
+    const expiresIn = response.data.expires_in; // seconds (usually ~5184000 = 60 days)
+
+    return res.json({
+      success: true,
+      longLivedToken,
+      expiresIn,
+      expiresInDays: Math.round(expiresIn / 86400),
+      note: "Copy this token into your .env as INSTAGRAM_ACCESS_TOKEN (and WHATSAPP_ACCESS_TOKEN if same page)",
+    });
+  } catch (error) {
+    console.error(
+      "Token extension error:",
+      error.response?.data || error.message,
+    );
+    return res.status(500).json({
+      message: "Failed to extend token",
       error: error.response?.data?.error?.message || error.message,
     });
   }

@@ -1,6 +1,43 @@
 const express = require("express");
+const crypto = require("crypto");
 const router = express.Router();
 const Message = require("../models/Message");
+
+/**
+ * Verify that incoming webhook requests are genuinely from Meta.
+ * Meta signs every payload with your App Secret using HMAC SHA-256.
+ */
+function verifySignature(req, res, next) {
+  const appSecret = process.env.FACEBOOK_APP_SECRET;
+  if (!appSecret) {
+    console.warn(
+      "FACEBOOK_APP_SECRET not set - skipping signature verification",
+    );
+    return next();
+  }
+
+  const signature = req.headers["x-hub-signature-256"];
+  if (!signature) {
+    console.error("Missing X-Hub-Signature-256 header");
+    return res.status(401).json({ message: "Missing signature" });
+  }
+
+  const expectedHash =
+    "sha256=" +
+    crypto
+      .createHmac("sha256", appSecret)
+      .update(JSON.stringify(req.body))
+      .digest("hex");
+
+  if (
+    !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHash))
+  ) {
+    console.error("Invalid webhook signature");
+    return res.status(401).json({ message: "Invalid signature" });
+  }
+
+  next();
+}
 
 // GET - Webhook verification (Facebook/Meta verifies your endpoint)
 router.get("/whatsapp", (req, res) => {
@@ -17,8 +54,8 @@ router.get("/whatsapp", (req, res) => {
   return res.status(403).json({ message: "Verification failed" });
 });
 
-// POST - Receive incoming WhatsApp messages
-router.post("/whatsapp", (req, res) => {
+// POST - Receive incoming WhatsApp messages (signature verified)
+router.post("/whatsapp", verifySignature, (req, res) => {
   const body = req.body;
 
   if (body.object === "whatsapp_business_account") {
@@ -103,8 +140,8 @@ router.get("/instagram", (req, res) => {
   return res.status(403).json({ message: "Verification failed" });
 });
 
-// POST - Receive incoming Instagram messages and reactions
-router.post("/instagram", async (req, res) => {
+// POST - Receive incoming Instagram messages and reactions (signature verified)
+router.post("/instagram", verifySignature, async (req, res) => {
   const body = req.body;
 
   if (body.object === "instagram") {
