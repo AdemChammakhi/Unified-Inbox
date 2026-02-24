@@ -114,6 +114,7 @@ router.post("/send", protect, async (req, res) => {
         platform: "facebook",
         conversationId: recipientId,
         senderId: pageId,
+        senderName: "Page",
         recipientId: recipientId,
         content: message,
         messageType: "text",

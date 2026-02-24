@@ -1,7 +1,33 @@
 const express = require("express");
 const crypto = require("crypto");
+const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
+
+const GRAPH_API = "https://graph.facebook.com/v24.0";
+
+// Helper: look up a user's name/username from the Graph API
+async function getSenderName(senderId, platform) {
+  try {
+    const token =
+      platform === "facebook"
+        ? process.env.FACEBOOK_PAGE_ACCESS_TOKEN
+        : process.env.INSTAGRAM_ACCESS_TOKEN;
+    if (!token) return senderId;
+    const fields = platform === "instagram" ? "username,name" : "first_name,last_name,name";
+    const res = await axios.get(`${GRAPH_API}/${senderId}`, {
+      params: { fields, access_token: token },
+    });
+    return (
+      res.data.username ||
+      res.data.name ||
+      [res.data.first_name, res.data.last_name].filter(Boolean).join(" ") ||
+      senderId
+    );
+  } catch {
+    return senderId;
+  }
+}
 
 // Verify webhook signature from Meta
 const verifySignature = (req, res, buf) => {
@@ -50,10 +76,16 @@ router.post("/whatsapp", async (req, res) => {
             const messages = value.messages || [];
 
             for (const msg of messages) {
+              // Look up WhatsApp sender name from contacts
+              const contact = value.contacts?.[0];
+              const waName =
+                contact?.profile?.name || contact?.wa_id || msg.from;
+
               const newMessage = await Message.create({
                 platform: "whatsapp",
                 conversationId: msg.from,
                 senderId: msg.from,
+                senderName: waName,
                 recipientId: value.metadata.phone_number_id,
                 content: msg.text?.body || "",
                 messageType: msg.type || "text",
@@ -134,10 +166,14 @@ router.post("/instagram", async (req, res) => {
 
         for (const event of messaging) {
           if (event.message) {
+            // Look up Instagram sender name
+            const igSenderName = await getSenderName(event.sender.id, "instagram");
+
             const newMessage = await Message.create({
               platform: "instagram",
               conversationId: event.sender.id,
               senderId: event.sender.id,
+              senderName: igSenderName,
               recipientId: event.recipient.id,
               content: event.message.text || "",
               messageType: event.message.attachments ? "attachment" : "text",
@@ -225,10 +261,14 @@ router.post("/facebook", async (req, res) => {
               `New Facebook message from ${senderId}: ${message.text}`,
             );
 
+            // Look up Facebook sender name
+            const fbSenderName = await getSenderName(senderId, "facebook");
+
             const newMessage = await Message.create({
               platform: "facebook",
               conversationId: senderId,
               senderId: senderId,
+              senderName: fbSenderName,
               recipientId: recipientId,
               content: message.text || "",
               messageType: message.attachments ? "attachment" : "text",

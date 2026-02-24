@@ -120,6 +120,7 @@ router.post("/send", protect, async (req, res) => {
         platform: "instagram",
         conversationId: recipientId,
         senderId: pageId,
+        senderName: "Page",
         recipientId: recipientId,
         content: message,
         messageType: "text",
