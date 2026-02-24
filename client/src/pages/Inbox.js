@@ -37,7 +37,8 @@ const Inbox = () => {
 
   // Connect to Socket.IO — ONCE, not on every tab change
   useEffect(() => {
-    const socket = io("http://localhost:5000", {
+    const socketUrl = process.env.REACT_APP_API_URL || window.location.origin;
+    const socket = io(socketUrl, {
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionDelay: 1000,
