@@ -41,6 +41,32 @@ router.get("/conversations", protect, async (req, res) => {
       // Filter out the Page from participants to show only the user
       const otherParticipants = participants.filter((p) => p.id !== pageId);
 
+      // Sync all messages to database (non-blocking)
+      for (const m of messages) {
+        const direction = m.from?.id === pageId ? "outgoing" : "incoming";
+        Message.findOneAndUpdate(
+          { externalId: m.id },
+          {
+            $setOnInsert: {
+              platform: "facebook",
+              conversationId: conv.id,
+              senderId: m.from?.id || "unknown",
+              senderName: m.from?.name || "Unknown",
+              recipientId: m.to?.data?.[0]?.id || pageId,
+              content: m.message || "",
+              messageType: m.attachments ? "attachment" : "text",
+              direction,
+              status: direction === "outgoing" ? "sent" : "delivered",
+              externalId: m.id,
+              timestamp: m.created_time,
+            },
+          },
+          { upsert: true },
+        ).catch((err) =>
+          console.error("FB message sync error (non-fatal):", err.message),
+        );
+      }
+
       return {
         id: conv.id,
         participants: otherParticipants.map((p) => ({

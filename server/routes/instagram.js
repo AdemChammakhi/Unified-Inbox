@@ -44,6 +44,43 @@ router.get("/conversations", protect, async (req, res) => {
         (p) => p.id !== igAccountId && p.id !== pageId,
       );
 
+      // Build a name lookup from participants
+      const nameMap = {};
+      participants.forEach((p) => {
+        nameMap[p.id] = p.username || p.name || "Unknown";
+      });
+
+      // Sync all messages to database (non-blocking)
+      for (const m of messages) {
+        const direction =
+          m.from?.id === igAccountId || m.from?.id === pageId
+            ? "outgoing"
+            : "incoming";
+        Message.findOneAndUpdate(
+          { externalId: m.id },
+          {
+            $setOnInsert: {
+              platform: "instagram",
+              conversationId: conv.id,
+              senderId: m.from?.id || "unknown",
+              senderName:
+                m.from?.username || m.from?.name || nameMap[m.from?.id] || "Unknown",
+              recipientId:
+                m.to?.data?.[0]?.id || igAccountId,
+              content: m.message || "",
+              messageType: m.attachments ? "attachment" : "text",
+              direction,
+              status: direction === "outgoing" ? "sent" : "delivered",
+              externalId: m.id,
+              timestamp: m.created_time,
+            },
+          },
+          { upsert: true },
+        ).catch((err) =>
+          console.error("IG message sync error (non-fatal):", err.message),
+        );
+      }
+
       return {
         id: conv.id,
         participants: otherParticipants.map((p) => ({
