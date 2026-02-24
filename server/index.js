@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const path = require("path");
+const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const connectDB = require("./config/db");
@@ -51,10 +52,21 @@ app.use("/api/webhooks", require("./routes/webhooks"));
 app.use("/api/instagram", require("./routes/instagram"));
 app.use("/api/facebook", require("./routes/facebook"));
 
-// Health check
-app.get("/", (req, res) => {
-  res.json({ message: "Unified Inbox API is running" });
-});
+// Serve React client build (for production / Render deployment)
+const clientBuildPath = path.join(__dirname, "../client/build");
+if (fs.existsSync(clientBuildPath)) {
+  app.use(express.static(clientBuildPath));
+
+  // Catch-all: any non-API route serves index.html so React Router handles it
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(clientBuildPath, "index.html"));
+  });
+} else {
+  // Dev mode fallback
+  app.get("/", (req, res) => {
+    res.json({ message: "Unified Inbox API is running" });
+  });
+}
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
