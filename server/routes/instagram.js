@@ -33,14 +33,20 @@ router.get("/conversations", protect, async (req, res) => {
     const conversations = convRes.data.data || [];
 
     // Format conversations
+    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
     const formatted = conversations.map((conv) => {
       const participants = conv.participants?.data || [];
       const messages = conv.messages?.data || [];
       const lastMessage = messages[0];
 
+      // Filter out the page's own Instagram account so participants[0] is always the other user
+      const otherParticipants = participants.filter(
+        (p) => p.id !== igAccountId && p.id !== pageId,
+      );
+
       return {
         id: conv.id,
-        participants: participants.map((p) => ({
+        participants: otherParticipants.map((p) => ({
           id: p.id,
           name: p.username || p.name || "Unknown",
         })),
@@ -98,6 +104,7 @@ router.post("/send", protect, async (req, res) => {
       {
         recipient: { id: recipientId },
         message: { text: message },
+        messaging_type: "RESPONSE",
       },
       {
         params: { access_token: accessToken },
