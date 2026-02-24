@@ -51,6 +51,7 @@ app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/webhooks", require("./routes/webhooks"));
 app.use("/api/instagram", require("./routes/instagram"));
 app.use("/api/facebook", require("./routes/facebook"));
+app.use("/api/classifications", require("./routes/classifications"));
 
 // Serve React client build (for production / Render deployment)
 const clientBuildPath = path.join(__dirname, "../client/build");

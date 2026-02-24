@@ -1,8 +1,20 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import axios from "axios";
 import { io } from "socket.io-client";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
+
+const CLASSIFICATION_LABELS = {
+  non_classifie: "Non Classifié",
+  cible: "Cible",
+  hors_cible: "Hors Cible",
+};
+
+const CLASSIFICATION_COLORS = {
+  non_classifie: "#9e9e9e",
+  cible: "#4CAF50",
+  hors_cible: "#f44336",
+};
 
 const Inbox = () => {
   const { user } = useAuth();
@@ -13,6 +25,8 @@ const Inbox = () => {
   const [sending, setSending] = useState(false);
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
+  const [classifications, setClassifications] = useState({});
+  const [classFilter, setClassFilter] = useState("all");
   const [unreadCounts, setUnreadCounts] = useState({
     instagram: 0,
     facebook: 0,
@@ -249,6 +263,57 @@ const Inbox = () => {
     }
   }, [user?.token]);
 
+  // Fetch classifications for the current platform tab
+  const fetchClassifications = useCallback(async () => {
+    try {
+      const token = user?.token;
+      const res = await axios.get("/api/classifications", {
+        params: { platform: activeTab },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setClassifications(res.data.classifications || {});
+    } catch (error) {
+      console.error("Failed to fetch classifications:", error.message);
+    }
+  }, [activeTab, user?.token]);
+
+  // Update classification for a conversation
+  const updateClassification = async (conversationId, classification) => {
+    try {
+      const token = user?.token;
+      await axios.put(
+        "/api/classifications",
+        { conversationId, platform: activeTab, classification },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setClassifications((prev) => ({
+        ...prev,
+        [conversationId]: classification,
+      }));
+    } catch (error) {
+      console.error("Failed to update classification:", error.message);
+      alert("Failed to update classification");
+    }
+  };
+
+  // Sorted & filtered conversations: unclassified first, then filtered
+  const sortedConversations = useMemo(() => {
+    let filtered = conversations;
+    if (classFilter !== "all") {
+      filtered = conversations.filter((conv) => {
+        const cls = classifications[conv.id] || "non_classifie";
+        return cls === classFilter;
+      });
+    }
+    return [...filtered].sort((a, b) => {
+      const clsA = classifications[a.id] || "non_classifie";
+      const clsB = classifications[b.id] || "non_classifie";
+      if (clsA === "non_classifie" && clsB !== "non_classifie") return -1;
+      if (clsA !== "non_classifie" && clsB === "non_classifie") return 1;
+      return 0;
+    });
+  }, [conversations, classifications, classFilter]);
+
   // Keep fetchQuietRef always pointing to the latest function
   useEffect(() => {
     fetchQuietRef.current = fetchConversationsQuiet;
@@ -257,9 +322,10 @@ const Inbox = () => {
   // Fetch on tab change
   useEffect(() => {
     fetchConversations();
+    fetchClassifications();
     // Clear unread count for this tab
     setUnreadCounts((prev) => ({ ...prev, [activeTab]: 0 }));
-  }, [activeTab, fetchConversations]);
+  }, [activeTab, fetchConversations, fetchClassifications]);
 
   // Auto-poll every 10 seconds so new messages appear without manual refresh
   useEffect(() => {
@@ -448,40 +514,85 @@ const Inbox = () => {
               </button>
             </div>
 
+            {/* Classification Filter */}
+            <div style={styles.classFilterBar}>
+              {[
+                { key: "all", label: "Tous" },
+                { key: "non_classifie", label: "Non Classifié" },
+                { key: "cible", label: "Cible" },
+                { key: "hors_cible", label: "Hors Cible" },
+              ].map((f) => (
+                <button
+                  key={f.key}
+                  onClick={() => setClassFilter(f.key)}
+                  style={{
+                    ...styles.classFilterBtn,
+                    backgroundColor:
+                      classFilter === f.key ? "#0084ff" : "#f0f0f0",
+                    color: classFilter === f.key ? "#fff" : "#333",
+                  }}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
             {loading ? (
               <p style={styles.loading}>Loading...</p>
-            ) : conversations.length === 0 ? (
+            ) : sortedConversations.length === 0 ? (
               <p style={styles.empty}>No conversations found</p>
             ) : (
-              conversations.map((conv) => (
-                <div
-                  key={conv.id}
-                  style={{
-                    ...styles.convItem,
-                    backgroundColor:
-                      selectedConv?.id === conv.id ? "#e3f2fd" : "#fff",
-                  }}
-                  onClick={() => handleSelectConv(conv)}
-                >
-                  <div style={styles.convAvatar}>
-                    {(conv.participants?.[0]?.name || "?")[0].toUpperCase()}
+              sortedConversations.map((conv) => {
+                const cls = classifications[conv.id] || "non_classifie";
+                return (
+                  <div
+                    key={conv.id}
+                    style={{
+                      ...styles.convItem,
+                      backgroundColor:
+                        selectedConv?.id === conv.id ? "#e3f2fd" : "#fff",
+                      borderLeft: `4px solid ${CLASSIFICATION_COLORS[cls]}`,
+                    }}
+                    onClick={() => handleSelectConv(conv)}
+                  >
+                    <div style={styles.convAvatar}>
+                      {(conv.participants?.[0]?.name || "?")[0].toUpperCase()}
+                    </div>
+                    <div style={styles.convInfo}>
+                      <div style={styles.convNameRow}>
+                        <strong>
+                          {conv.participants?.map((p) => p.name).join(", ") ||
+                            "Unknown"}
+                        </strong>
+                        <select
+                          value={cls}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) =>
+                            updateClassification(conv.id, e.target.value)
+                          }
+                          style={{
+                            ...styles.classSelect,
+                            color: CLASSIFICATION_COLORS[cls],
+                            borderColor: CLASSIFICATION_COLORS[cls],
+                          }}
+                        >
+                          <option value="non_classifie">Non Classifié</option>
+                          <option value="cible">Cible</option>
+                          <option value="hors_cible">Hors Cible</option>
+                        </select>
+                      </div>
+                      <p style={styles.lastMsg}>
+                        {conv.lastMessage?.text || "No messages"}
+                      </p>
+                      <small style={styles.time}>
+                        {conv.lastMessage?.time
+                          ? new Date(conv.lastMessage.time).toLocaleString()
+                          : ""}
+                      </small>
+                    </div>
                   </div>
-                  <div style={styles.convInfo}>
-                    <strong>
-                      {conv.participants?.map((p) => p.name).join(", ") ||
-                        "Unknown"}
-                    </strong>
-                    <p style={styles.lastMsg}>
-                      {conv.lastMessage?.text || "No messages"}
-                    </p>
-                    <small style={styles.time}>
-                      {conv.lastMessage?.time
-                        ? new Date(conv.lastMessage.time).toLocaleString()
-                        : ""}
-                    </small>
-                  </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -636,6 +747,38 @@ const styles = {
     background: "none",
     cursor: "pointer",
     fontSize: "18px",
+  },
+  classFilterBar: {
+    display: "flex",
+    gap: "4px",
+    padding: "8px 10px",
+    borderBottom: "1px solid #ddd",
+    flexWrap: "wrap",
+  },
+  classFilterBtn: {
+    padding: "4px 10px",
+    border: "none",
+    borderRadius: "12px",
+    cursor: "pointer",
+    fontSize: "11px",
+    fontWeight: "bold",
+  },
+  convNameRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "6px",
+  },
+  classSelect: {
+    padding: "2px 4px",
+    border: "1px solid #ccc",
+    borderRadius: "6px",
+    fontSize: "10px",
+    fontWeight: "bold",
+    cursor: "pointer",
+    backgroundColor: "#fff",
+    outline: "none",
+    flexShrink: 0,
   },
   convItem: {
     display: "flex",
