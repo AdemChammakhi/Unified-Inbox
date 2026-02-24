@@ -70,59 +70,40 @@ const Inbox = () => {
       const { platform, message } = data;
       const currentTab = activeTabRef.current;
       const currentConv = selectedConvRef.current;
-      const currentConvs = conversationsRef.current;
 
       if (platform === currentTab) {
-        // Check if this message belongs to the currently selected conversation
-        const matchesSelected =
-          currentConv &&
-          (currentConv.id === data.conversationId ||
-            currentConv.participants?.some((p) => p.id === data.senderId));
+        // Always refetch conversations to get the latest data from the API
+        fetchConversationsQuiet();
 
-        if (matchesSelected) {
-          // Append message to the selected conversation inline
-          setSelectedConv((prev) => {
-            if (!prev) return prev;
-            const newMsg = {
-              id: message.id,
-              text: message.text,
-              from: message.from,
-              fromId: message.fromId,
-              time: message.time,
-            };
-            // Avoid duplicates
-            const exists = prev.messages?.some((m) => m.id === message.id);
-            if (exists) return prev;
-            return {
-              ...prev,
-              messages: [...(prev.messages || []), newMsg],
-              lastMessage: {
+        // Also try to append the message inline to the selected conversation
+        if (currentConv) {
+          const matchesSelected =
+            currentConv.id === data.conversationId ||
+            currentConv.participants?.some((p) => p.id === data.senderId);
+
+          if (matchesSelected) {
+            setSelectedConv((prev) => {
+              if (!prev) return prev;
+              const newMsg = {
+                id: message.id,
                 text: message.text,
                 from: message.from,
+                fromId: message.fromId,
                 time: message.time,
-              },
-            };
-          });
-
-          // Also update the conversation list's lastMessage
-          setConversations((prev) =>
-            prev.map((c) => {
-              if (c.id === currentConv.id) {
-                return {
-                  ...c,
-                  lastMessage: {
-                    text: message.text,
-                    from: message.from,
-                    time: message.time,
-                  },
-                };
-              }
-              return c;
-            }),
-          );
-        } else {
-          // Message is for a different conversation on the same tab — refetch the list
-          fetchConversationsQuiet();
+              };
+              const exists = prev.messages?.some((m) => m.id === message.id);
+              if (exists) return prev;
+              return {
+                ...prev,
+                messages: [...(prev.messages || []), newMsg],
+                lastMessage: {
+                  text: message.text,
+                  from: message.from,
+                  time: message.time,
+                },
+              };
+            });
+          }
         }
       } else {
         // Message is for a different platform tab — show unread badge
