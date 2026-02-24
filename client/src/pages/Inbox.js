@@ -23,6 +23,7 @@ const Inbox = () => {
   const activeTabRef = useRef(activeTab);
   const selectedConvRef = useRef(selectedConv);
   const conversationsRef = useRef(conversations);
+  const fetchQuietRef = useRef(null);
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -73,7 +74,7 @@ const Inbox = () => {
 
       if (platform === currentTab) {
         // Always refetch conversations to get the latest data from the API
-        fetchConversationsQuiet();
+        if (fetchQuietRef.current) fetchQuietRef.current();
 
         // Also try to append the message inline to the selected conversation
         if (currentConv) {
@@ -248,12 +249,25 @@ const Inbox = () => {
     }
   }, [user?.token]);
 
+  // Keep fetchQuietRef always pointing to the latest function
+  useEffect(() => {
+    fetchQuietRef.current = fetchConversationsQuiet;
+  }, [fetchConversationsQuiet]);
+
   // Fetch on tab change
   useEffect(() => {
     fetchConversations();
     // Clear unread count for this tab
     setUnreadCounts((prev) => ({ ...prev, [activeTab]: 0 }));
   }, [activeTab, fetchConversations]);
+
+  // Auto-poll every 10 seconds so new messages appear without manual refresh
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (fetchQuietRef.current) fetchQuietRef.current();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   // When selecting a conversation, keep it in sync with latest data
   const handleSelectConv = useCallback((conv) => {
