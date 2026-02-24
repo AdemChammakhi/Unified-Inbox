@@ -98,13 +98,14 @@ router.post("/send", protect, async (req, res) => {
       });
     }
 
+    console.log("Instagram send - recipientId:", recipientId, "pageId:", pageId);
+
     // Send message via Instagram Messaging API
     const sendRes = await axios.post(
       `${GRAPH_API}/${pageId}/messages`,
       {
         recipient: { id: recipientId },
         message: { text: message },
-        messaging_type: "RESPONSE",
       },
       {
         params: { access_token: accessToken },
@@ -149,13 +150,24 @@ router.post("/send", protect, async (req, res) => {
 
     return res.json({ success: true, messageId });
   } catch (error) {
+    const apiError = error.response?.data?.error;
     console.error(
       "Instagram send error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
+
+    // Detect 24-hour window error
+    if (apiError?.code === 10 || apiError?.error_subcode === 2534022) {
+      return res.status(400).json({
+        message:
+          "Cannot send: the 24-hour messaging window has expired. The user must message you first before you can reply.",
+        error: apiError?.message,
+      });
+    }
+
     return res.status(500).json({
       message: "Failed to send message",
-      error: error.response?.data?.error?.message || error.message,
+      error: apiError?.message || error.message,
     });
   }
 });
