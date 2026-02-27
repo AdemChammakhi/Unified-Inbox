@@ -9,6 +9,9 @@ services:
       context: .
       dockerfile: server/Dockerfile
     container_name: backend
+    image: ademxd/projetpfe-backend:latest
+    env_file:
+      - .env
     ports:
       - "5000:5000"
     environment:
