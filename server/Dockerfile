@@ -8,7 +8,7 @@ COPY package.json ./
 RUN npm install --production
 
 # Copy server source code
-COPY server/ ./server/
+COPY . .
 
 EXPOSE 5000
 
