@@ -120,17 +120,43 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // Send message via Messenger Send API
-    const sendRes = await axios.post(
-      `${GRAPH_API}/${pageId}/messages`,
-      {
-        recipient: { id: recipientId },
-        message: { text: message },
-        messaging_type: "RESPONSE",
-      },
-      {
-        params: { access_token: accessToken },
-      },
-    );
+    // First try RESPONSE (within 24h window), then fall back to HUMAN_AGENT tag (7-day window)
+    let sendRes;
+    try {
+      sendRes = await axios.post(
+        `${GRAPH_API}/${pageId}/messages`,
+        {
+          recipient: { id: recipientId },
+          message: { text: message },
+          messaging_type: "RESPONSE",
+        },
+        {
+          params: { access_token: accessToken },
+        },
+      );
+    } catch (sendErr) {
+      const errData = sendErr.response?.data?.error;
+      // Error code 10 / subcode 2018278 = outside the 24h allowed window
+      if (errData?.code === 10 || errData?.error_subcode === 2018278) {
+        console.log(
+          "24h window expired, retrying with HUMAN_AGENT message tag...",
+        );
+        sendRes = await axios.post(
+          `${GRAPH_API}/${pageId}/messages`,
+          {
+            recipient: { id: recipientId },
+            message: { text: message },
+            messaging_type: "MESSAGE_TAG",
+            tag: "HUMAN_AGENT",
+          },
+          {
+            params: { access_token: accessToken },
+          },
+        );
+      } else {
+        throw sendErr;
+      }
+    }
 
     const messageId = sendRes.data.message_id || sendRes.data.id || null;
 
