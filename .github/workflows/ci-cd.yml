@@ -23,13 +23,13 @@ jobs:
       - name: Build and push Frontend
         uses: docker/build-push-action@v5
         with:
-          context: ./frontend
+          context: ./client
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/projetpfe-frontend:latest
 
       - name: Build and push Backend
         uses: docker/build-push-action@v5
         with:
-          context: ./backend
+          context: ./server
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/projetpfe-backend:latest
