@@ -13,21 +13,12 @@ const classificationSchema = new mongoose.Schema(
     },
     classification: {
       type: String,
-      enum: ["cible", "hors_cible", "non_classifie"],
+      enum: ["cible", "hors_cible", "non_classifie", "suivi", "priorite"],
       default: "non_classifie",
     },
     classifiedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-    },
-    priority: {
-      type: String,
-      enum: ["haute", "moyenne", "basse", "non_definie"],
-      default: "non_definie",
-    },
-    suivi: {
-      type: Boolean,
-      default: false,
     },
   },
   { timestamps: true },

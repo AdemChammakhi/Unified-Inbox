@@ -14,19 +14,16 @@ const CLASSIFICATION_LABELS = {
   non_classifie: "Non Classifié",
   cible: "Cible",
   hors_cible: "Hors Cible",
+  suivi: "Suivi",
+  priorite: "Priorité",
 };
 
 const CLASSIFICATION_COLORS = {
   non_classifie: "#9e9e9e",
   cible: "#4CAF50",
   hors_cible: "#f44336",
-};
-
-const PRIORITY_LABELS = {
-  non_definie: "Non définie",
-  haute: "Haute",
-  moyenne: "Moyenne",
-  basse: "Basse",
+  suivi: "#2196F3",
+  priorite: "#FF9800",
 };
 
 const Inbox = () => {
@@ -39,8 +36,6 @@ const Inbox = () => {
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
-  const [priorities, setPriorities] = useState({});
-  const [suivis, setSuivis] = useState({});
   const [classFilter, setClassFilter] = useState("all");
   const [unreadCounts, setUnreadCounts] = useState({
     instagram: 0,
@@ -292,37 +287,18 @@ const Inbox = () => {
     }
   }, [activeTab, user?.token]);
 
-  // Update classification, priority, and suivi for a conversation
-  const updateClassification = async (
-    conversationId,
-    classification,
-    priority,
-    suivi,
-  ) => {
+  // Update classification for a conversation
+  const updateClassification = async (conversationId, classification) => {
     try {
       const token = user?.token;
       await axios.put(
         "/api/classifications",
-        {
-          conversationId,
-          platform: activeTab,
-          classification,
-          priority,
-          suivi,
-        },
+        { conversationId, platform: activeTab, classification },
         { headers: { Authorization: `Bearer ${token}` } },
       );
       setClassifications((prev) => ({
         ...prev,
         [conversationId]: classification,
-      }));
-      setPriorities((prev) => ({
-        ...prev,
-        [conversationId]: priority,
-      }));
-      setSuivis((prev) => ({
-        ...prev,
-        [conversationId]: suivi,
       }));
     } catch (error) {
       console.error("Failed to update classification:", error.message);
@@ -555,6 +531,8 @@ const Inbox = () => {
                 { key: "non_classifie", label: "Non Classifié" },
                 { key: "cible", label: "Cible" },
                 { key: "hors_cible", label: "Hors Cible" },
+                { key: "suivi", label: "Suivi" },
+                { key: "priorite", label: "Priorité" },
               ].map((f) => (
                 <button
                   key={f.key}
@@ -578,11 +556,6 @@ const Inbox = () => {
             ) : (
               sortedConversations.map((conv) => {
                 const cls = classifications[conv.id] || "non_classifie";
-                const priority = priorities[conv.id] || "non_definie";
-                const suivi =
-                  typeof suivis[conv.id] === "boolean"
-                    ? suivis[conv.id]
-                    : false;
                 return (
                   <div
                     key={conv.id}
@@ -603,38 +576,11 @@ const Inbox = () => {
                           {conv.participants?.map((p) => p.name).join(", ") ||
                             "Unknown"}
                         </strong>
-                        <span style={{ marginRight: 8 }}>
-                          <span
-                            style={{
-                              color: CLASSIFICATION_COLORS[cls],
-                              fontWeight: "bold",
-                            }}
-                          >
-                            {CLASSIFICATION_LABELS[cls]}
-                          </span>
-                          {suivi && (
-                            <span
-                              style={{
-                                marginLeft: 6,
-                                color: "#0084ff",
-                                fontSize: 12,
-                                fontWeight: "bold",
-                              }}
-                            >
-                              • Suivi
-                            </span>
-                          )}
-                        </span>
                         <select
                           value={cls}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) =>
-                            updateClassification(
-                              conv.id,
-                              e.target.value,
-                              priority,
-                              suivi,
-                            )
+                            updateClassification(conv.id, e.target.value)
                           }
                           style={{
                             ...styles.classSelect,
@@ -645,49 +591,9 @@ const Inbox = () => {
                           <option value="non_classifie">Non Classifié</option>
                           <option value="cible">Cible</option>
                           <option value="hors_cible">Hors Cible</option>
+                          <option value="suivi">Suivi</option>
+                          <option value="priorite">Priorité</option>
                         </select>
-                        <select
-                          value={priority}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) =>
-                            updateClassification(
-                              conv.id,
-                              cls,
-                              e.target.value,
-                              suivi,
-                            )
-                          }
-                          style={{
-                            marginLeft: 8,
-                            padding: "2px 8px",
-                            borderRadius: 4,
-                            border: "1px solid #ccc",
-                          }}
-                        >
-                          <option value="non_definie">
-                            Priorité: Non définie
-                          </option>
-                          <option value="haute">Priorité: Haute</option>
-                          <option value="moyenne">Priorité: Moyenne</option>
-                          <option value="basse">Priorité: Basse</option>
-                        </select>
-                        <label style={{ marginLeft: 8, fontSize: 12 }}>
-                          <input
-                            type="checkbox"
-                            checked={suivi}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) =>
-                              updateClassification(
-                                conv.id,
-                                cls,
-                                priority,
-                                e.target.checked,
-                              )
-                            }
-                            style={{ marginRight: 4 }}
-                          />
-                          Suivi
-                        </label>
                       </div>
                       <p style={styles.lastMsg}>
                         {conv.lastMessage?.text || "No messages"}

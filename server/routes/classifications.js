@@ -28,40 +28,26 @@ router.get("/", protect, async (req, res) => {
 // Set or update classification for a conversation
 router.put("/", protect, async (req, res) => {
   try {
-    const { conversationId, platform, classification, priority, suivi } =
-      req.body;
+    const { conversationId, platform, classification } = req.body;
 
     if (!conversationId || !platform || !classification) {
-      return res
-        .status(400)
-        .json({
-          message: "conversationId, platform, and classification are required",
-        });
+      return res.status(400).json({
+        message: "conversationId, platform, and classification are required",
+      });
     }
 
-    const valid = ["cible", "hors_cible", "non_classifie"];
+    const valid = ["cible", "hors_cible", "non_classifie", "suivi", "priorite"];
     if (!valid.includes(classification)) {
-      return res
-        .status(400)
-        .json({
-          message: `Invalid classification. Must be one of: ${valid.join(", ")}`,
-        });
+      return res.status(400).json({
+        message: `Invalid classification. Must be one of: ${valid.join(", ")}`,
+      });
     }
-
-    const validPriorities = ["haute", "moyenne", "basse", "non_definie"];
-    let priorityValue = priority;
-    if (!priorityValue || !validPriorities.includes(priorityValue)) {
-      priorityValue = "non_definie";
-    }
-    let suiviValue = typeof suivi === "boolean" ? suivi : false;
 
     const result = await Classification.findOneAndUpdate(
       { conversationId, platform },
       {
         classification,
         classifiedBy: req.user._id,
-        priority: priorityValue,
-        suivi: suiviValue,
       },
       { upsert: true, new: true },
     );
