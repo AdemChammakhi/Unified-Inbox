@@ -289,16 +289,38 @@ router.post("/send", protect, async (req, res) => {
     );
 
     // Send message via Instagram Messaging API
-    const sendRes = await axios.post(
-      `${GRAPH_API}/${pageId}/messages`,
-      {
-        recipient: { id: recipientId },
-        message: { text: message },
-      },
-      {
-        params: { access_token: accessToken },
-      },
-    );
+    // Try RESPONSE first (within 24h window), fall back to HUMAN_AGENT tag (7-day window)
+    let sendRes;
+    try {
+      sendRes = await axios.post(
+        `${GRAPH_API}/${pageId}/messages`,
+        {
+          recipient: { id: recipientId },
+          message: { text: message },
+          messaging_type: "RESPONSE",
+        },
+        {
+          params: { access_token: accessToken },
+        },
+      );
+    } catch (firstErr) {
+      console.log(
+        "Instagram RESPONSE send failed, trying HUMAN_AGENT:",
+        firstErr.response?.data?.error?.message || firstErr.message,
+      );
+      sendRes = await axios.post(
+        `${GRAPH_API}/${pageId}/messages`,
+        {
+          recipient: { id: recipientId },
+          message: { text: message },
+          tag: "HUMAN_AGENT",
+          messaging_type: "MESSAGE_TAG",
+        },
+        {
+          params: { access_token: accessToken },
+        },
+      );
+    }
 
     const messageId = sendRes.data.message_id || sendRes.data.id || null;
 

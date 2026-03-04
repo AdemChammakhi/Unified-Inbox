@@ -115,10 +115,8 @@ router.get("/conversations", protect, async (req, res) => {
       !process.env.EMAIL_PASSWORD ||
       !process.env.EMAIL_IMAP_HOST
     ) {
-      return res.status(400).json({
-        message:
-          "Email configuration missing in .env (EMAIL_USER, EMAIL_PASSWORD, EMAIL_IMAP_HOST)",
-      });
+      // Email not configured — return empty list instead of erroring
+      return res.json({ conversations: [] });
     }
 
     const emails = await fetchEmails(100);
