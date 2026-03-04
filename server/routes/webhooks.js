@@ -3,8 +3,50 @@ const crypto = require("crypto");
 const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
+const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
+
+// In-memory log of recent webhook hits (last 50) — for debugging
+const webhookLog = [];
+function logWebhook(platform, type, summary) {
+  webhookLog.unshift({
+    platform,
+    type,
+    summary,
+    time: new Date().toISOString(),
+  });
+  if (webhookLog.length > 50) webhookLog.length = 50;
+}
+
+// GET /api/webhooks/debug — check webhook health & recent DB messages (admin only)
+router.get("/debug", protect, async (req, res) => {
+  try {
+    const recentMessages = await Message.find()
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .select(
+        "platform conversationId senderId senderName direction content createdAt",
+      );
+    return res.json({
+      webhookHits: webhookLog,
+      recentMessages,
+      envCheck: {
+        INSTAGRAM_ACCESS_TOKEN: !!process.env.INSTAGRAM_ACCESS_TOKEN,
+        FACEBOOK_PAGE_ACCESS_TOKEN: !!process.env.FACEBOOK_PAGE_ACCESS_TOKEN,
+        FACEBOOK_PAGE_ID: !!process.env.FACEBOOK_PAGE_ID,
+        FACEBOOK_APP_SECRET: !!process.env.FACEBOOK_APP_SECRET,
+        FACEBOOK_VERIFY_TOKEN: !!process.env.FACEBOOK_VERIFY_TOKEN,
+        EMAIL_USER: !!process.env.EMAIL_USER,
+        EMAIL_PASSWORD: !!process.env.EMAIL_PASSWORD,
+        EMAIL_IMAP_HOST: !!process.env.EMAIL_IMAP_HOST,
+        EMAIL_SMTP_HOST: !!process.env.EMAIL_SMTP_HOST,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // Helper: look up a user's name/username from the Graph API
 async function getSenderName(senderId, platform) {
@@ -64,6 +106,7 @@ router.get("/whatsapp", (req, res) => {
 
 // POST - Receive WhatsApp messages
 router.post("/whatsapp", async (req, res) => {
+  logWebhook("whatsapp", "POST", `object=${req.body?.object}`);
   try {
     const body = req.body;
     const io = req.app.get("io");
@@ -157,6 +200,11 @@ router.get("/instagram", (req, res) => {
 
 // POST - Receive Instagram messages
 router.post("/instagram", async (req, res) => {
+  logWebhook(
+    "instagram",
+    "POST",
+    `object=${req.body?.object}, entries=${req.body?.entry?.length}`,
+  );
   try {
     const body = req.body;
     const io = req.app.get("io");
@@ -244,6 +292,11 @@ router.get("/facebook", (req, res) => {
 
 // POST - Receive Facebook Messenger messages
 router.post("/facebook", async (req, res) => {
+  logWebhook(
+    "facebook",
+    "POST",
+    `object=${req.body?.object}, entries=${req.body?.entry?.length}`,
+  );
   try {
     const body = req.body;
     const io = req.app.get("io");
