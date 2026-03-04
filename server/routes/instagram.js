@@ -2,6 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
+const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
@@ -64,9 +65,11 @@ router.get("/conversations", protect, async (req, res) => {
               conversationId: conv.id,
               senderId: m.from?.id || "unknown",
               senderName:
-                m.from?.username || m.from?.name || nameMap[m.from?.id] || "Unknown",
-              recipientId:
-                m.to?.data?.[0]?.id || igAccountId,
+                m.from?.username ||
+                m.from?.name ||
+                nameMap[m.from?.id] ||
+                "Unknown",
+              recipientId: m.to?.data?.[0]?.id || igAccountId,
               content: m.message || "",
               messageType: m.attachments ? "attachment" : "text",
               direction,
@@ -125,7 +128,7 @@ router.get("/conversations", protect, async (req, res) => {
 // POST /api/instagram/send - Send an Instagram message
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message } = req.body;
+    const { recipientId, message, conversationId } = req.body;
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
@@ -135,7 +138,37 @@ router.post("/send", protect, async (req, res) => {
       });
     }
 
-    console.log("Instagram send - recipientId:", recipientId, "pageId:", pageId);
+    // --- Conversation Lock Check ---
+    const lockConvId = conversationId || recipientId;
+    const existingLock = await ConversationLock.findOne({
+      conversationId: lockConvId,
+      platform: "instagram",
+    });
+    if (
+      existingLock &&
+      existingLock.lockedBy.toString() !== req.user._id.toString() &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({
+        message:
+          "This conversation is locked to another agent. Only the assigned agent can reply.",
+      });
+    }
+    // Auto-lock on first reply (marketing agents)
+    if (!existingLock && req.user.role === "marketing") {
+      await ConversationLock.create({
+        conversationId: lockConvId,
+        platform: "instagram",
+        lockedBy: req.user._id,
+      });
+    }
+
+    console.log(
+      "Instagram send - recipientId:",
+      recipientId,
+      "pageId:",
+      pageId,
+    );
 
     // Send message via Instagram Messaging API
     const sendRes = await axios.post(

@@ -53,6 +53,7 @@ app.use("/api/instagram", require("./routes/instagram"));
 app.use("/api/facebook", require("./routes/facebook"));
 app.use("/api/email", require("./routes/email"));
 app.use("/api/classifications", require("./routes/classifications"));
+app.use("/api/locks", require("./routes/locks"));
 
 // Serve React client build (for production / Render deployment)
 const clientBuildPath = path.join(__dirname, "../client/build");

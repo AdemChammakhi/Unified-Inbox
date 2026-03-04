@@ -4,6 +4,7 @@ const { simpleParser } = require("mailparser");
 const nodemailer = require("nodemailer");
 const router = express.Router();
 const Message = require("../models/Message");
+const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 
 // Helper: connect to IMAP and fetch emails
@@ -212,10 +213,35 @@ router.get("/conversations", protect, async (req, res) => {
 // POST /api/email/send — Send an email reply
 router.post("/send", protect, async (req, res) => {
   try {
-    const { to, subject, text } = req.body;
+    const { to, subject, text, conversationId } = req.body;
 
     if (!to || !text) {
       return res.status(400).json({ message: "to and text are required" });
+    }
+
+    // --- Conversation Lock Check ---
+    const lockConvId = conversationId || to;
+    const existingLock = await ConversationLock.findOne({
+      conversationId: lockConvId,
+      platform: "email",
+    });
+    if (
+      existingLock &&
+      existingLock.lockedBy.toString() !== req.user._id.toString() &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({
+        message:
+          "This conversation is locked to another agent. Only the assigned agent can reply.",
+      });
+    }
+    // Auto-lock on first reply (marketing agents)
+    if (!existingLock && req.user.role === "marketing") {
+      await ConversationLock.create({
+        conversationId: lockConvId,
+        platform: "email",
+        lockedBy: req.user._id,
+      });
     }
 
     if (

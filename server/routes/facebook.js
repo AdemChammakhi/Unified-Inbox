@@ -2,6 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
+const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
@@ -108,7 +109,7 @@ router.get("/conversations", protect, async (req, res) => {
 // POST /api/facebook/send - Send a Facebook Messenger message
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message } = req.body;
+    const { recipientId, message, conversationId } = req.body;
     const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
@@ -116,6 +117,31 @@ router.post("/send", protect, async (req, res) => {
       return res.status(400).json({
         message:
           "FACEBOOK_PAGE_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
+      });
+    }
+
+    // --- Conversation Lock Check ---
+    const lockConvId = conversationId || recipientId;
+    const existingLock = await ConversationLock.findOne({
+      conversationId: lockConvId,
+      platform: "facebook",
+    });
+    if (
+      existingLock &&
+      existingLock.lockedBy.toString() !== req.user._id.toString() &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({
+        message:
+          "This conversation is locked to another agent. Only the assigned agent can reply.",
+      });
+    }
+    // Auto-lock on first reply (marketing agents)
+    if (!existingLock && req.user.role === "marketing") {
+      await ConversationLock.create({
+        conversationId: lockConvId,
+        platform: "facebook",
+        lockedBy: req.user._id,
       });
     }
 

@@ -39,6 +39,7 @@ const Inbox = () => {
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
   const [classFilter, setClassFilter] = useState("all");
+  const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
     instagram: 0,
     facebook: 0,
@@ -316,6 +317,26 @@ const Inbox = () => {
     }
   }, [activeTab, user?.token, logout, navigate]);
 
+  // Fetch conversation locks for the current platform
+  const fetchLocks = useCallback(async () => {
+    const token = user?.token;
+    if (!token) return;
+    try {
+      const res = await axios.get("/api/locks", {
+        params: { platform: activeTab },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setLocks(res.data.locks || {});
+    } catch (error) {
+      if (error.response?.status === 401) {
+        logout();
+        navigate("/login");
+        return;
+      }
+      console.error("Failed to fetch locks:", error.message);
+    }
+  }, [activeTab, user?.token, logout, navigate]);
+
   // Update classification for a conversation
   const updateClassification = async (conversationId, classification) => {
     try {
@@ -362,17 +383,19 @@ const Inbox = () => {
   useEffect(() => {
     fetchConversations();
     fetchClassifications();
+    fetchLocks();
     // Clear unread count for this tab
     setUnreadCounts((prev) => ({ ...prev, [activeTab]: 0 }));
-  }, [activeTab, fetchConversations, fetchClassifications]);
+  }, [activeTab, fetchConversations, fetchClassifications, fetchLocks]);
 
   // Auto-poll every 10 seconds so new messages appear without manual refresh
   useEffect(() => {
     const interval = setInterval(() => {
       if (fetchQuietRef.current) fetchQuietRef.current();
+      fetchLocks();
     }, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchLocks]);
 
   // When selecting a conversation, keep it in sync with latest data
   const handleSelectConv = useCallback((conv) => {
@@ -494,6 +517,7 @@ const Inbox = () => {
           "/api/instagram/send",
           {
             recipientId: recipient?.id || selectedConv.id,
+            conversationId: selectedConv.id,
             message: messageText,
           },
           { headers: { Authorization: `Bearer ${token}` } },
@@ -503,6 +527,7 @@ const Inbox = () => {
           "/api/facebook/send",
           {
             recipientId: recipient?.id || selectedConv.id,
+            conversationId: selectedConv.id,
             message: messageText,
           },
           { headers: { Authorization: `Bearer ${token}` } },
@@ -512,12 +537,16 @@ const Inbox = () => {
           "/api/email/send",
           {
             to: recipient?.email || selectedConv.email,
+            conversationId: selectedConv.id,
             subject: selectedConv.subject || "Re: Conversation",
             text: messageText,
           },
           { headers: { Authorization: `Bearer ${token}` } },
         );
       }
+
+      // Refresh locks after sending (may have auto-locked)
+      fetchLocks();
 
       // Mark optimistic message as sent (remove sending state)
       setSelectedConv((prev) => {
@@ -723,6 +752,14 @@ const Inbox = () => {
                             {conv.participants?.map((p) => p.name).join(", ") ||
                               "Unknown"}
                           </strong>
+                          {locks[conv.id] && (
+                            <span
+                              style={styles.lockBadge}
+                              title={`Assigned to ${locks[conv.id].agentName}`}
+                            >
+                              🔒 {locks[conv.id].agentName?.split(" ")[0]}
+                            </span>
+                          )}
                           <select
                             value={cls}
                             onClick={(e) => e.stopPropagation()}
@@ -944,25 +981,42 @@ const Inbox = () => {
                 </div>
 
                 {/* Reply Box */}
-                <div style={styles.replyBox}>
-                  <input
-                    type="text"
-                    className="inbox-reply-field"
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    placeholder="Type a message…"
-                    style={styles.replyInput}
-                    onKeyPress={(e) => e.key === "Enter" && sendReply()}
-                  />
-                  <button
-                    className="inbox-send-action"
-                    onClick={sendReply}
-                    disabled={sending || !replyText.trim()}
-                    style={styles.sendBtn}
-                  >
-                    {sending ? "···" : "➤"}
-                  </button>
-                </div>
+                {(() => {
+                  const lock = locks[selectedConv?.id];
+                  const isLockedToOther =
+                    lock &&
+                    lock.agentId !== user?._id &&
+                    user?.role !== "admin";
+                  if (isLockedToOther) {
+                    return (
+                      <div style={styles.lockBanner}>
+                        🔒 This conversation is assigned to{" "}
+                        <strong>{lock.agentName}</strong>. Only they can reply.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div style={styles.replyBox}>
+                      <input
+                        type="text"
+                        className="inbox-reply-field"
+                        value={replyText}
+                        onChange={(e) => setReplyText(e.target.value)}
+                        placeholder="Type a message…"
+                        style={styles.replyInput}
+                        onKeyPress={(e) => e.key === "Enter" && sendReply()}
+                      />
+                      <button
+                        className="inbox-send-action"
+                        onClick={sendReply}
+                        disabled={sending || !replyText.trim()}
+                        style={styles.sendBtn}
+                      >
+                        {sending ? "···" : "➤"}
+                      </button>
+                    </div>
+                  );
+                })()}
               </>
             ) : (
               <div style={styles.noConv}>
@@ -1417,6 +1471,29 @@ const styles = {
     fontWeight: 700,
     marginLeft: "5px",
     padding: "0 4px",
+  },
+  lockBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "10px",
+    fontWeight: 600,
+    color: "var(--accent)",
+    backgroundColor: "var(--accent)11",
+    border: "1px solid var(--accent)33",
+    borderRadius: "6px",
+    padding: "1px 7px",
+    marginLeft: "6px",
+    whiteSpace: "nowrap",
+  },
+  lockBanner: {
+    padding: "14px 20px",
+    backgroundColor: "var(--bg-hover)",
+    borderTop: "1px solid var(--border-primary)",
+    color: "var(--text-faint)",
+    fontSize: "13px",
+    textAlign: "center",
+    fontFamily: "'Hanken Grotesk', sans-serif",
   },
 };
 
