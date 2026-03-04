@@ -23,15 +23,26 @@ router.get("/conversations", protect, async (req, res) => {
     console.log("Fetching Facebook conversations for Page:", pageId);
 
     // Fetch conversations from the Page
-    const convRes = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
-      params: {
-        fields:
-          "participants,messages{message,from,to,created_time,attachments}",
-        access_token: accessToken,
-      },
-    });
-
-    const conversations = convRes.data.data || [];
+    // Paginate to get all conversations (new ones may not be on the first page)
+    let conversations = [];
+    let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
+    let params = {
+      fields: "participants,messages{message,from,to,created_time,attachments}",
+      limit: 60,
+      access_token: accessToken,
+    };
+    const maxPages = 3;
+    for (let page = 0; page < maxPages; page++) {
+      const convRes =
+        page === 0
+          ? await axios.get(nextUrl, { params })
+          : await axios.get(nextUrl);
+      const pageData = convRes.data.data || [];
+      conversations = conversations.concat(pageData);
+      nextUrl = convRes.data.paging?.next;
+      if (!nextUrl || pageData.length === 0) break;
+    }
+    console.log(`Facebook API returned ${conversations.length} conversations`);
 
     // Format conversations
     const formatted = conversations.map((conv) => {
@@ -95,29 +106,33 @@ router.get("/conversations", protect, async (req, res) => {
 
     // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
     try {
-      const allParticipantIds = new Set();
-      formatted.forEach((c) =>
-        c.participants.forEach((p) => allParticipantIds.add(p.id)),
-      );
+      const knownIds = new Set();
+      formatted.forEach((c) => {
+        knownIds.add(c.id);
+        c.participants.forEach((p) => knownIds.add(p.id));
+      });
 
       const recentDbMsgs = await Message.find({
         platform: "facebook",
         direction: "incoming",
-        createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-      }).sort({ timestamp: -1 });
+      })
+        .sort({ timestamp: -1 })
+        .limit(200);
 
       const newConvMap = {};
       for (const m of recentDbMsgs) {
-        if (allParticipantIds.has(m.senderId)) continue;
-        if (!newConvMap[m.senderId]) {
-          newConvMap[m.senderId] = {
-            id: m.conversationId || m.senderId,
+        if (knownIds.has(m.senderId) || knownIds.has(m.conversationId))
+          continue;
+        const key = m.conversationId || m.senderId;
+        if (!newConvMap[key]) {
+          newConvMap[key] = {
+            id: key,
             participants: [{ id: m.senderId, name: m.senderName || "Unknown" }],
             lastMessage: null,
             messages: [],
           };
         }
-        const conv = newConvMap[m.senderId];
+        const conv = newConvMap[key];
         const msg = {
           id: m.externalId || m._id.toString(),
           text: m.content || "",

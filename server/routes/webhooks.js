@@ -14,7 +14,8 @@ async function getSenderName(senderId, platform) {
         ? process.env.FACEBOOK_PAGE_ACCESS_TOKEN
         : process.env.INSTAGRAM_ACCESS_TOKEN;
     if (!token) return senderId;
-    const fields = platform === "instagram" ? "username,name" : "first_name,last_name,name";
+    const fields =
+      platform === "instagram" ? "username,name" : "first_name,last_name,name";
     const res = await axios.get(`${GRAPH_API}/${senderId}`, {
       params: { fields, access_token: token },
     });
@@ -167,7 +168,10 @@ router.post("/instagram", async (req, res) => {
         for (const event of messaging) {
           if (event.message) {
             // Look up Instagram sender name
-            const igSenderName = await getSenderName(event.sender.id, "instagram");
+            const igSenderName = await getSenderName(
+              event.sender.id,
+              "instagram",
+            );
 
             const newMessage = await Message.create({
               platform: "instagram",
@@ -191,12 +195,13 @@ router.post("/instagram", async (req, res) => {
                 message: {
                   id: event.message.mid,
                   text: event.message.text || "",
-                  from: event.sender.id,
+                  from: igSenderName,
                   fromId: event.sender.id,
                   time: new Date().toISOString(),
                 },
                 conversationId: event.sender.id,
                 senderId: event.sender.id,
+                senderName: igSenderName,
               });
             }
           }
