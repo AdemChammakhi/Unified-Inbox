@@ -8,7 +8,7 @@ const classificationSchema = new mongoose.Schema(
     },
     platform: {
       type: String,
-      enum: ["instagram", "facebook", "whatsapp", "messenger"],
+      enum: ["instagram", "facebook", "whatsapp", "messenger", "email"],
       required: true,
     },
     classification: {
