@@ -66,12 +66,19 @@ const Inbox = () => {
 
   // Connect to Socket.IO — ONCE, not on every tab change
   useEffect(() => {
-    const socketUrl = process.env.REACT_APP_API_URL || "http://localhost:5000";
+    // In dev (port 3000), connect to the API server on port 5000
+    // In production, the client is served from the same server — use page origin
+    const socketUrl =
+      process.env.REACT_APP_API_URL ||
+      (window.location.port === "3000"
+        ? "http://localhost:5000"
+        : window.location.origin);
     const socket = io(socketUrl, {
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionDelay: 1000,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: Infinity,
+      timeout: 10000,
     });
     socketRef.current = socket;
 
@@ -86,6 +93,10 @@ const Inbox = () => {
     socket.on("disconnect", () => {
       console.log("Socket disconnected");
       setConnectionStatus("disconnected");
+    });
+
+    socket.on("connect_error", (err) => {
+      console.error("Socket connection error:", err.message);
     });
 
     socket.on("reconnect", () => {
@@ -103,6 +114,19 @@ const Inbox = () => {
       if (platform === currentTab) {
         // Always refetch conversations to get the latest data from the API
         if (fetchQuietRef.current) fetchQuietRef.current();
+
+        // If the conversation isn't in the current list, retry after a delay
+        // (Graph API can take a few seconds to return brand-new conversations)
+        const convs = conversationsRef.current;
+        const isKnown = convs.some(
+          (c) =>
+            c.id === data.conversationId ||
+            c.participants?.some((p) => p.id === data.senderId),
+        );
+        if (!isKnown && fetchQuietRef.current) {
+          setTimeout(() => fetchQuietRef.current(), 3000);
+          setTimeout(() => fetchQuietRef.current(), 8000);
+        }
 
         // Also try to append the message inline to the selected conversation
         if (currentConv) {

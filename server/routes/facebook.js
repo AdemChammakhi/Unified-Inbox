@@ -93,12 +93,108 @@ router.get("/conversations", protect, async (req, res) => {
       };
     });
 
+    // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
+    try {
+      const allParticipantIds = new Set();
+      formatted.forEach((c) =>
+        c.participants.forEach((p) => allParticipantIds.add(p.id)),
+      );
+
+      const recentDbMsgs = await Message.find({
+        platform: "facebook",
+        direction: "incoming",
+        createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      }).sort({ timestamp: -1 });
+
+      const newConvMap = {};
+      for (const m of recentDbMsgs) {
+        if (allParticipantIds.has(m.senderId)) continue;
+        if (!newConvMap[m.senderId]) {
+          newConvMap[m.senderId] = {
+            id: m.conversationId || m.senderId,
+            participants: [{ id: m.senderId, name: m.senderName || "Unknown" }],
+            lastMessage: null,
+            messages: [],
+          };
+        }
+        const conv = newConvMap[m.senderId];
+        const msg = {
+          id: m.externalId || m._id.toString(),
+          text: m.content || "",
+          from: m.senderName || "Unknown",
+          fromId: m.senderId,
+          time: m.timestamp || m.createdAt,
+        };
+        conv.messages.push(msg);
+        if (
+          !conv.lastMessage ||
+          new Date(msg.time) > new Date(conv.lastMessage.time)
+        ) {
+          conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
+        }
+      }
+
+      const dbOnlyConvs = Object.values(newConvMap);
+      if (dbOnlyConvs.length > 0) {
+        console.log(
+          `Merging ${dbOnlyConvs.length} DB-only Facebook conversation(s)`,
+        );
+        formatted.unshift(...dbOnlyConvs);
+      }
+    } catch (mergeErr) {
+      console.error("DB merge non-fatal error:", mergeErr.message);
+    }
+
     return res.json({ conversations: formatted });
   } catch (error) {
     console.error(
       "Facebook API error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
+
+    // If the Graph API fails, fall back to conversations built from the local DB
+    try {
+      const dbMessages = await Message.find({ platform: "facebook" })
+        .sort({ timestamp: -1 })
+        .limit(500);
+
+      const convMap = {};
+      for (const m of dbMessages) {
+        if (!convMap[m.conversationId]) {
+          convMap[m.conversationId] = {
+            id: m.conversationId,
+            participants: [
+              {
+                id: m.direction === "incoming" ? m.senderId : m.recipientId,
+                name: m.direction === "incoming" ? m.senderName : m.recipientId,
+              },
+            ],
+            lastMessage: null,
+            messages: [],
+          };
+        }
+        const conv = convMap[m.conversationId];
+        const msg = {
+          id: m.externalId || m._id.toString(),
+          text: m.content || "",
+          from: m.senderName || "Unknown",
+          fromId: m.senderId,
+          time: m.timestamp || m.createdAt,
+        };
+        conv.messages.push(msg);
+        if (
+          !conv.lastMessage ||
+          new Date(msg.time) > new Date(conv.lastMessage.time)
+        ) {
+          conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
+        }
+      }
+
+      return res.json({ conversations: Object.values(convMap) });
+    } catch (dbErr) {
+      console.error("DB fallback also failed:", dbErr.message);
+    }
+
     return res.status(500).json({
       message: "Failed to fetch Facebook conversations",
       error: error.response?.data?.error?.message || error.message,
