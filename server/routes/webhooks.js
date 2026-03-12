@@ -26,13 +26,28 @@ router.get("/debug", protect, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(20)
       .select(
-        "platform conversationId senderId senderName direction content createdAt",
+        "platform conversationId senderId senderName direction content createdAt externalId",
       );
+
+    // Count messages per platform
+    const igCount = await Message.countDocuments({ platform: "instagram" });
+    const fbCount = await Message.countDocuments({ platform: "facebook" });
+    const igIncoming = await Message.countDocuments({
+      platform: "instagram",
+      direction: "incoming",
+    });
+
     return res.json({
       webhookHits: webhookLog,
+      messageCounts: {
+        instagram: igCount,
+        instagramIncoming: igIncoming,
+        facebook: fbCount,
+      },
       recentMessages,
       envCheck: {
         INSTAGRAM_ACCESS_TOKEN: !!process.env.INSTAGRAM_ACCESS_TOKEN,
+        INSTAGRAM_ACCOUNT_ID: !!process.env.INSTAGRAM_ACCOUNT_ID,
         FACEBOOK_PAGE_ACCESS_TOKEN: !!process.env.FACEBOOK_PAGE_ACCESS_TOKEN,
         FACEBOOK_PAGE_ID: !!process.env.FACEBOOK_PAGE_ID,
         FACEBOOK_APP_SECRET: !!process.env.FACEBOOK_APP_SECRET,
@@ -48,7 +63,7 @@ router.get("/debug", protect, async (req, res) => {
   }
 });
 
-// Helper: look up a user's name/username from the Graph API
+// Helper: look up a user's name/username from the Graph API (with timeout)
 async function getSenderName(senderId, platform) {
   try {
     const token =
@@ -60,6 +75,7 @@ async function getSenderName(senderId, platform) {
       platform === "instagram" ? "username,name" : "first_name,last_name,name";
     const res = await axios.get(`${GRAPH_API}/${senderId}`, {
       params: { fields, access_token: token },
+      timeout: 5000, // 5s timeout so webhook doesn't hang
     });
     return (
       res.data.username ||
@@ -70,6 +86,28 @@ async function getSenderName(senderId, platform) {
   } catch {
     return senderId;
   }
+}
+
+// Helper: extract messaging events from an Instagram webhook entry.
+// Instagram can deliver events in TWO formats:
+//   1) entry.messaging  — array of {sender, recipient, message, ...}
+//   2) entry.changes    — array of {field:"messages", value:{sender, recipient, message, ...}}
+function extractInstagramEvents(entry) {
+  const events = [];
+  // Format 1: entry.messaging
+  if (Array.isArray(entry.messaging) && entry.messaging.length > 0) {
+    events.push(...entry.messaging);
+  }
+  // Format 2: entry.changes (field=messages wraps a single messaging event)
+  if (Array.isArray(entry.changes)) {
+    for (const change of entry.changes) {
+      if (change.field === "messages" && change.value) {
+        // The value object follows the same shape as a single messaging event
+        events.push(change.value);
+      }
+    }
+  }
+  return events;
 }
 
 // Verify webhook signature from Meta
@@ -200,39 +238,74 @@ router.get("/instagram", (req, res) => {
 
 // POST - Receive Instagram messages
 router.post("/instagram", async (req, res) => {
+  const body = req.body;
   logWebhook(
     "instagram",
     "POST",
-    `object=${req.body?.object}, entries=${req.body?.entry?.length}`,
+    `object=${body?.object}, entries=${body?.entry?.length}, keys=${body?.entry?.map((e) => Object.keys(e).join("/")).join("; ")}`,
+  );
+  // Log the full payload structure for debugging (first 2000 chars)
+  console.log(
+    "=== INSTAGRAM WEBHOOK RAW ===",
+    JSON.stringify(body, null, 2).slice(0, 2000),
   );
   try {
-    const body = req.body;
     const io = req.app.get("io");
 
-    if (body.object === "instagram") {
-      for (const entry of body.entry) {
-        const messaging = entry.messaging || [];
+    if (body.object === "instagram" || body.object === "page") {
+      for (const entry of body.entry || []) {
+        // Extract events from BOTH entry.messaging and entry.changes formats
+        const events = extractInstagramEvents(entry);
+        console.log(
+          `Instagram webhook entry: ${events.length} event(s) extracted (messaging=${entry.messaging?.length || 0}, changes=${entry.changes?.length || 0})`,
+        );
 
-        for (const event of messaging) {
+        for (const event of events) {
+          const senderId = event.sender?.id;
+          const recipientId = event.recipient?.id;
+
+          // Skip messages sent by the page itself
+          if (
+            senderId === process.env.FACEBOOK_PAGE_ID ||
+            senderId === process.env.INSTAGRAM_ACCOUNT_ID
+          ) {
+            console.log("Skipping IG echo (sent by page):", senderId);
+            continue;
+          }
+
           if (event.message) {
-            // Look up Instagram sender name
-            const igSenderName = await getSenderName(
-              event.sender.id,
-              "instagram",
+            const msgText = event.message.text || "";
+            const msgMid = event.message.mid;
+
+            console.log(
+              `Instagram incoming msg from ${senderId}: "${msgText.slice(0, 80)}" mid=${msgMid}`,
             );
 
-            const newMessage = await Message.create({
-              platform: "instagram",
-              conversationId: event.sender.id,
-              senderId: event.sender.id,
-              senderName: igSenderName,
-              recipientId: event.recipient.id,
-              content: event.message.text || "",
-              messageType: event.message.attachments ? "attachment" : "text",
-              direction: "incoming",
-              status: "delivered",
-              externalId: event.message.mid,
-            });
+            // Look up Instagram sender name (with timeout)
+            const igSenderName = await getSenderName(senderId, "instagram");
+
+            // Upsert to DB (avoids duplicate errors if webhook fires twice)
+            const newMessage = await Message.findOneAndUpdate(
+              { externalId: msgMid },
+              {
+                $setOnInsert: {
+                  platform: "instagram",
+                  conversationId: senderId,
+                  senderId: senderId,
+                  senderName: igSenderName,
+                  recipientId: recipientId,
+                  content: msgText,
+                  messageType: event.message.attachments
+                    ? "attachment"
+                    : "text",
+                  direction: "incoming",
+                  status: "delivered",
+                  externalId: msgMid,
+                  timestamp: new Date(),
+                },
+              },
+              { upsert: true, new: true },
+            );
 
             console.log("Instagram message saved:", newMessage._id);
 
@@ -241,14 +314,14 @@ router.post("/instagram", async (req, res) => {
               io.emit("newMessage", {
                 platform: "instagram",
                 message: {
-                  id: event.message.mid,
-                  text: event.message.text || "",
+                  id: msgMid,
+                  text: msgText,
                   from: igSenderName,
-                  fromId: event.sender.id,
+                  fromId: senderId,
                   time: new Date().toISOString(),
                 },
-                conversationId: event.sender.id,
-                senderId: event.sender.id,
+                conversationId: senderId,
+                senderId: senderId,
                 senderName: igSenderName,
               });
             }
@@ -312,44 +385,66 @@ router.post("/facebook", async (req, res) => {
           // Skip messages sent by the page itself
           if (senderId === process.env.FACEBOOK_PAGE_ID) continue;
 
+          // Detect Instagram messages arriving via Page subscription
+          // (happens if IG messaging events are routed through the Page webhook)
+          const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+          const isInstagramMsg = igAccountId && recipientId === igAccountId;
+          const detectedPlatform = isInstagramMsg ? "instagram" : "facebook";
+          if (isInstagramMsg) {
+            console.log(
+              "INFO: Instagram message detected in Facebook webhook route, saving as instagram platform",
+            );
+          }
+
           // Handle incoming messages
           if (event.message) {
             const message = event.message;
             console.log(
-              `New Facebook message from ${senderId}: ${message.text}`,
+              `New ${detectedPlatform} message from ${senderId}: ${message.text}`,
             );
 
-            // Look up Facebook sender name
-            const fbSenderName = await getSenderName(senderId, "facebook");
+            // Look up sender name
+            const fbSenderName = await getSenderName(
+              senderId,
+              detectedPlatform,
+            );
 
-            const newMessage = await Message.create({
-              platform: "facebook",
-              conversationId: senderId,
-              senderId: senderId,
-              senderName: fbSenderName,
-              recipientId: recipientId,
-              content: message.text || "",
-              messageType: message.attachments ? "attachment" : "text",
-              direction: "incoming",
-              status: "delivered",
-              externalId: message.mid,
-            });
+            const newMessage = await Message.findOneAndUpdate(
+              { externalId: message.mid },
+              {
+                $setOnInsert: {
+                  platform: detectedPlatform,
+                  conversationId: senderId,
+                  senderId: senderId,
+                  senderName: fbSenderName,
+                  recipientId: recipientId,
+                  content: message.text || "",
+                  messageType: message.attachments ? "attachment" : "text",
+                  direction: "incoming",
+                  status: "delivered",
+                  externalId: message.mid,
+                  timestamp: new Date(),
+                },
+              },
+              { upsert: true, new: true },
+            );
 
-            console.log("Facebook message saved:", newMessage._id);
+            console.log(`${detectedPlatform} message saved:`, newMessage._id);
 
             // Emit real-time event with formatted data for instant UI update
             if (io) {
               io.emit("newMessage", {
-                platform: "facebook",
+                platform: detectedPlatform,
                 message: {
                   id: message.mid,
                   text: message.text || "",
-                  from: senderId,
+                  from: fbSenderName,
                   fromId: senderId,
                   time: new Date().toISOString(),
                 },
                 conversationId: senderId,
                 senderId: senderId,
+                senderName: fbSenderName,
               });
             }
           }

@@ -112,20 +112,55 @@ const Inbox = () => {
       const currentConv = selectedConvRef.current;
 
       if (platform === currentTab) {
-        // Always refetch conversations to get the latest data from the API
-        if (fetchQuietRef.current) fetchQuietRef.current();
-
-        // If the conversation isn't in the current list, retry after a delay
-        // (Graph API can take a few seconds to return brand-new conversations)
+        // Check if this conversation already exists in the list
         const convs = conversationsRef.current;
         const isKnown = convs.some(
           (c) =>
             c.id === data.conversationId ||
             c.participants?.some((p) => p.id === data.senderId),
         );
+
+        if (!isKnown) {
+          // IMMEDIATELY add a temporary conversation so the new person appears instantly
+          // instead of waiting for the Graph API (which can be delayed)
+          const tempConv = {
+            id: data.conversationId || data.senderId,
+            participants: [
+              {
+                id: data.senderId,
+                name: data.senderName || message.from || "New User",
+              },
+            ],
+            lastMessage: {
+              text: message.text,
+              from: data.senderName || message.from || "New User",
+              time: message.time,
+            },
+            messages: [
+              {
+                id: message.id,
+                text: message.text,
+                from: data.senderName || message.from || "New User",
+                fromId: message.fromId || data.senderId,
+                time: message.time,
+              },
+            ],
+            _fromSocket: true,
+          };
+          setConversations((prev) => [tempConv, ...prev]);
+          console.log(
+            "Added temp conversation from socket for new sender:",
+            data.senderId,
+          );
+        }
+
+        // Also refetch to get full data from API + DB merge
+        if (fetchQuietRef.current) fetchQuietRef.current();
+
+        // If still not found after refetch, retry with delays
         if (!isKnown && fetchQuietRef.current) {
-          setTimeout(() => fetchQuietRef.current(), 3000);
-          setTimeout(() => fetchQuietRef.current(), 8000);
+          setTimeout(() => fetchQuietRef.current(), 4000);
+          setTimeout(() => fetchQuietRef.current(), 10000);
         }
 
         // Also try to append the message inline to the selected conversation
@@ -157,6 +192,38 @@ const Inbox = () => {
               };
             });
           }
+        }
+
+        // If the message belongs to a known conversation, update it inline
+        if (isKnown) {
+          setConversations((prev) =>
+            prev.map((c) => {
+              const matches =
+                c.id === data.conversationId ||
+                c.participants?.some((p) => p.id === data.senderId);
+              if (!matches) return c;
+              const exists = c.messages?.some((m) => m.id === message.id);
+              if (exists) return c;
+              return {
+                ...c,
+                lastMessage: {
+                  text: message.text,
+                  from: message.from,
+                  time: message.time,
+                },
+                messages: [
+                  ...(c.messages || []),
+                  {
+                    id: message.id,
+                    text: message.text,
+                    from: message.from,
+                    fromId: message.fromId,
+                    time: message.time,
+                  },
+                ],
+              };
+            }),
+          );
         }
       } else {
         // Message is for a different platform tab — show unread badge

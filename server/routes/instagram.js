@@ -43,6 +43,12 @@ router.get("/conversations", protect, async (req, res) => {
       if (!nextUrl || pageData.length === 0) break;
     }
     console.log(`Instagram API returned ${conversations.length} conversations`);
+    if (conversations.length > 0) {
+      console.log(
+        "First 5 conv IDs:",
+        conversations.slice(0, 5).map((c) => c.id),
+      );
+    }
 
     // Format conversations
     const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -130,20 +136,30 @@ router.get("/conversations", protect, async (req, res) => {
         knownIds.add(c.id);
         c.participants.forEach((p) => knownIds.add(p.id));
       });
+      console.log(
+        `Instagram merge: ${formatted.length} API conversations, knownIds count=${knownIds.size}`,
+      );
 
-      // Get recent incoming messages from DB for this platform
+      // Get recent messages from DB for this platform (both incoming AND outgoing)
+      // so webhook-delivered conversations always surface even if the Graph API is stale
       const recentDbMsgs = await Message.find({
         platform: "instagram",
-        direction: "incoming",
       })
-        .sort({ timestamp: -1 })
-        .limit(200);
+        .sort({ createdAt: -1 })
+        .limit(500);
+
+      console.log(
+        `Instagram merge: ${recentDbMsgs.length} recent DB messages found`,
+      );
 
       // Group by conversationId, only keep those not already in API results
       const newConvMap = {};
+      let skippedKnown = 0;
       for (const m of recentDbMsgs) {
-        if (knownIds.has(m.senderId) || knownIds.has(m.conversationId))
+        if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) {
+          skippedKnown++;
           continue;
+        }
         const key = m.conversationId || m.senderId;
         if (!newConvMap[key]) {
           newConvMap[key] = {
@@ -151,6 +167,7 @@ router.get("/conversations", protect, async (req, res) => {
             participants: [{ id: m.senderId, name: m.senderName || "Unknown" }],
             lastMessage: null,
             messages: [],
+            _fromDb: true,
           };
         }
         const conv = newConvMap[key];
@@ -160,6 +177,7 @@ router.get("/conversations", protect, async (req, res) => {
           from: m.senderName || "Unknown",
           fromId: m.senderId,
           time: m.timestamp || m.createdAt,
+          direction: m.direction,
         };
         conv.messages.push(msg);
         if (
@@ -171,9 +189,12 @@ router.get("/conversations", protect, async (req, res) => {
       }
 
       const dbOnlyConvs = Object.values(newConvMap);
+      console.log(
+        `Instagram merge: ${skippedKnown} msgs matched known API convos, ${dbOnlyConvs.length} DB-only conversation(s) to add`,
+      );
       if (dbOnlyConvs.length > 0) {
         console.log(
-          `Merging ${dbOnlyConvs.length} DB-only Instagram conversation(s):`,
+          "DB-only convos:",
           dbOnlyConvs.map((c) => ({
             id: c.id,
             name: c.participants[0]?.name,
