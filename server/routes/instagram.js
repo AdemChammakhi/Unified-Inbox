@@ -21,32 +21,88 @@ router.get("/conversations", protect, async (req, res) => {
 
     console.log("Using Facebook Page ID:", pageId);
 
-    // Fetch conversations using the Facebook Page ID (not Instagram Account ID)
-    // Paginate to get all conversations (new ones may not be on the first page)
+    // Fetch conversations using the Facebook Page ID
+    // Fetch from BOTH "inbox" and "other" (message requests) folders
+    // so that DMs from people you don't follow are also included
+    const conversationFields =
+      "participants,messages{message,from,to,created_time,attachments}";
     let conversations = [];
-    let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
-    let params = {
-      platform: "instagram",
-      fields: "participants,messages{message,from,to,created_time,attachments}",
-      limit: 60,
-      access_token: accessToken,
-    };
-    const maxPages = 3; // fetch up to 3 pages (180 conversations max)
-    for (let page = 0; page < maxPages; page++) {
-      const convRes =
-        page === 0
-          ? await axios.get(nextUrl, { params })
-          : await axios.get(nextUrl);
-      const pageData = convRes.data.data || [];
-      conversations = conversations.concat(pageData);
-      nextUrl = convRes.data.paging?.next;
-      if (!nextUrl || pageData.length === 0) break;
+    const seenConvIds = new Set();
+    const folders = ["inbox", "other"]; // "other" = message requests
+
+    for (const folder of folders) {
+      let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
+      let params = {
+        platform: "instagram",
+        folder,
+        fields: conversationFields,
+        limit: 60,
+        access_token: accessToken,
+      };
+      const maxPages = 3;
+      for (let page = 0; page < maxPages; page++) {
+        try {
+          const convRes =
+            page === 0
+              ? await axios.get(nextUrl, { params })
+              : await axios.get(nextUrl);
+          const pageData = convRes.data.data || [];
+          for (const conv of pageData) {
+            if (!seenConvIds.has(conv.id)) {
+              seenConvIds.add(conv.id);
+              conversations.push(conv);
+            }
+          }
+          nextUrl = convRes.data.paging?.next;
+          if (!nextUrl || pageData.length === 0) break;
+        } catch (folderErr) {
+          console.error(
+            `Instagram folder=${folder} page=${page} error:`,
+            folderErr.response?.data?.error?.message || folderErr.message,
+          );
+          break;
+        }
+      }
     }
-    console.log(`Instagram API returned ${conversations.length} conversations`);
+
+    // ALSO fetch conversations WITHOUT the platform filter —
+    // some Instagram DMs appear here when they don't show with platform=instagram
+    try {
+      let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
+      let params = {
+        fields: conversationFields,
+        limit: 60,
+        access_token: accessToken,
+      };
+      const convRes = await axios.get(nextUrl, { params });
+      const pageData = convRes.data.data || [];
+      for (const conv of pageData) {
+        // Only include if it looks like an Instagram conversation
+        // (participant has username field or participant ID matches IG account)
+        const participants = conv.participants?.data || [];
+        const isIg = participants.some(
+          (p) => p.username || p.id === process.env.INSTAGRAM_ACCOUNT_ID,
+        );
+        if (isIg && !seenConvIds.has(conv.id)) {
+          seenConvIds.add(conv.id);
+          conversations.push(conv);
+          console.log(`Found IG conversation from unfiltered API: ${conv.id}`);
+        }
+      }
+    } catch (unfilteredErr) {
+      console.error(
+        "Unfiltered conversations fetch error (non-fatal):",
+        unfilteredErr.response?.data?.error?.message || unfilteredErr.message,
+      );
+    }
+
+    console.log(
+      `Instagram API returned ${conversations.length} conversations total`,
+    );
     if (conversations.length > 0) {
       console.log(
-        "First 5 conv IDs:",
-        conversations.slice(0, 5).map((c) => c.id),
+        "Conv IDs:",
+        conversations.map((c) => c.id),
       );
     }
 

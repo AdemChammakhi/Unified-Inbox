@@ -541,6 +541,7 @@ const Inbox = () => {
       .inbox-email-render img { max-width: 100% !important; height: auto !important; }
       .inbox-email-render a { color: var(--accent) !important; }
       .inbox-email-render * { max-width: 100% !important; }
+      .inbox-delete-btn:hover { background: var(--danger, #E06C6C) !important; color: #fff !important; border-color: var(--danger, #E06C6C) !important; }
     `;
     document.head.appendChild(style);
     return () => {
@@ -901,6 +902,44 @@ const Inbox = () => {
                     <span style={styles.platformTag}>
                       {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
                     </span>
+                    {(user?.role === "admin" || user?.role === "manager") && (
+                      <button
+                        className="inbox-delete-btn"
+                        style={styles.deleteConvBtn}
+                        title="Delete this conversation"
+                        onClick={async () => {
+                          if (
+                            !window.confirm(
+                              `Delete this conversation and all its messages? This cannot be undone.`,
+                            )
+                          )
+                            return;
+                          try {
+                            await axios.delete("/api/conversations", {
+                              headers: {
+                                Authorization: `Bearer ${user?.token}`,
+                              },
+                              data: {
+                                conversationId: selectedConv.id,
+                                platform: activeTab,
+                              },
+                            });
+                            setConversations((prev) =>
+                              prev.filter((c) => c.id !== selectedConv.id),
+                            );
+                            setSelectedConv(null);
+                          } catch (err) {
+                            console.error("Delete failed:", err);
+                            alert(
+                              err.response?.data?.message ||
+                                "Failed to delete conversation",
+                            );
+                          }
+                        }}
+                      >
+                        🗑
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1585,6 +1624,22 @@ const styles = {
     fontSize: "13px",
     textAlign: "center",
     fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  deleteConvBtn: {
+    marginLeft: "auto",
+    border: "1px solid var(--border-primary)",
+    borderRadius: "7px",
+    background: "transparent",
+    color: "var(--text-faint)",
+    cursor: "pointer",
+    fontSize: "14px",
+    width: "32px",
+    height: "32px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    transition: "all 0.2s ease",
+    flexShrink: 0,
   },
 };
 
