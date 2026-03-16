@@ -56,9 +56,14 @@ app.use("/api/classifications", require("./routes/classifications"));
 app.use("/api/locks", require("./routes/locks"));
 app.use("/api/conversations", require("./routes/conversations"));
 
-// Serve React client build (for production / Render deployment)
+// Avoid serving a stale client build during local dev runs.
+const isLocalDevRun =
+  process.env.NODE_ENV === "development" ||
+  process.env.npm_lifecycle_event === "server:dev";
+
+// Serve React client build for non-dev runs (production-like behavior).
 const clientBuildPath = path.join(__dirname, "../client/build");
-if (fs.existsSync(clientBuildPath)) {
+if (!isLocalDevRun && fs.existsSync(clientBuildPath)) {
   app.use(express.static(clientBuildPath));
 
   // Catch-all: any non-API route serves index.html so React Router handles it

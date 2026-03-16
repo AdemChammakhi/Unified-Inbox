@@ -1,2 +1,16 @@
-node_modules
+node_modules/
+client/node_modules/
+
+# Local environment files
 .env
+.env.local
+.env.*.local
+
+# Build artifacts
+client/build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useNavigate, Link, Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { useTheme } from "../context/ThemeContext";
 
 const Login = () => {
   const [email, setEmail] = useState("");
@@ -8,6 +9,7 @@ const Login = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const { login, user, loading: authLoading } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
   // If user is already logged in, redirect to their dashboard
@@ -29,53 +31,73 @@ const Login = () => {
   };
 
   return (
-    <div className="auth-page">
-      <div className="auth-card">
-        <div className="brand">
-          <span>Unified Inbox</span>
+    <div className="auth-page auth-shell">
+      <button
+        className="theme-toggle auth-theme-toggle"
+        onClick={toggleTheme}
+        title={
+          theme === "dark" ? "Switch to light mode" : "Switch to dark mode"
+        }
+      >
+        {theme === "dark" ? "☀️" : "🌙"}
+      </button>
+
+      <div className="auth-portal">
+        <div className="auth-visual">
+          <img
+            src="/logo.png"
+            alt="Unified Inbox"
+            className="auth-visual-image"
+            width="255"
+            height="255"
+          />
+          <h2>Unified Inbox</h2>
+          <p>Your entire social inbox, organized with clarity and speed.</p>
         </div>
-        <h1>Welcome Back</h1>
-        <p className="subtitle">Sign in to your communication hub</p>
 
-        {error && <div className="error-msg">{error}</div>}
-
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@company.com"
-              required
-            />
+        <div className="auth-card auth-form-panel">
+          <div className="brand">
+            <span>Unified Inbox</span>
           </div>
-          <div className="form-group">
-            <label>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter your password"
-              required
-            />
+          <h1>Welcome Back</h1>
+          <p className="subtitle">Sign in to your communication hub</p>
+
+          {error && <div className="error-msg">{error}</div>}
+
+          <form onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label>Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@company.com"
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label>Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter your password"
+                required
+              />
+            </div>
+            <button type="submit" className="btn-primary" disabled={loading}>
+              {loading ? "Signing in..." : "Sign In"}
+            </button>
+          </form>
+
+          <p className="auth-link">
+            Don't have an account? <Link to="/signup">Create one</Link>
+          </p>
+
+          <div className="auth-footer-links">
+            <Link to="/terms">Terms of Service</Link>
+            <Link to="/privacy">Privacy Policy</Link>
           </div>
-          <button type="submit" className="btn-primary" disabled={loading}>
-            {loading ? "Signing in..." : "Sign In"}
-          </button>
-        </form>
-
-        <p className="auth-link">
-          Don't have an account? <Link to="/signup">Create one</Link>
-        </p>
-
-        <div style={{ marginTop: 20, fontSize: 12, textAlign: "center" }}>
-          <Link to="/terms" style={{ color: "#666", marginRight: 15 }}>
-            Terms of Service
-          </Link>
-          <Link to="/privacy" style={{ color: "#666" }}>
-            Privacy Policy
-          </Link>
         </div>
       </div>
     </div>
