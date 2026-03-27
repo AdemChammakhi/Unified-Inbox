@@ -66,13 +66,19 @@ const Inbox = () => {
 
   // Connect to Socket.IO — ONCE, not on every tab change
   useEffect(() => {
-    // In dev (port 3000), connect to the API server on port 5000
-    // In production, the client is served from the same server — use page origin
-    const socketUrl =
-      process.env.REACT_APP_API_URL ||
-      (window.location.port === "3000"
-        ? "http://localhost:5000"
-        : window.location.origin);
+    // In dev, allow an explicit API URL or fallback to local API.
+    // In production, always use same-origin so reverse proxy routes /socket.io.
+    const isDev = process.env.NODE_ENV === "development";
+    const configuredApiUrl = process.env.REACT_APP_API_URL;
+    const hasLocalhostOverride = /localhost|127\.0\.0\.1/i.test(
+      configuredApiUrl || "",
+    );
+    const socketUrl = isDev
+      ? configuredApiUrl || "http://localhost:5000"
+      : hasLocalhostOverride
+        ? window.location.origin
+        : configuredApiUrl || window.location.origin;
+
     const socket = io(socketUrl, {
       transports: ["websocket", "polling"],
       reconnection: true,
