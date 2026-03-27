@@ -1,0 +1,24 @@
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - main # runs every time you push to main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_KEY }}
+          script: |
+            cd ~/Unified-Inbox
+            git pull origin main
+            docker compose down
+            docker compose up -d --build
+            docker ps
