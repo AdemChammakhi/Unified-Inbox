@@ -17,6 +17,9 @@ spec:
         image: ademxd/projetpfe-backend:latest
         ports:
         - containerPort: 5000
+        env:
+        - name: MONGO_URI
+          value: "mongodb+srv://ademchammekhi_db_user:u9fKmUyITMOCEsdP@unifiedinbox.wmh7vfi.mongodb.net/?appName=UnifiedInbox"
         resources:
           requests:
             memory: "256Mi"
