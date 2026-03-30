@@ -13,20 +13,20 @@ spec:
         app: backend
     spec:
       containers:
-      - name: backend
-        image: ademxd/projetpfe-backend:latest
-        ports:
-        - containerPort: 5000
-        env:
-        - name: MONGO_URI
-          value: "mongodb+srv://ademchammekhi_db_user:u9fKmUyITMOCEsdP@unifiedinbox.wmh7vfi.mongodb.net/?appName=UnifiedInbox"
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
+        - name: backend
+          image: ademxd/projetpfe-backend:latest
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: backend-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
 ---
 apiVersion: v1
 kind: Service
@@ -36,7 +36,7 @@ spec:
   selector:
     app: backend
   ports:
-  - protocol: TCP
-    port: 5000
-    targetPort: 5000
+    - protocol: TCP
+      port: 5000
+      targetPort: 5000
   type: NodePort
