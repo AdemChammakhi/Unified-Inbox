@@ -5,6 +5,13 @@ const User = require("../models/User");
 const protect = async (req, res, next) => {
   let token;
 
+  if (!process.env.JWT_SECRET) {
+    return res.status(500).json({
+      message:
+        "Server misconfiguration: JWT_SECRET is missing. Configure it via environment variables (Kubernetes Secret / .env).",
+    });
+  }
+
   if (
     req.headers.authorization &&
     req.headers.authorization.startsWith("Bearer")
