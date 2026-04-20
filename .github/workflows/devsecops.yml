@@ -292,7 +292,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
       name: staging
-      url: http://${{ secrets.AZURE_VM_IP }}:30080
+      url: http://${{ vars.AZURE_VM_IP }}:30080
     steps:
       - uses: actions/checkout@v4
 
@@ -337,7 +337,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
       name: production # ← requires manual approval in GitHub settings
-      url: http://${{ secrets.AZURE_VM_IP }}:30080
+      url: http://${{ vars.AZURE_VM_IP }}:30080
     steps:
       - uses: actions/checkout@v4
 
