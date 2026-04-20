@@ -17,6 +17,8 @@ permissions:
   security-events: write # for CodeQL / SARIF uploads
   packages: write # for GHCR push
   id-token: write # for cosign keyless signing
+  actions: read # for Gitleaks to read workflow run info
+  checks: write # for Gitleaks to create check annotations
 
 env:
   REGISTRY: docker.io
@@ -97,9 +99,18 @@ jobs:
 
       - name: Upload SARIF
         if: always()
+        continue-on-error: true # private repos need Advanced Security (paid); skip gracefully
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
+
+      - name: Save SARIF as artifact (always available)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 30
 
   # ─── Stage 4: SCA — Dependency audit ──────────────────────────────────────
   sca:
