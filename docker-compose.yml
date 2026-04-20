@@ -16,8 +16,9 @@ services:
       - "5000:5000"
     environment:
       - PORT=5000
-      - MONGO_URI=mongodb+srv://REDACTED:REDACTED@REDACTED
-      - JWT_SECRET=REDACTED_JWT_SECRET
+      # Real values come from .env — never commit secrets here
+      # - MONGO_URI=<from .env>
+      # - JWT_SECRET=<from .env>
     networks:
       - network1
     restart: unless-stopped

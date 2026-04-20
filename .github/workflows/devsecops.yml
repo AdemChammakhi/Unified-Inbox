@@ -1,0 +1,368 @@
+# =============================================================================
+# DevSecOps Pipeline — Unified Inbox
+# Triggers: push to main, PRs to main
+# Stages: lint → test → SAST → SCA → secret-scan → build → image-scan →
+#          SBOM → sign → deploy-staging → DAST → deploy-prod
+# =============================================================================
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write # for CodeQL / SARIF uploads
+  packages: write # for GHCR push
+  id-token: write # for cosign keyless signing
+
+env:
+  REGISTRY: docker.io
+  FRONTEND_IMAGE: ${{ secrets.DOCKER_USERNAME }}/projetpfe-frontend
+  BACKEND_IMAGE: ${{ secrets.DOCKER_USERNAME }}/projetpfe-backend
+  K8S_NAMESPACE: default
+
+# ─── Stage 1: Lint ───────────────────────────────────────────────────────────
+jobs:
+  lint:
+    name: "1 · Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Install client deps
+        run: cd client && npm ci
+
+      - name: Lint backend (eslint)
+        run: npx eslint server/ --ext .js --max-warnings 0 || true
+        # "|| true" until eslint config is polished — remove once stable
+
+      - name: Lint frontend
+        run: cd client && npx eslint src/ --ext .js,.jsx --max-warnings 0 || true
+
+  # ─── Stage 2: Unit & integration tests ────────────────────────────────────
+  test:
+    name: "2 · Test"
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Install client deps
+        run: cd client && npm ci
+
+      - name: Run backend tests
+        run: npm test
+
+      - name: Run frontend tests
+        run: cd client && npx react-scripts test --watchAll=false --passWithNoTests
+
+  # ─── Stage 3: SAST — Semgrep ──────────────────────────────────────────────
+  sast:
+    name: "3 · SAST (Semgrep)"
+    runs-on: ubuntu-latest
+    needs: lint
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: semgrep scan --config auto --sarif --output semgrep.sarif .
+        env:
+          SEMGREP_RULES: >-
+            p/javascript
+            p/nodejs
+            p/react
+            p/owasp-top-ten
+            p/security-audit
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+  # ─── Stage 4: SCA — Dependency audit ──────────────────────────────────────
+  sca:
+    name: "4 · SCA (npm audit + Trivy fs)"
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci && cd client && npm ci
+
+      - name: npm audit — backend
+        run: npm audit --audit-level=high || true
+
+      - name: npm audit — frontend
+        run: cd client && npm audit --audit-level=high || true
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: table
+
+  # ─── Stage 5: Secret scanning — Gitleaks ──────────────────────────────────
+  secret-scan:
+    name: "5 · Secret Scan (Gitleaks)"
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for leak detection
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Stage 6: Build container images ──────────────────────────────────────
+  build:
+    name: "6 · Build Images"
+    runs-on: ubuntu-latest
+    needs: [test, sast, sca, secret-scan]
+    outputs:
+      frontend_tag: ${{ steps.meta-fe.outputs.tags }}
+      backend_tag: ${{ steps.meta-be.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Frontend image metadata
+        id: meta-fe
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Backend image metadata
+        id: meta-be
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./client
+          push: true
+          tags: ${{ steps.meta-fe.outputs.tags }}
+          labels: ${{ steps.meta-fe.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./server/Dockerfile
+          push: true
+          tags: ${{ steps.meta-be.outputs.tags }}
+          labels: ${{ steps.meta-be.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Stage 7: Container image scan ────────────────────────────────────────
+  image-scan:
+    name: "7 · Image Scan (Trivy)"
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      matrix:
+        image:
+          - name: frontend
+            ref: ${{ needs.build.outputs.frontend_tag }}
+          - name: backend
+            ref: ${{ needs.build.outputs.backend_tag }}
+    steps:
+      - name: Trivy image scan — ${{ matrix.image.name }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.image.ref }}
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "1" # fail pipeline on HIGH/CRITICAL
+
+  # ─── Stage 8: SBOM generation ─────────────────────────────────────────────
+  sbom:
+    name: "8 · SBOM (Syft)"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Generate SBOM — frontend
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.FRONTEND_IMAGE }}:latest
+          artifact-name: sbom-frontend.spdx.json
+
+      - name: Generate SBOM — backend
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.BACKEND_IMAGE }}:latest
+          artifact-name: sbom-backend.spdx.json
+
+  # ─── Stage 9: Image signing (Cosign keyless) ──────────────────────────────
+  sign:
+    name: "9 · Sign Images (Cosign)"
+    runs-on: ubuntu-latest
+    needs: [image-scan, sbom]
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Sign frontend image
+        run: cosign sign --yes ${{ env.FRONTEND_IMAGE }}:latest
+
+      - name: Sign backend image
+        run: cosign sign --yes ${{ env.BACKEND_IMAGE }}:latest
+
+  # ─── Stage 10: K8s manifest scan ──────────────────────────────────────────
+  k8s-scan:
+    name: "10 · K8s Manifest Scan"
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kubesec scan
+        uses: controlplaneio/kubesec-action@v0.0.2
+        with:
+          input: k8s/backend-deployment.yaml
+
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: k8s/
+          severity: HIGH,CRITICAL
+          format: table
+
+  # ─── Stage 11: Deploy to staging ──────────────────────────────────────────
+  deploy-staging:
+    name: "11 · Deploy → Staging"
+    runs-on: ubuntu-latest
+    needs: [sign, k8s-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: staging
+      url: http://${{ secrets.AZURE_VM_IP }}:30080
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Deploy to staging namespace
+        run: |
+          kubectl apply -f k8s/network-policy.yaml -n staging
+          kubectl apply -f k8s/backend-secrets.yaml -n staging
+          kubectl apply -f k8s/backend-deployment.yaml -n staging
+          kubectl apply -f k8s/frontend-deployment.yaml -n staging
+          kubectl apply -f k8s/pdb.yaml -n staging
+          kubectl apply -f k8s/hpa.yaml -n staging
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/backend -n staging --timeout=120s
+          kubectl rollout status deployment/frontend -n staging --timeout=120s
+
+  # ─── Stage 12: DAST — ZAP quick scan ──────────────────────────────────────
+  dast:
+    name: "12 · DAST (ZAP)"
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    steps:
+      - name: OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://${{ secrets.AZURE_VM_IP }}:30080
+          rules_file_name: ""
+          cmd_options: "-a"
+
+  # ─── Stage 13: Deploy to production (manual approval) ─────────────────────
+  deploy-prod:
+    name: "13 · Deploy → Production"
+    runs-on: ubuntu-latest
+    needs: dast
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production # ← requires manual approval in GitHub settings
+      url: http://${{ secrets.AZURE_VM_IP }}:30080
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Deploy to production namespace
+        run: |
+          kubectl apply -f k8s/network-policy.yaml -n production
+          kubectl apply -f k8s/backend-secrets.yaml -n production
+          kubectl apply -f k8s/backend-deployment.yaml -n production
+          kubectl apply -f k8s/frontend-deployment.yaml -n production
+          kubectl apply -f k8s/pdb.yaml -n production
+          kubectl apply -f k8s/ingress-tls.yaml -n production
+          kubectl apply -f k8s/hpa.yaml -n production
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/backend -n production --timeout=180s
+          kubectl rollout status deployment/frontend -n production --timeout=180s
+
+      - name: Verify deployment health
+        run: |
+          kubectl get pods -n production
+          kubectl get svc -n production

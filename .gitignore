@@ -11,6 +11,13 @@ client/build/
 
 # Kubernetes secrets (keep real secret manifests out of git)
 k8s/backend-secrets.yaml
+k8s/*-secrets.local.yaml
+k8s/*-secrets.yaml
+
+# DevSecOps scan results
+*.sarif
+trivy-results.*
+sbom-*.json
 
 # Logs
 npm-debug.log*

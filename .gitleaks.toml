@@ -1,0 +1,28 @@
+# Gitleaks configuration for Unified Inbox
+# https://github.com/gitleaks/gitleaks
+
+title = "Unified Inbox Gitleaks Config"
+
+[extend]
+useDefault = true      # inherit all built-in rules (AWS keys, JWTs, etc.)
+
+# Extra custom rules for this project
+[[rules]]
+id = "mongodb-connection-string"
+description = "MongoDB connection string with credentials"
+regex = '''mongodb(\+srv)?://[^:]+:[^@]+@'''
+tags = ["database", "mongodb"]
+
+[[rules]]
+id = "facebook-access-token"
+description = "Facebook/Instagram/WhatsApp long-lived token"
+regex = '''EAA[A-Za-z0-9]{20,}'''
+tags = ["facebook", "social"]
+
+# Paths to ignore (test fixtures, etc.)
+[allowlist]
+paths = [
+  '''(^|\/)\.gitleaks\.toml$''',
+  '''(^|\/)node_modules\/''',
+  '''(^|\/)client\/build\/''',
+]

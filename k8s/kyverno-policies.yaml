@@ -1,0 +1,125 @@
+# Kyverno policies for DevSecOps compliance
+# Install Kyverno first:  kubectl apply -f https://github.com/kyverno/kyverno/releases/latest/download/install.yaml
+---
+# 1. Disallow running as root
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-root-user
+  annotations:
+    policies.kyverno.io/title: Disallow Root User
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-runAsNonRoot
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Running as root is not allowed. Set securityContext.runAsNonRoot to true."
+        pattern:
+          spec:
+            =(initContainers):
+              - securityContext:
+                  runAsNonRoot: true
+            containers:
+              - securityContext:
+                  runAsNonRoot: true
+---
+# 2. Disallow privilege escalation
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privilege-escalation
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-privilege-escalation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Privilege escalation is not allowed."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: false
+---
+# 3. Require resource limits
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Resource limits (cpu, memory) are required."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+                    cpu: "?*"
+---
+# 4. Require liveness and readiness probes
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-probes
+spec:
+  validationFailureAction: Audit # start in audit mode, switch to Enforce later
+  rules:
+    - name: check-probes
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Liveness and readiness probes are required."
+        pattern:
+          spec:
+            containers:
+              - livenessProbe:
+                  httpGet:
+                    path: "?*"
+                readinessProbe:
+                  httpGet:
+                    path: "?*"
+---
+# 5. Disallow latest tag in production
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+spec:
+  validationFailureAction: Audit # Audit first, Enforce once SHA-tagging is standard
+  rules:
+    - name: check-image-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+      validate:
+        message: "Images with ':latest' tag are not allowed in production."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
