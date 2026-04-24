@@ -342,7 +342,6 @@ jobs:
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
             sudo kubectl create namespace staging --dry-run=client -o yaml | sudo kubectl apply -f -
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n staging
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n staging
@@ -399,7 +398,6 @@ jobs:
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
             sudo kubectl create namespace production --dry-run=client -o yaml | sudo kubectl apply -f -
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n production
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n production
