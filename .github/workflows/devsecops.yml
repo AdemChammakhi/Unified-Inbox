@@ -289,10 +289,14 @@ jobs:
           sudo mv kubesec /usr/local/bin/kubesec
 
       - name: Kubesec scan — backend
-        run: kubesec scan k8s/backend-deployment.yaml
+        run: |
+          yq 'select(.kind == "Deployment")' k8s/backend-deployment.yaml \
+            | kubesec scan /dev/stdin
 
       - name: Kubesec scan — frontend
-        run: kubesec scan k8s/frontend-deployment.yaml
+        run: |
+          yq 'select(.kind == "Deployment")' k8s/frontend-deployment.yaml \
+            | kubesec scan /dev/stdin
 
       - name: Trivy config scan
         uses: aquasecurity/trivy-action@master
