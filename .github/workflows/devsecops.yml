@@ -9,8 +9,24 @@ name: DevSecOps Pipeline
 on:
   push:
     branches: [main]
+    paths:
+      - "server/**"
+      - "client/**"
+      - "package.json"
+      - "package-lock.json"
+      - "server/Dockerfile"
+      - "client/Dockerfile"
+      - ".github/workflows/devsecops.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "server/**"
+      - "client/**"
+      - "package.json"
+      - "package-lock.json"
+      - "server/Dockerfile"
+      - "client/Dockerfile"
+      - ".github/workflows/devsecops.yml"
 
 permissions:
   contents: read
