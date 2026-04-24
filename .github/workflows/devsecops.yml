@@ -318,25 +318,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+      - name: Upload manifests to Azure VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.AZURE_VM_IP }}
+          username: ${{ secrets.AZURE_VM_USER }}
+          key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          port: 22
+          source: "k8s/*"
+          target: "/tmp/unified-inbox/${{ github.sha }}"
 
-      - name: Deploy to staging namespace
-        run: |
-          kubectl apply -f k8s/network-policy.yaml -n staging
-          kubectl apply -f k8s/backend-secrets.yaml -n staging
-          kubectl apply -f k8s/backend-deployment.yaml -n staging
-          kubectl apply -f k8s/frontend-deployment.yaml -n staging
-          kubectl apply -f k8s/pdb.yaml -n staging
-          kubectl apply -f k8s/hpa.yaml -n staging
-
-      - name: Wait for rollout
-        run: |
-          kubectl rollout status deployment/backend -n staging --timeout=120s
-          kubectl rollout status deployment/frontend -n staging --timeout=120s
+      - name: Deploy to staging namespace on Azure VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.AZURE_VM_IP }}
+          username: ${{ secrets.AZURE_VM_USER }}
+          key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n staging
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n staging
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n staging
+            kubectl rollout status deployment/backend -n staging --timeout=120s
+            kubectl rollout status deployment/frontend -n staging --timeout=120s
 
   # ─── Stage 12: DAST — ZAP quick scan ──────────────────────────────────────
   dast:
@@ -363,28 +372,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+      - name: Upload manifests to Azure VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.AZURE_VM_IP }}
+          username: ${{ secrets.AZURE_VM_USER }}
+          key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          port: 22
+          source: "k8s/*"
+          target: "/tmp/unified-inbox/${{ github.sha }}"
 
-      - name: Deploy to production namespace
-        run: |
-          kubectl apply -f k8s/network-policy.yaml -n production
-          kubectl apply -f k8s/backend-secrets.yaml -n production
-          kubectl apply -f k8s/backend-deployment.yaml -n production
-          kubectl apply -f k8s/frontend-deployment.yaml -n production
-          kubectl apply -f k8s/pdb.yaml -n production
-          kubectl apply -f k8s/ingress-tls.yaml -n production
-          kubectl apply -f k8s/hpa.yaml -n production
-
-      - name: Wait for rollout
-        run: |
-          kubectl rollout status deployment/backend -n production --timeout=180s
-          kubectl rollout status deployment/frontend -n production --timeout=180s
-
-      - name: Verify deployment health
-        run: |
-          kubectl get pods -n production
-          kubectl get svc -n production
+      - name: Deploy to production namespace on Azure VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.AZURE_VM_IP }}
+          username: ${{ secrets.AZURE_VM_USER }}
+          key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n production
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n production
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-tls.yaml -n production
+            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n production
+            kubectl rollout status deployment/backend -n production --timeout=180s
+            kubectl rollout status deployment/frontend -n production --timeout=180s
+            kubectl get pods -n production
+            kubectl get svc -n production
