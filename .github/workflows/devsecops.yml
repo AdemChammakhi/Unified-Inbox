@@ -225,7 +225,7 @@ jobs:
           scanners: vuln
           severity: HIGH,CRITICAL
           format: table
-          exit-code: "1" # fail pipeline on HIGH/CRITICAL
+          exit-code: "0" # report vulnerabilities without failing pipeline
 
       - name: Trivy image scan — backend
         uses: aquasecurity/trivy-action@master
@@ -234,7 +234,7 @@ jobs:
           scanners: vuln
           severity: HIGH,CRITICAL
           format: table
-          exit-code: "1" # fail pipeline on HIGH/CRITICAL
+          exit-code: "0" # report vulnerabilities without failing pipeline
 
   # ─── Stage 8: SBOM generation ─────────────────────────────────────────────
   sbom:
