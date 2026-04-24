@@ -324,6 +324,7 @@ jobs:
           host: ${{ vars.AZURE_VM_IP }}
           username: ${{ secrets.AZURE_VM_USER }}
           key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          passphrase: ${{ secrets.AZURE_VM_SSH_PASSPHRASE }}
           port: 22
           source: "k8s/*"
           target: "/tmp/unified-inbox/${{ github.sha }}"
@@ -334,6 +335,7 @@ jobs:
           host: ${{ vars.AZURE_VM_IP }}
           username: ${{ secrets.AZURE_VM_USER }}
           key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          passphrase: ${{ secrets.AZURE_VM_SSH_PASSPHRASE }}
           port: 22
           script_stop: true
           script: |
@@ -378,6 +380,7 @@ jobs:
           host: ${{ vars.AZURE_VM_IP }}
           username: ${{ secrets.AZURE_VM_USER }}
           key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          passphrase: ${{ secrets.AZURE_VM_SSH_PASSPHRASE }}
           port: 22
           source: "k8s/*"
           target: "/tmp/unified-inbox/${{ github.sha }}"
@@ -388,6 +391,7 @@ jobs:
           host: ${{ vars.AZURE_VM_IP }}
           username: ${{ secrets.AZURE_VM_USER }}
           key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          passphrase: ${{ secrets.AZURE_VM_SSH_PASSPHRASE }}
           port: 22
           script_stop: true
           script: |
