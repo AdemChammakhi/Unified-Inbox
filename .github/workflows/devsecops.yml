@@ -282,10 +282,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Kubesec scan
-        uses: controlplaneio/kubesec-action@v0.0.2
-        with:
-          input: k8s/backend-deployment.yaml
+      - name: Install kubesec
+        run: |
+          curl -sSL https://github.com/controlplaneio/kubesec/releases/latest/download/kubesec_linux_amd64.tar.gz \
+            | tar xz kubesec
+          sudo mv kubesec /usr/local/bin/kubesec
+
+      - name: Kubesec scan — backend
+        run: kubesec scan k8s/backend-deployment.yaml
+
+      - name: Kubesec scan — frontend
+        run: kubesec scan k8s/frontend-deployment.yaml
 
       - name: Trivy config scan
         uses: aquasecurity/trivy-action@master
