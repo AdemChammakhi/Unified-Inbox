@@ -339,15 +339,16 @@ jobs:
           port: 22
           script_stop: true
           script: |
-            kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n staging
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n staging
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n staging
-            kubectl rollout status deployment/backend -n staging --timeout=120s
-            kubectl rollout status deployment/frontend -n staging --timeout=120s
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            sudo kubectl create namespace staging --dry-run=client -o yaml | sudo kubectl apply -f -
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n staging
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n staging
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n staging
+            sudo kubectl rollout status deployment/backend -n staging --timeout=120s
+            sudo kubectl rollout status deployment/frontend -n staging --timeout=120s
 
   # ─── Stage 12: DAST — ZAP quick scan ──────────────────────────────────────
   dast:
@@ -395,15 +396,16 @@ jobs:
           port: 22
           script_stop: true
           script: |
-            kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n production
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n production
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-tls.yaml -n production
-            kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n production
-            kubectl rollout status deployment/backend -n production --timeout=180s
-            kubectl rollout status deployment/frontend -n production --timeout=180s
-            kubectl get pods -n production
-            kubectl get svc -n production
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            sudo kubectl create namespace production --dry-run=client -o yaml | sudo kubectl apply -f -
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n production
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n production
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-tls.yaml -n production
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n production
+            sudo kubectl rollout status deployment/backend -n production --timeout=180s
+            sudo kubectl rollout status deployment/frontend -n production --timeout=180s
+            sudo kubectl get pods -n production
+            sudo kubectl get svc -n production
