@@ -15,6 +15,20 @@ spec:
         - podSelector:
             matchLabels:
               app: frontend
+        # Allow Traefik on k3s (default ingress controller)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+        # Allow ingress-nginx controller if used later
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: controller
       ports:
         - protocol: TCP
           port: 5000
