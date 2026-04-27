@@ -37,6 +37,7 @@ permissions:
   id-token: write # for cosign keyless signing
   actions: read # for Gitleaks to read workflow run info
   checks: write # for Gitleaks to create check annotations
+  issues: write # for ZAP baseline to open issues with scan results
 
 env:
   REGISTRY: docker.io
