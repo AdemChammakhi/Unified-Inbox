@@ -20,7 +20,9 @@ services:
       # - MONGO_URI=<from .env>
       # - JWT_SECRET=<from .env>
     networks:
-      - network1
+      network1:
+        aliases:
+          - backend-service
     restart: unless-stopped
 
   # Frontend - React App served by Nginx
