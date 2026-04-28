@@ -23,17 +23,12 @@ const RootRedirect = () => {
   return <Navigate to="/login" replace />;
 };
 
-const SignupRedirect = () => {
-  return <Navigate to="/login?registration=closed" replace />;
-};
-
 function App() {
   return (
     <Router>
       <div className="app-container">
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/signup" element={<SignupRedirect />} />
           <Route path="/terms" element={<TermsOfService />} />
           <Route path="/privacy" element={<PrivacyPolicy />} />
 

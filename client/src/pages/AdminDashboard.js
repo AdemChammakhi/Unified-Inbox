@@ -4,6 +4,14 @@ import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
 
+const EMPTY_FORM = {
+  firstName: "",
+  lastName: "",
+  email: "",
+  password: "",
+  role: "marketing",
+};
+
 const PLATFORM_ICONS = {
   instagram: "📸",
   facebook: "📘",
@@ -16,16 +24,12 @@ const AdminDashboard = () => {
   const navigate = useNavigate();
   const [locks, setLocks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [newUserForm, setNewUserForm] = useState({
-    firstName: "",
-    lastName: "",
-    email: "",
-    password: "",
-    role: "manager",
-  });
-  const [createUserLoading, setCreateUserLoading] = useState(false);
-  const [createUserMessage, setCreateUserMessage] = useState("");
-  const [createUserError, setCreateUserError] = useState("");
+
+  // Create Account state
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [formLoading, setFormLoading] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [formSuccess, setFormSuccess] = useState("");
 
   const fetchLocks = useCallback(async () => {
     const token = user?.token;
@@ -52,6 +56,26 @@ const AdminDashboard = () => {
     const interval = setInterval(fetchLocks, 15000);
     return () => clearInterval(interval);
   }, [fetchLocks]);
+
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    setFormError("");
+    setFormSuccess("");
+    setFormLoading(true);
+    try {
+      const res = await axios.post("/api/auth/create-user", form, {
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      setFormSuccess(
+        `Account created for ${res.data.firstName} ${res.data.lastName} (${res.data.role})`,
+      );
+      setForm(EMPTY_FORM);
+    } catch (err) {
+      setFormError(err.response?.data?.message || "Failed to create account");
+    } finally {
+      setFormLoading(false);
+    }
+  };
 
   const handleUnlock = async (conversationId, platform) => {
     if (
@@ -80,57 +104,6 @@ const AdminDashboard = () => {
     return acc;
   }, {});
 
-  const handleCreateUserChange = (e) => {
-    const { name, value } = e.target;
-    setNewUserForm((prev) => ({ ...prev, [name]: value }));
-  };
-
-  const handleCreateUser = async (e) => {
-    e.preventDefault();
-    setCreateUserError("");
-    setCreateUserMessage("");
-
-    const token = user?.token;
-    if (!token) {
-      setCreateUserError("Your session has expired. Please login again.");
-      return;
-    }
-
-    setCreateUserLoading(true);
-    try {
-      const res = await axios.post("/api/admin/create-user", newUserForm, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      setCreateUserMessage(
-        `User created successfully: ${res.data.user.email} (${res.data.user.role}). Share credentials manually with the user.`,
-      );
-      setNewUserForm({
-        firstName: "",
-        lastName: "",
-        email: "",
-        password: "",
-        role: "manager",
-      });
-    } catch (error) {
-      if (error.response?.status === 401) {
-        logout();
-        navigate("/login");
-        return;
-      }
-
-      if (error.response?.status === 403) {
-        setCreateUserError("Only admins can create new users.");
-      } else {
-        setCreateUserError(
-          error.response?.data?.message || "Failed to create user account.",
-        );
-      }
-    } finally {
-      setCreateUserLoading(false);
-    }
-  };
-
   return (
     <DashboardLayout>
       <div style={styles.container}>
@@ -157,99 +130,6 @@ const AdminDashboard = () => {
             </div>
             <div style={styles.statLabel}>Agents Working</div>
           </div>
-        </div>
-
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>Create New User</h2>
-          <p style={styles.subtitle}>
-            This form is admin-only. No invitation email is sent; share the
-            initial credentials manually.
-          </p>
-
-          {createUserMessage && (
-            <div style={styles.successMessage}>{createUserMessage}</div>
-          )}
-          {createUserError && (
-            <div style={styles.errorMessage}>{createUserError}</div>
-          )}
-
-          <form onSubmit={handleCreateUser} style={styles.createUserForm}>
-            <div style={styles.formRow}>
-              <label style={styles.formLabel}>
-                First Name
-                <input
-                  style={styles.formInput}
-                  name="firstName"
-                  value={newUserForm.firstName}
-                  onChange={handleCreateUserChange}
-                  required
-                />
-              </label>
-
-              <label style={styles.formLabel}>
-                Last Name
-                <input
-                  style={styles.formInput}
-                  name="lastName"
-                  value={newUserForm.lastName}
-                  onChange={handleCreateUserChange}
-                  required
-                />
-              </label>
-            </div>
-
-            <div style={styles.formRow}>
-              <label style={{ ...styles.formLabel, flex: 2 }}>
-                Email
-                <input
-                  style={styles.formInput}
-                  type="email"
-                  name="email"
-                  value={newUserForm.email}
-                  onChange={handleCreateUserChange}
-                  required
-                />
-              </label>
-
-              <label style={styles.formLabel}>
-                Role
-                <select
-                  style={styles.formInput}
-                  name="role"
-                  value={newUserForm.role}
-                  onChange={handleCreateUserChange}
-                  required
-                >
-                  <option value="manager">Manager</option>
-                  <option value="marketing">Marketing</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </label>
-            </div>
-
-            <div style={styles.formRow}>
-              <label style={{ ...styles.formLabel, flex: 2 }}>
-                Temporary Password
-                <input
-                  style={styles.formInput}
-                  type="password"
-                  name="password"
-                  value={newUserForm.password}
-                  onChange={handleCreateUserChange}
-                  minLength={6}
-                  required
-                />
-              </label>
-            </div>
-
-            <button
-              type="submit"
-              style={styles.createUserButton}
-              disabled={createUserLoading}
-            >
-              {createUserLoading ? "Creating user..." : "Create New User"}
-            </button>
-          </form>
         </div>
 
         {/* Active Assignments Table */}
@@ -332,6 +212,111 @@ const AdminDashboard = () => {
             </div>
           )}
         </div>
+        {/* Create Account Section */}
+        <div style={{ ...styles.section, marginTop: "24px" }}>
+          <h2 style={styles.sectionTitle}>➕ Create Account</h2>
+          <p
+            style={{
+              fontSize: "13px",
+              color: "var(--text-dim)",
+              marginBottom: "20px",
+              marginTop: 0,
+            }}
+          >
+            Create a new user account with the appropriate role.
+          </p>
+
+          {formError && (
+            <div style={styles.formAlert("var(--danger)")}>{formError}</div>
+          )}
+          {formSuccess && (
+            <div style={styles.formAlert("var(--success, #22c55e)")}>
+              {formSuccess}
+            </div>
+          )}
+
+          <form onSubmit={handleCreateUser} style={styles.createForm}>
+            <div style={styles.formRow}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>First Name</label>
+                <input
+                  style={styles.input}
+                  type="text"
+                  placeholder="First name"
+                  required
+                  value={form.firstName}
+                  onChange={(e) =>
+                    setForm({ ...form, firstName: e.target.value })
+                  }
+                />
+              </div>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Last Name</label>
+                <input
+                  style={styles.input}
+                  type="text"
+                  placeholder="Last name"
+                  required
+                  value={form.lastName}
+                  onChange={(e) =>
+                    setForm({ ...form, lastName: e.target.value })
+                  }
+                />
+              </div>
+            </div>
+
+            <div style={styles.formRow}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Email</label>
+                <input
+                  style={styles.input}
+                  type="email"
+                  placeholder="user@company.com"
+                  required
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                />
+              </div>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Password</label>
+                <input
+                  style={styles.input}
+                  type="password"
+                  placeholder="Strong password"
+                  required
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm({ ...form, password: e.target.value })
+                  }
+                />
+              </div>
+            </div>
+
+            <div style={{ ...styles.formRow, alignItems: "flex-end" }}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Role</label>
+                <select
+                  style={styles.input}
+                  value={form.role}
+                  onChange={(e) => setForm({ ...form, role: e.target.value })}
+                >
+                  <option value="admin">Admin</option>
+                  <option value="manager">Manager</option>
+                  <option value="marketing">Marketing</option>
+                </select>
+              </div>
+              <div style={{ ...styles.formGroup, flex: "0 0 auto" }}>
+                <button
+                  type="submit"
+                  style={styles.createBtn}
+                  disabled={formLoading}
+                >
+                  {formLoading ? "Creating…" : "Create Account"}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
       </div>
     </DashboardLayout>
   );
@@ -389,7 +374,6 @@ const styles = {
     border: "1px solid var(--border-primary)",
     borderRadius: "12px",
     padding: "24px",
-    marginBottom: "20px",
   },
   sectionTitle: {
     fontSize: "16px",
@@ -403,67 +387,6 @@ const styles = {
     textAlign: "center",
     color: "var(--text-faint)",
     fontSize: "14px",
-  },
-  createUserForm: {
-    marginTop: "16px",
-  },
-  formRow: {
-    display: "flex",
-    gap: "12px",
-    marginBottom: "12px",
-    flexWrap: "wrap",
-  },
-  formLabel: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px",
-    color: "var(--text-faint)",
-    fontSize: "13px",
-    fontWeight: 600,
-    flex: 1,
-    minWidth: "220px",
-  },
-  formInput: {
-    height: "40px",
-    borderRadius: "10px",
-    border: "1px solid var(--border-primary)",
-    backgroundColor: "var(--bg-primary)",
-    color: "var(--text-primary)",
-    padding: "0 12px",
-    fontSize: "14px",
-    outline: "none",
-  },
-  createUserButton: {
-    marginTop: "6px",
-    padding: "10px 16px",
-    borderRadius: "10px",
-    border: "1px solid var(--accent)",
-    backgroundColor: "var(--accent)",
-    color: "#fff",
-    fontSize: "13px",
-    fontWeight: 700,
-    cursor: "pointer",
-    fontFamily: "'Hanken Grotesk', sans-serif",
-  },
-  successMessage: {
-    marginTop: "12px",
-    marginBottom: "6px",
-    borderRadius: "10px",
-    padding: "10px 12px",
-    fontSize: "13px",
-    border: "1px solid rgba(34, 197, 94, 0.45)",
-    color: "#166534",
-    backgroundColor: "rgba(34, 197, 94, 0.12)",
-  },
-  errorMessage: {
-    marginTop: "12px",
-    marginBottom: "6px",
-    borderRadius: "10px",
-    padding: "10px 12px",
-    fontSize: "13px",
-    border: "1px solid rgba(220, 38, 38, 0.45)",
-    color: "#7f1d1d",
-    backgroundColor: "rgba(248, 113, 113, 0.14)",
   },
   tableWrap: {
     overflowX: "auto",
@@ -544,6 +467,61 @@ const styles = {
     fontFamily: "'Hanken Grotesk', sans-serif",
     transition: "all 0.2s ease",
   },
+  createForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "14px",
+  },
+  formRow: {
+    display: "flex",
+    gap: "14px",
+    flexWrap: "wrap",
+  },
+  formGroup: {
+    flex: 1,
+    minWidth: "180px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+  },
+  label: {
+    fontSize: "12px",
+    fontWeight: 700,
+    color: "var(--text-dim)",
+    textTransform: "uppercase",
+    letterSpacing: "0.5px",
+  },
+  input: {
+    padding: "9px 12px",
+    borderRadius: "8px",
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-primary)",
+    color: "var(--text-primary)",
+    fontSize: "13px",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+    outline: "none",
+  },
+  createBtn: {
+    padding: "10px 22px",
+    borderRadius: "8px",
+    border: "none",
+    backgroundColor: "var(--accent)",
+    color: "#fff",
+    fontWeight: 700,
+    fontSize: "13px",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  formAlert: (color) => ({
+    padding: "10px 14px",
+    borderRadius: "8px",
+    border: `1px solid ${color}`,
+    backgroundColor: `${color}18`,
+    color: color,
+    fontSize: "13px",
+    marginBottom: "8px",
+  }),
 };
 
 export default AdminDashboard;

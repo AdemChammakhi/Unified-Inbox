@@ -15,12 +15,51 @@ const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 };
 
-// POST /api/auth/signup
-router.post("/signup", async (req, res) => {
-  return res.status(403).json({
-    message:
-      "Public registration is disabled. Ask an administrator to create your account.",
-  });
+// POST /api/auth/create-user — Admin only
+router.post("/create-user", protect, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Access denied: admins only" });
+    }
+
+    const { firstName, lastName, email, password, role } = req.body;
+
+    if (!firstName || !lastName || !email || !password || !role) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    // Validate role
+    if (!["admin", "manager", "marketing"].includes(role)) {
+      return res.status(400).json({ message: "Invalid role selected" });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res
+        .status(400)
+        .json({ message: "User already exists with this email" });
+    }
+
+    // Create user
+    const user = await User.create({
+      firstName,
+      lastName,
+      email,
+      password,
+      role,
+    });
+
+    res.status(201).json({
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: user.role,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
 // POST /api/auth/login
