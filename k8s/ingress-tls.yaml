@@ -1,31 +1,18 @@
 # Ingress with TLS termination
-# Requires: nginx-ingress controller + cert-manager (see DEVSECOPS-PLAN.md)
+# Uses Traefik (k3s default ingress controller) + cert-manager for Let's Encrypt
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: unified-inbox-ingress
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
     # WebSocket support for Socket.IO
-    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-    # Rate limiting
-    nginx.ingress.kubernetes.io/limit-rps: "50"
-    # Security headers
-    nginx.ingress.kubernetes.io/server-snippet: |
-      add_header X-Frame-Options "SAMEORIGIN" always;
-      add_header X-Content-Type-Options "nosniff" always;
-      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-      add_header X-XSS-Protection "1; mode=block" always;
-    # cert-manager auto-TLS
+    traefik.ingress.kubernetes.io/router.middlewares: default-websocket@kubernetescrd
+    # cert-manager auto-TLS via Let's Encrypt
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
-  ingressClassName: nginx
+  ingressClassName: traefik
   tls:
     - hosts:
         - unified-inbox.example.com # ← replace with your domain
