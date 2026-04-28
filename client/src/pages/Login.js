@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate, Link, Navigate } from "react-router-dom";
+import { useNavigate, Link, Navigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
 
@@ -11,6 +11,9 @@ const Login = () => {
   const { login, user, loading: authLoading } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const showRegistrationClosedMessage =
+    searchParams.get("registration") === "closed";
 
   // If user is already logged in, redirect to their dashboard
   if (authLoading)
@@ -62,6 +65,23 @@ const Login = () => {
           <h1>Welcome Back</h1>
           <p className="subtitle">Sign in to your communication hub</p>
 
+          {showRegistrationClosedMessage && (
+            <div
+              style={{
+                marginBottom: "12px",
+                borderRadius: "10px",
+                border: "1px solid var(--border-primary)",
+                backgroundColor: "var(--bg-hover)",
+                color: "var(--text-faint)",
+                padding: "10px 12px",
+                fontSize: "13px",
+              }}
+            >
+              Registration is currently closed to the public. Please sign in
+              with an existing account.
+            </div>
+          )}
+
           {error && <div className="error-msg">{error}</div>}
 
           <form onSubmit={handleSubmit}>
@@ -89,10 +109,6 @@ const Login = () => {
               {loading ? "Signing in..." : "Sign In"}
             </button>
           </form>
-
-          <p className="auth-link">
-            Don't have an account? <Link to="/signup">Create one</Link>
-          </p>
 
           <div className="auth-footer-links">
             <Link to="/terms">Terms of Service</Link>

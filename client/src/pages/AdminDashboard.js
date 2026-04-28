@@ -16,6 +16,16 @@ const AdminDashboard = () => {
   const navigate = useNavigate();
   const [locks, setLocks] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [newUserForm, setNewUserForm] = useState({
+    firstName: "",
+    lastName: "",
+    email: "",
+    password: "",
+    role: "manager",
+  });
+  const [createUserLoading, setCreateUserLoading] = useState(false);
+  const [createUserMessage, setCreateUserMessage] = useState("");
+  const [createUserError, setCreateUserError] = useState("");
 
   const fetchLocks = useCallback(async () => {
     const token = user?.token;
@@ -70,6 +80,57 @@ const AdminDashboard = () => {
     return acc;
   }, {});
 
+  const handleCreateUserChange = (e) => {
+    const { name, value } = e.target;
+    setNewUserForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    setCreateUserError("");
+    setCreateUserMessage("");
+
+    const token = user?.token;
+    if (!token) {
+      setCreateUserError("Your session has expired. Please login again.");
+      return;
+    }
+
+    setCreateUserLoading(true);
+    try {
+      const res = await axios.post("/api/admin/create-user", newUserForm, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      setCreateUserMessage(
+        `User created successfully: ${res.data.user.email} (${res.data.user.role}). Share credentials manually with the user.`,
+      );
+      setNewUserForm({
+        firstName: "",
+        lastName: "",
+        email: "",
+        password: "",
+        role: "manager",
+      });
+    } catch (error) {
+      if (error.response?.status === 401) {
+        logout();
+        navigate("/login");
+        return;
+      }
+
+      if (error.response?.status === 403) {
+        setCreateUserError("Only admins can create new users.");
+      } else {
+        setCreateUserError(
+          error.response?.data?.message || "Failed to create user account.",
+        );
+      }
+    } finally {
+      setCreateUserLoading(false);
+    }
+  };
+
   return (
     <DashboardLayout>
       <div style={styles.container}>
@@ -96,6 +157,99 @@ const AdminDashboard = () => {
             </div>
             <div style={styles.statLabel}>Agents Working</div>
           </div>
+        </div>
+
+        <div style={styles.section}>
+          <h2 style={styles.sectionTitle}>Create New User</h2>
+          <p style={styles.subtitle}>
+            This form is admin-only. No invitation email is sent; share the
+            initial credentials manually.
+          </p>
+
+          {createUserMessage && (
+            <div style={styles.successMessage}>{createUserMessage}</div>
+          )}
+          {createUserError && (
+            <div style={styles.errorMessage}>{createUserError}</div>
+          )}
+
+          <form onSubmit={handleCreateUser} style={styles.createUserForm}>
+            <div style={styles.formRow}>
+              <label style={styles.formLabel}>
+                First Name
+                <input
+                  style={styles.formInput}
+                  name="firstName"
+                  value={newUserForm.firstName}
+                  onChange={handleCreateUserChange}
+                  required
+                />
+              </label>
+
+              <label style={styles.formLabel}>
+                Last Name
+                <input
+                  style={styles.formInput}
+                  name="lastName"
+                  value={newUserForm.lastName}
+                  onChange={handleCreateUserChange}
+                  required
+                />
+              </label>
+            </div>
+
+            <div style={styles.formRow}>
+              <label style={{ ...styles.formLabel, flex: 2 }}>
+                Email
+                <input
+                  style={styles.formInput}
+                  type="email"
+                  name="email"
+                  value={newUserForm.email}
+                  onChange={handleCreateUserChange}
+                  required
+                />
+              </label>
+
+              <label style={styles.formLabel}>
+                Role
+                <select
+                  style={styles.formInput}
+                  name="role"
+                  value={newUserForm.role}
+                  onChange={handleCreateUserChange}
+                  required
+                >
+                  <option value="manager">Manager</option>
+                  <option value="marketing">Marketing</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+            </div>
+
+            <div style={styles.formRow}>
+              <label style={{ ...styles.formLabel, flex: 2 }}>
+                Temporary Password
+                <input
+                  style={styles.formInput}
+                  type="password"
+                  name="password"
+                  value={newUserForm.password}
+                  onChange={handleCreateUserChange}
+                  minLength={6}
+                  required
+                />
+              </label>
+            </div>
+
+            <button
+              type="submit"
+              style={styles.createUserButton}
+              disabled={createUserLoading}
+            >
+              {createUserLoading ? "Creating user..." : "Create New User"}
+            </button>
+          </form>
         </div>
 
         {/* Active Assignments Table */}
@@ -235,6 +389,7 @@ const styles = {
     border: "1px solid var(--border-primary)",
     borderRadius: "12px",
     padding: "24px",
+    marginBottom: "20px",
   },
   sectionTitle: {
     fontSize: "16px",
@@ -248,6 +403,67 @@ const styles = {
     textAlign: "center",
     color: "var(--text-faint)",
     fontSize: "14px",
+  },
+  createUserForm: {
+    marginTop: "16px",
+  },
+  formRow: {
+    display: "flex",
+    gap: "12px",
+    marginBottom: "12px",
+    flexWrap: "wrap",
+  },
+  formLabel: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    color: "var(--text-faint)",
+    fontSize: "13px",
+    fontWeight: 600,
+    flex: 1,
+    minWidth: "220px",
+  },
+  formInput: {
+    height: "40px",
+    borderRadius: "10px",
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-primary)",
+    color: "var(--text-primary)",
+    padding: "0 12px",
+    fontSize: "14px",
+    outline: "none",
+  },
+  createUserButton: {
+    marginTop: "6px",
+    padding: "10px 16px",
+    borderRadius: "10px",
+    border: "1px solid var(--accent)",
+    backgroundColor: "var(--accent)",
+    color: "#fff",
+    fontSize: "13px",
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  successMessage: {
+    marginTop: "12px",
+    marginBottom: "6px",
+    borderRadius: "10px",
+    padding: "10px 12px",
+    fontSize: "13px",
+    border: "1px solid rgba(34, 197, 94, 0.45)",
+    color: "#166534",
+    backgroundColor: "rgba(34, 197, 94, 0.12)",
+  },
+  errorMessage: {
+    marginTop: "12px",
+    marginBottom: "6px",
+    borderRadius: "10px",
+    padding: "10px 12px",
+    fontSize: "13px",
+    border: "1px solid rgba(220, 38, 38, 0.45)",
+    color: "#7f1d1d",
+    backgroundColor: "rgba(248, 113, 113, 0.14)",
   },
   tableWrap: {
     overflowX: "auto",

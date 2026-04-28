@@ -17,42 +17,10 @@ const generateToken = (id) => {
 
 // POST /api/auth/signup
 router.post("/signup", async (req, res) => {
-  try {
-    const { firstName, lastName, email, password, role } = req.body;
-
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res
-        .status(400)
-        .json({ message: "User already exists with this email" });
-    }
-
-    // Validate role
-    if (!["admin", "manager", "marketing"].includes(role)) {
-      return res.status(400).json({ message: "Invalid role selected" });
-    }
-
-    // Create user
-    const user = await User.create({
-      firstName,
-      lastName,
-      email,
-      password,
-      role,
-    });
-
-    res.status(201).json({
-      _id: user._id,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      email: user.email,
-      role: user.role,
-      token: generateToken(user._id),
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  return res.status(403).json({
+    message:
+      "Public registration is disabled. Ask an administrator to create your account.",
+  });
 });
 
 // POST /api/auth/login

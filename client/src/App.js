@@ -6,7 +6,6 @@ import {
   Navigate,
 } from "react-router-dom";
 import Login from "./pages/Login";
-import Signup from "./pages/Signup";
 import AdminDashboard from "./pages/AdminDashboard";
 import ManagerDashboard from "./pages/ManagerDashboard";
 import MarketingDashboard from "./pages/MarketingDashboard";
@@ -24,13 +23,17 @@ const RootRedirect = () => {
   return <Navigate to="/login" replace />;
 };
 
+const SignupRedirect = () => {
+  return <Navigate to="/login?registration=closed" replace />;
+};
+
 function App() {
   return (
     <Router>
       <div className="app-container">
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/signup" element={<Signup />} />
+          <Route path="/signup" element={<SignupRedirect />} />
           <Route path="/terms" element={<TermsOfService />} />
           <Route path="/privacy" element={<PrivacyPolicy />} />
 
