@@ -215,7 +215,9 @@ jobs:
         with:
           context: ./client
           push: true
-          tags: ${{ steps.meta-fe.outputs.tags }}
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+            ${{ env.FRONTEND_IMAGE }}:latest
           labels: ${{ steps.meta-fe.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -226,7 +228,9 @@ jobs:
           context: .
           file: ./server/Dockerfile
           push: true
-          tags: ${{ steps.meta-be.outputs.tags }}
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+            ${{ env.BACKEND_IMAGE }}:latest
           labels: ${{ steps.meta-be.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -359,7 +363,10 @@ jobs:
           script_stop: true
           script: |
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            sed -i 's|ademxd/projetpfe-frontend:latest|ademxd/projetpfe-frontend:${{ github.sha }}|g' /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml
+            sed -i 's|ademxd/projetpfe-backend:latest|ademxd/projetpfe-backend:${{ github.sha }}|g' /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml
             sudo kubectl create namespace staging --dry-run=client -o yaml | sudo kubectl apply -f -
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n staging
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
@@ -430,7 +437,10 @@ jobs:
           script_stop: true
           script: |
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            sed -i 's|ademxd/projetpfe-frontend:latest|ademxd/projetpfe-frontend:${{ github.sha }}|g' /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml
+            sed -i 's|ademxd/projetpfe-backend:latest|ademxd/projetpfe-backend:${{ github.sha }}|g' /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml
             sudo kubectl create namespace production --dry-run=client -o yaml | sudo kubectl apply -f -
+            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-secrets.yaml -n production
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
             sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
