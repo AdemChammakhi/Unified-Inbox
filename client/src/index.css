@@ -637,7 +637,8 @@ body {
 .dashboard-content {
   flex: 1;
   padding: 32px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   position: relative;
   background: var(--bg-primary);
   transition: background 0.3s ease;

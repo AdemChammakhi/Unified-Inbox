@@ -9,7 +9,7 @@ const EMPTY_FORM = {
   lastName: "",
   email: "",
   password: "",
-  role: "marketing",
+  role: "",
 };
 
 const PLATFORM_ICONS = {
@@ -18,6 +18,12 @@ const PLATFORM_ICONS = {
   whatsapp: "💬",
   email: "📧",
 };
+
+const ROLES = [
+  { key: "admin", icon: "🛡️", label: "Admin" },
+  { key: "manager", icon: "📊", label: "Manager" },
+  { key: "marketing", icon: "📢", label: "Marketing" },
+];
 
 const AdminDashboard = () => {
   const { user, logout } = useAuth();
@@ -61,6 +67,12 @@ const AdminDashboard = () => {
     e.preventDefault();
     setFormError("");
     setFormSuccess("");
+
+    if (!form.role) {
+      setFormError("Please select a role");
+      return;
+    }
+
     setFormLoading(true);
     try {
       const res = await axios.post("/api/auth/create-user", form, {
@@ -283,6 +295,7 @@ const AdminDashboard = () => {
                   style={styles.input}
                   type="password"
                   placeholder="Strong password"
+                  minLength={6}
                   required
                   value={form.password}
                   onChange={(e) =>
@@ -292,19 +305,24 @@ const AdminDashboard = () => {
               </div>
             </div>
 
-            <div style={{ ...styles.formRow, alignItems: "flex-end" }}>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Role</label>
-                <select
-                  style={styles.input}
-                  value={form.role}
-                  onChange={(e) => setForm({ ...form, role: e.target.value })}
-                >
-                  <option value="admin">Admin</option>
-                  <option value="manager">Manager</option>
-                  <option value="marketing">Marketing</option>
-                </select>
+            <div style={styles.formGroup}>
+              <label style={styles.label}>Select Your Role</label>
+              <div style={styles.roleSelector}>
+                {ROLES.map((r) => (
+                  <button
+                    key={r.key}
+                    type="button"
+                    onClick={() => setForm({ ...form, role: r.key })}
+                    style={styles.roleOption(form.role === r.key)}
+                  >
+                    <span style={styles.roleIcon}>{r.icon}</span>
+                    <span style={styles.roleName}>{r.label}</span>
+                  </button>
+                ))}
               </div>
+            </div>
+
+            <div style={{ ...styles.formRow, alignItems: "flex-end" }}>
               <div style={{ ...styles.formGroup, flex: "0 0 auto" }}>
                 <button
                   type="submit"
@@ -500,6 +518,35 @@ const styles = {
     fontSize: "13px",
     fontFamily: "'Hanken Grotesk', sans-serif",
     outline: "none",
+  },
+  roleSelector: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "10px",
+  },
+  roleOption: (selected) => ({
+    border: selected
+      ? "1px solid var(--accent)"
+      : "1px solid var(--border-primary)",
+    backgroundColor: selected ? "var(--accent)18" : "var(--bg-primary)",
+    color: "var(--text-primary)",
+    borderRadius: "8px",
+    padding: "10px",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    cursor: "pointer",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+    fontSize: "13px",
+    fontWeight: selected ? 700 : 600,
+    justifyContent: "center",
+  }),
+  roleIcon: {
+    fontSize: "16px",
+    lineHeight: 1,
+  },
+  roleName: {
+    lineHeight: 1,
   },
   createBtn: {
     padding: "10px 22px",
