@@ -46,6 +46,7 @@ const Inbox = () => {
     whatsapp: 0,
     email: 0,
   });
+  const [unreadConvIds, setUnreadConvIds] = useState(new Set());
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const activeTabRef = useRef(activeTab);
@@ -116,6 +117,16 @@ const Inbox = () => {
       const { platform, message } = data;
       const currentTab = activeTabRef.current;
       const currentConv = selectedConvRef.current;
+
+      // Mark conversation as unread if it is not currently open
+      const incomingConvId = data.conversationId || data.senderId;
+      const isCurrentlyOpen =
+        currentConv &&
+        (currentConv.id === incomingConvId ||
+          currentConv.participants?.some((p) => p.id === data.senderId));
+      if (!isCurrentlyOpen) {
+        setUnreadConvIds((prev) => new Set([...prev, incomingConvId]));
+      }
 
       if (platform === currentTab) {
         // Check if this conversation already exists in the list
@@ -497,6 +508,13 @@ const Inbox = () => {
   // When selecting a conversation, keep it in sync with latest data
   const handleSelectConv = useCallback((conv) => {
     setSelectedConv(conv);
+    // Clear unread indicator when the conversation is opened
+    setUnreadConvIds((prev) => {
+      if (!prev.has(conv.id)) return prev;
+      const next = new Set(prev);
+      next.delete(conv.id);
+      return next;
+    });
   }, []);
 
   // Inject custom CSS for animations, scrollbar, hover effects
@@ -548,6 +566,11 @@ const Inbox = () => {
       .inbox-email-render a { color: var(--accent) !important; }
       .inbox-email-render * { max-width: 100% !important; }
       .inbox-delete-btn:hover { background: var(--danger, #E06C6C) !important; color: #fff !important; border-color: var(--danger, #E06C6C) !important; }
+      @keyframes inboxNewMsgPulse {
+        0%, 100% { background-color: rgba(110, 204, 139, 0.04); }
+        50% { background-color: rgba(110, 204, 139, 0.14); }
+      }
+      .inbox-conv-unread .inbox-unread-dot { display: inline-block !important; }
     `;
     document.head.appendChild(style);
     return () => {
@@ -820,33 +843,61 @@ const Inbox = () => {
                 sortedConversations.map((conv, index) => {
                   const cls = classifications[conv.id] || "non_classifie";
                   const isSelected = selectedConv?.id === conv.id;
+                  const isUnread = unreadConvIds.has(conv.id);
                   return (
                     <div
                       key={conv.id}
-                      className="inbox-conv-row"
+                      className={`inbox-conv-row${isUnread && !isSelected ? " inbox-conv-unread" : ""}`}
                       style={{
                         ...styles.convItem,
                         backgroundColor: isSelected
                           ? "var(--bg-hover)"
-                          : "transparent",
-                        borderLeft: `3px solid ${CLASSIFICATION_COLORS[cls]}`,
-                        animation: `inboxSlideIn 0.35s ease-out ${index * 0.04}s both`,
+                          : isUnread
+                            ? "rgba(110, 204, 139, 0.07)"
+                            : "transparent",
+                        borderLeft: `3px solid ${
+                          isUnread && !isSelected
+                            ? "#6ECC8B"
+                            : CLASSIFICATION_COLORS[cls]
+                        }`,
+                        animation:
+                          isUnread && !isSelected
+                            ? "inboxNewMsgPulse 2.5s ease-in-out 3"
+                            : `inboxSlideIn 0.35s ease-out ${index * 0.04}s both`,
                       }}
                       onClick={() => handleSelectConv(conv)}
                     >
                       <div
                         style={{
                           ...styles.convAvatar,
-                          background: `linear-gradient(135deg, ${CLASSIFICATION_COLORS[cls]}33, ${CLASSIFICATION_COLORS[cls]}11)`,
-                          border: `2px solid ${CLASSIFICATION_COLORS[cls]}77`,
-                          color: CLASSIFICATION_COLORS[cls],
+                          background:
+                            isUnread && !isSelected
+                              ? "linear-gradient(135deg, #6ECC8B33, #6ECC8B11)"
+                              : `linear-gradient(135deg, ${CLASSIFICATION_COLORS[cls]}33, ${CLASSIFICATION_COLORS[cls]}11)`,
+                          border:
+                            isUnread && !isSelected
+                              ? "2px solid #6ECC8Baa"
+                              : `2px solid ${CLASSIFICATION_COLORS[cls]}77`,
+                          color:
+                            isUnread && !isSelected
+                              ? "#6ECC8B"
+                              : CLASSIFICATION_COLORS[cls],
                         }}
                       >
                         {(conv.participants?.[0]?.name || "?")[0].toUpperCase()}
                       </div>
                       <div style={styles.convInfo}>
                         <div style={styles.convNameRow}>
-                          <strong style={styles.convName}>
+                          <strong
+                            style={{
+                              ...styles.convName,
+                              fontWeight: isUnread && !isSelected ? 800 : 600,
+                              color:
+                                isUnread && !isSelected
+                                  ? "var(--text-primary)"
+                                  : styles.convName.color,
+                            }}
+                          >
                             {conv.participants?.map((p) => p.name).join(", ") ||
                               "Unknown"}
                           </strong>
@@ -878,7 +929,17 @@ const Inbox = () => {
                             <option value="priorite">Priorité</option>
                           </select>
                         </div>
-                        <p style={styles.lastMsg}>
+                        <p
+                          style={{
+                            ...styles.lastMsg,
+                            color:
+                              isUnread && !isSelected
+                                ? "var(--text-secondary, #c8c8d0)"
+                                : undefined,
+                            fontWeight:
+                              isUnread && !isSelected ? 600 : undefined,
+                          }}
+                        >
                           {conv.lastMessage?.text || "No messages"}
                         </p>
                         <small style={styles.time}>

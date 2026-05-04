@@ -88,6 +88,34 @@ async function getSenderName(senderId, platform) {
     if (!resolvedName || isLikelyRawId(resolvedName)) return null;
     return resolvedName;
   } catch {
+    // Fallback for Facebook: query page conversations to get participant name
+    if (platform === "facebook") {
+      try {
+        const pageToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+        const pageId = process.env.FACEBOOK_PAGE_ID;
+        if (!pageToken || !pageId) return null;
+        const convRes = await axios.get(
+          `${GRAPH_API}/${pageId}/conversations`,
+          {
+            params: {
+              fields: "participants",
+              user_id: senderId,
+              access_token: pageToken,
+            },
+            timeout: 5000,
+          },
+        );
+        const conv = convRes.data.data?.[0];
+        const participant = conv?.participants?.data?.find(
+          (p) => p.id === senderId,
+        );
+        if (participant?.name && !isLikelyRawId(participant.name)) {
+          return participant.name;
+        }
+      } catch {
+        // both lookups failed
+      }
+    }
     return null;
   }
 }
