@@ -686,7 +686,9 @@ const Inbox = () => {
       console.error("Failed to send reply:", error);
       alert(
         "Failed to send message: " +
-          (error.response?.data?.message || error.message),
+          (error.response?.data?.error ||
+            error.response?.data?.message ||
+            error.message),
       );
       // Revert optimistic update
       setSelectedConv((prev) => {

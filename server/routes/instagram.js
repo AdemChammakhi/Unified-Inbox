@@ -10,12 +10,15 @@ const GRAPH_API = "https://graph.facebook.com/v24.0";
 // GET /api/instagram/conversations - Fetch Instagram conversations
 router.get("/conversations", protect, async (req, res) => {
   try {
-    const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const accessToken =
+      process.env.INSTAGRAM_ACCESS_TOKEN ||
+      process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
     if (!accessToken || !pageId) {
       return res.status(400).json({
-        message: "INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
+        message:
+          "No access token found. Set INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ACCESS_TOKEN in .env",
       });
     }
 
@@ -324,12 +327,17 @@ router.get("/conversations", protect, async (req, res) => {
 router.post("/send", protect, async (req, res) => {
   try {
     const { recipientId, message, conversationId } = req.body;
-    const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    // Fall back to the Facebook Page Access Token — it works for Instagram messaging
+    // when the Instagram Business account is linked to the Facebook Page
+    const accessToken =
+      process.env.INSTAGRAM_ACCESS_TOKEN ||
+      process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
     if (!accessToken || !pageId) {
       return res.status(400).json({
-        message: "INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
+        message:
+          "No access token found. Set INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ACCESS_TOKEN in .env",
       });
     }
 
@@ -358,11 +366,13 @@ router.post("/send", protect, async (req, res) => {
       });
     }
 
+    // Instagram Messaging API requires the Instagram Business Account ID, not the Page ID
+    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID || pageId;
     console.log(
       "Instagram send - recipientId:",
       recipientId,
-      "pageId:",
-      pageId,
+      "igAccountId:",
+      igAccountId,
     );
 
     // Send message via Instagram Messaging API
@@ -370,7 +380,7 @@ router.post("/send", protect, async (req, res) => {
     let sendRes;
     try {
       sendRes = await axios.post(
-        `${GRAPH_API}/${pageId}/messages`,
+        `${GRAPH_API}/${igAccountId}/messages`,
         {
           recipient: { id: recipientId },
           message: { text: message },
@@ -386,7 +396,7 @@ router.post("/send", protect, async (req, res) => {
         firstErr.response?.data?.error?.message || firstErr.message,
       );
       sendRes = await axios.post(
-        `${GRAPH_API}/${pageId}/messages`,
+        `${GRAPH_API}/${igAccountId}/messages`,
         {
           recipient: { id: recipientId },
           message: { text: message },

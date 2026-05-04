@@ -44,6 +44,7 @@ env:
   FRONTEND_IMAGE: ${{ secrets.DOCKER_USERNAME }}/projetpfe-frontend
   BACKEND_IMAGE: ${{ secrets.DOCKER_USERNAME }}/projetpfe-backend
   K8S_NAMESPACE: default
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # ─── Stage 1: Lint ───────────────────────────────────────────────────────────
 jobs:
@@ -119,7 +120,7 @@ jobs:
       - name: Upload SARIF
         if: always()
         continue-on-error: true # private repos need Advanced Security (paid); skip gracefully
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
 
