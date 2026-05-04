@@ -7,6 +7,10 @@ const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
+function isLikelyRawId(value) {
+  return typeof value === "string" && /^\d{6,}$/.test(value);
+}
+
 // In-memory log of recent webhook hits (last 50) — for debugging
 const webhookLog = [];
 function logWebhook(platform, type, summary) {
@@ -70,21 +74,21 @@ async function getSenderName(senderId, platform) {
       platform === "facebook"
         ? process.env.FACEBOOK_PAGE_ACCESS_TOKEN
         : process.env.INSTAGRAM_ACCESS_TOKEN;
-    if (!token) return senderId;
+    if (!token) return null;
     const fields =
       platform === "instagram" ? "username,name" : "first_name,last_name,name";
     const res = await axios.get(`${GRAPH_API}/${senderId}`, {
       params: { fields, access_token: token },
       timeout: 5000, // 5s timeout so webhook doesn't hang
     });
-    return (
+    const resolvedName =
       res.data.username ||
       res.data.name ||
-      [res.data.first_name, res.data.last_name].filter(Boolean).join(" ") ||
-      senderId
-    );
+      [res.data.first_name, res.data.last_name].filter(Boolean).join(" ");
+    if (!resolvedName || isLikelyRawId(resolvedName)) return null;
+    return resolvedName;
   } catch {
-    return senderId;
+    return null;
   }
 }
 
@@ -404,10 +408,11 @@ router.post("/facebook", async (req, res) => {
             );
 
             // Look up sender name
-            const fbSenderName = await getSenderName(
+            const resolvedSenderName = await getSenderName(
               senderId,
               detectedPlatform,
             );
+            const fbSenderName = resolvedSenderName || "Unknown";
 
             const newMessage = await Message.findOneAndUpdate(
               { externalId: message.mid },

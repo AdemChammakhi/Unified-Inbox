@@ -7,6 +7,46 @@ const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
+function isLikelyRawId(value) {
+  return typeof value === "string" && /^\d{6,}$/.test(value);
+}
+
+async function resolveFacebookProfileName(senderId, accessToken) {
+  if (!senderId || !accessToken || senderId === "unknown") return null;
+  try {
+    const res = await axios.get(`${GRAPH_API}/${senderId}`, {
+      params: {
+        fields: "first_name,last_name,name",
+        access_token: accessToken,
+      },
+      timeout: 5000,
+    });
+    const resolvedName =
+      res.data.name ||
+      [res.data.first_name, res.data.last_name].filter(Boolean).join(" ");
+    if (!resolvedName || isLikelyRawId(resolvedName)) return null;
+    return resolvedName;
+  } catch {
+    return null;
+  }
+}
+
+async function getBestDisplayName({
+  senderId,
+  senderName,
+  accessToken,
+  nameCache,
+}) {
+  if (senderName && !isLikelyRawId(senderName)) return senderName;
+  if (!senderId || senderId === "unknown") return "Unknown";
+  if (nameCache.has(senderId)) return nameCache.get(senderId);
+
+  const resolved = await resolveFacebookProfileName(senderId, accessToken);
+  const finalName = resolved || "Unknown";
+  nameCache.set(senderId, finalName);
+  return finalName;
+}
+
 // GET /api/facebook/conversations - Fetch Facebook Page conversations
 router.get("/conversations", protect, async (req, res) => {
   try {
@@ -120,14 +160,21 @@ router.get("/conversations", protect, async (req, res) => {
         .limit(200);
 
       const newConvMap = {};
+      const nameCache = new Map();
       for (const m of recentDbMsgs) {
         if (knownIds.has(m.senderId) || knownIds.has(m.conversationId))
           continue;
         const key = m.conversationId || m.senderId;
+        const displayName = await getBestDisplayName({
+          senderId: m.senderId,
+          senderName: m.senderName,
+          accessToken,
+          nameCache,
+        });
         if (!newConvMap[key]) {
           newConvMap[key] = {
             id: key,
-            participants: [{ id: m.senderId, name: m.senderName || "Unknown" }],
+            participants: [{ id: m.senderId, name: displayName }],
             lastMessage: null,
             messages: [],
           };
@@ -136,7 +183,7 @@ router.get("/conversations", protect, async (req, res) => {
         const msg = {
           id: m.externalId || m._id.toString(),
           text: m.content || "",
-          from: m.senderName || "Unknown",
+          from: displayName,
           fromId: m.senderId,
           time: m.timestamp || m.createdAt,
         };
@@ -174,14 +221,24 @@ router.get("/conversations", protect, async (req, res) => {
         .limit(500);
 
       const convMap = {};
+      const nameCache = new Map();
       for (const m of dbMessages) {
+        const incomingDisplayName = await getBestDisplayName({
+          senderId: m.senderId,
+          senderName: m.senderName,
+          accessToken,
+          nameCache,
+        });
         if (!convMap[m.conversationId]) {
           convMap[m.conversationId] = {
             id: m.conversationId,
             participants: [
               {
                 id: m.direction === "incoming" ? m.senderId : m.recipientId,
-                name: m.direction === "incoming" ? m.senderName : m.recipientId,
+                name:
+                  m.direction === "incoming"
+                    ? incomingDisplayName
+                    : m.recipientId,
               },
             ],
             lastMessage: null,
@@ -192,7 +249,7 @@ router.get("/conversations", protect, async (req, res) => {
         const msg = {
           id: m.externalId || m._id.toString(),
           text: m.content || "",
-          from: m.senderName || "Unknown",
+          from: m.direction === "incoming" ? incomingDisplayName : "Page",
           fromId: m.senderId,
           time: m.timestamp || m.createdAt,
         };
