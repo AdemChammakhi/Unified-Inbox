@@ -75,8 +75,9 @@ async function getSenderName(senderId, platform) {
         ? process.env.FACEBOOK_PAGE_ACCESS_TOKEN
         : process.env.INSTAGRAM_ACCESS_TOKEN;
     if (!token) return null;
-    const fields =
-      platform === "instagram" ? "username,name" : "first_name,last_name,name";
+    // For Facebook Messenger PSIDs, request only 'name' — the display name
+    // field. first_name/last_name can be empty even when name is populated.
+    const fields = platform === "instagram" ? "username,name" : "name";
     const res = await axios.get(`${GRAPH_API}/${senderId}`, {
       params: { fields, access_token: token },
       timeout: 5000, // 5s timeout so webhook doesn't hang

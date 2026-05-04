@@ -89,6 +89,23 @@ router.get("/conversations", protect, async (req, res) => {
         );
       }
 
+      // Build a name map from participants so messages with empty from.name
+      // still resolve to the real person's name (Graph API sometimes omits
+      // from.name even when participants[].name is populated)
+      const participantMap = {};
+      participants.forEach((p) => {
+        if (p.id && p.name) participantMap[p.id] = p.name;
+      });
+
+      const resolveMsgFrom = (fromObj) => {
+        if (!fromObj) return "Unknown";
+        return (
+          fromObj.name ||
+          participantMap[fromObj.id] ||
+          (fromObj.id === pageId ? "Page" : "Unknown")
+        );
+      };
+
       return {
         id: conv.id,
         participants: otherParticipants.map((p) => ({
@@ -98,14 +115,14 @@ router.get("/conversations", protect, async (req, res) => {
         lastMessage: lastMessage
           ? {
               text: lastMessage.message || "[Attachment]",
-              from: lastMessage.from?.name || "Unknown",
+              from: resolveMsgFrom(lastMessage.from),
               time: lastMessage.created_time,
             }
           : null,
         messages: messages.map((m) => ({
           id: m.id,
           text: m.message || "",
-          from: m.from?.name || "Unknown",
+          from: resolveMsgFrom(m.from),
           fromId: m.from?.id,
           to: m.to?.data?.[0]?.name || "Unknown",
           time: m.created_time,
