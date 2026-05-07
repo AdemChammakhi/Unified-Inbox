@@ -287,6 +287,9 @@ router.post("/send", protect, async (req, res) => {
 
     // Send message via Messenger Send API
     // First try RESPONSE (within 24h window), then fall back to HUMAN_AGENT tag (7-day window)
+    console.log(
+      `Facebook send — pageId=${pageId} recipientId=${recipientId} msgLen=${message?.length}`,
+    );
     let sendRes;
     try {
       sendRes = await axios.post(
@@ -363,13 +366,17 @@ router.post("/send", protect, async (req, res) => {
 
     return res.json({ success: true, messageId });
   } catch (error) {
+    const apiError = error.response?.data?.error;
     console.error(
       "Facebook send error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
     return res.status(500).json({
       message: "Failed to send message",
-      error: error.response?.data?.error?.message || error.message,
+      error: apiError?.message || error.message,
+      code: apiError?.code,
+      subcode: apiError?.error_subcode,
+      type: apiError?.type,
     });
   }
 });
