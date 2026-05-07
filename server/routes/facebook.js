@@ -393,8 +393,8 @@ router.get("/messages", protect, async (req, res) => {
   }
 });
 
-// GET /api/facebook/diagnose — check token health, permissions, page subscription
-router.get("/diagnose", protect, async (req, res) => {
+// GET /api/facebook/diagnose — check token health, permissions, page subscription (no auth — temp debug)
+router.get("/diagnose", async (req, res) => {
   const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
   const pageId = process.env.FACEBOOK_PAGE_ID;
   const result = { pageId, hasToken: !!accessToken };
