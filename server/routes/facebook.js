@@ -393,4 +393,58 @@ router.get("/messages", protect, async (req, res) => {
   }
 });
 
+// GET /api/facebook/diagnose — check token health, permissions, page subscription
+router.get("/diagnose", protect, async (req, res) => {
+  const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+  const pageId = process.env.FACEBOOK_PAGE_ID;
+  const result = { pageId, hasToken: !!accessToken };
+
+  try {
+    // 1. Who does this token belong to?
+    const meRes = await axios.get(`${GRAPH_API}/me`, {
+      params: { access_token: accessToken, fields: "id,name" },
+    });
+    result.tokenOwner = meRes.data;
+    result.isPageToken = meRes.data.id === pageId;
+  } catch (e) {
+    result.tokenOwnerError = e.response?.data?.error || e.message;
+  }
+
+  try {
+    // 2. What permissions does the token have?
+    const permRes = await axios.get(`${GRAPH_API}/me/permissions`, {
+      params: { access_token: accessToken },
+    });
+    result.permissions = permRes.data.data
+      .filter((p) => p.status === "granted")
+      .map((p) => p.permission);
+  } catch (e) {
+    result.permissionsError = e.response?.data?.error || e.message;
+  }
+
+  try {
+    // 3. Is the app subscribed to the page?
+    const subRes = await axios.get(`${GRAPH_API}/${pageId}/subscribed_apps`, {
+      params: { access_token: accessToken },
+    });
+    result.subscribedApps = subRes.data.data;
+  } catch (e) {
+    result.subscribedAppsError = e.response?.data?.error || e.message;
+  }
+
+  try {
+    // 4. Can we fetch conversations?
+    const convRes = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
+      params: { access_token: accessToken, limit: 1, fields: "participants" },
+    });
+    result.conversationsAccessible = true;
+    result.sampleParticipants = convRes.data.data?.[0]?.participants?.data;
+  } catch (e) {
+    result.conversationsAccessible = false;
+    result.conversationsError = e.response?.data?.error || e.message;
+  }
+
+  return res.json(result);
+});
+
 module.exports = router;
