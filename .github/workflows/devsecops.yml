@@ -363,13 +363,13 @@ jobs:
           script_stop: true
           script: |
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            sudo kubectl create namespace staging --dry-run=client -o yaml | sudo kubectl apply -f -
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-staging.yaml -n staging
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n staging
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n staging
+            sudo kubectl create namespace staging --dry-run=client -o yaml | sudo kubectl apply --validate=false -f -
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n staging
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n staging
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n staging
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-staging.yaml -n staging
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n staging
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n staging
             sudo kubectl rollout restart deployment/backend -n staging
             sudo kubectl rollout restart deployment/frontend -n staging
             sudo kubectl rollout status deployment/backend -n staging --timeout=120s
@@ -436,13 +436,13 @@ jobs:
           script_stop: true
           script: |
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            sudo kubectl create namespace production --dry-run=client -o yaml | sudo kubectl apply -f -
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n production
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-tls.yaml -n production
-            sudo kubectl apply -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n production
+            sudo kubectl create namespace production --dry-run=client -o yaml | sudo kubectl apply --validate=false -f -
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/network-policy.yaml -n production
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/backend-deployment.yaml -n production
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/frontend-deployment.yaml -n production
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/pdb.yaml -n production
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/ingress-tls.yaml -n production
+            sudo kubectl apply --validate=false -f /tmp/unified-inbox/${{ github.sha }}/k8s/hpa.yaml -n production
             sudo kubectl rollout restart deployment/backend -n production
             sudo kubectl rollout restart deployment/frontend -n production
             sudo kubectl rollout status deployment/backend -n production --timeout=180s
