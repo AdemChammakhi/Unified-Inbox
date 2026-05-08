@@ -37,11 +37,12 @@ router.get("/conversations", protect, async (req, res) => {
     let conversations = [];
     let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
     let params = {
-      fields: "participants,messages{message,from,to,created_time,attachments}",
-      limit: 60,
+      fields:
+        "participants,messages.limit(20){message,from,to,created_time,attachments}",
+      limit: 20,
       access_token: accessToken,
     };
-    const maxPages = 3;
+    const maxPages = 1;
     for (let page = 0; page < maxPages; page++) {
       const convRes =
         page === 0
