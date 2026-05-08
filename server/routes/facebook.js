@@ -189,7 +189,7 @@ router.get("/conversations", protect, async (req, res) => {
       console.error("DB merge non-fatal error:", mergeErr.message);
     }
 
-    return res.json({ conversations: formatted });
+    return res.json({ conversations: formatted.slice(0, 20) });
   } catch (error) {
     console.error(
       "Facebook API error:",
