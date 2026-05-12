@@ -15,10 +15,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - unified-inbox.example.com # ← replace with your domain
+        - unified-inbox.duckdns.org
       secretName: unified-inbox-tls
   rules:
-    - host: unified-inbox.example.com # ← replace with your domain
+    - host: unified-inbox.duckdns.org
       http:
         paths:
           - path: /api

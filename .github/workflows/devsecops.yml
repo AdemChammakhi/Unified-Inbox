@@ -410,7 +410,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
       name: production # ← requires manual approval in GitHub settings
-      url: http://${{ vars.AZURE_VM_IP }}
+      url: https://unified-inbox.duckdns.org
     steps:
       - uses: actions/checkout@v4
 

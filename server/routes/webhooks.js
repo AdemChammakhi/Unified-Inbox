@@ -11,6 +11,18 @@ function isLikelyRawId(value) {
   return typeof value === "string" && /^\d{6,}$/.test(value);
 }
 
+// Keep only the last 20 messages per conversation in the DB
+async function trimConversation(platform, conversationId) {
+  const messages = await Message.find({ platform, conversationId })
+    .sort({ createdAt: -1 })
+    .skip(20)
+    .select("_id");
+  if (messages.length > 0) {
+    const ids = messages.map((m) => m._id);
+    await Message.deleteMany({ _id: { $in: ids } });
+  }
+}
+
 // In-memory log of recent webhook hits (last 50) — for debugging
 const webhookLog = [];
 function logWebhook(platform, type, summary) {
@@ -210,6 +222,7 @@ router.post("/whatsapp", async (req, res) => {
               });
 
               console.log("WhatsApp message saved:", newMessage._id);
+              trimConversation("whatsapp", msg.from).catch(() => {});
 
               // Emit real-time event with formatted data
               if (io) {
@@ -341,6 +354,7 @@ router.post("/instagram", async (req, res) => {
             );
 
             console.log("Instagram message saved:", newMessage._id);
+            trimConversation("instagram", senderId).catch(() => {});
 
             // Emit real-time event with formatted data for instant UI update
             if (io) {
@@ -464,6 +478,7 @@ router.post("/facebook", async (req, res) => {
             );
 
             console.log(`${detectedPlatform} message saved:`, newMessage._id);
+            trimConversation(detectedPlatform, senderId).catch(() => {});
 
             // Emit real-time event with formatted data for instant UI update
             if (io) {
