@@ -17,7 +17,14 @@ function fetchEmails(limit = 50) {
       port: parseInt(process.env.EMAIL_IMAP_PORT || "993"),
       tls: true,
       tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 10000,
+      authTimeout: 8000,
     });
+
+    const timer = setTimeout(() => {
+      imap.destroy();
+      reject(new Error("IMAP connection timed out after 10s"));
+    }, 12000);
 
     const emails = [];
 
@@ -90,6 +97,7 @@ function fetchEmails(limit = 50) {
         });
 
         fetch.once("error", (err) => {
+          clearTimeout(timer);
           imap.end();
           reject(err);
         });
@@ -97,12 +105,18 @@ function fetchEmails(limit = 50) {
         fetch.once("end", () => {
           imap.end();
           // Wait a bit for all parsers to finish
-          setTimeout(() => resolve(emails), 500);
+          setTimeout(() => {
+            clearTimeout(timer);
+            resolve(emails);
+          }, 500);
         });
       });
     });
 
-    imap.once("error", (err) => reject(err));
+    imap.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     imap.connect();
   });
 }
@@ -119,7 +133,13 @@ router.get("/conversations", protect, async (req, res) => {
       return res.json({ conversations: [] });
     }
 
-    const emails = await fetchEmails(100);
+    let emails = [];
+    try {
+      emails = await fetchEmails(100);
+    } catch (imapErr) {
+      console.error("IMAP connection error:", imapErr.message);
+      return res.json({ conversations: [], error: imapErr.message });
+    }
 
     // Group by sender address into "conversations"
     const convMap = {};
