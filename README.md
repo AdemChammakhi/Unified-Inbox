@@ -359,7 +359,7 @@ PORT=5000
 NODE_ENV=development
 
 # ─── Database ─────────────────────────────────────────────────────────────────
-MONGO_URI=mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/unified-inbox?retryWrites=true&w=majority
+MONGO_URI=
 
 # ─── Authentication ───────────────────────────────────────────────────────────
 JWT_SECRET=your_very_long_random_secret_at_least_32_chars
@@ -733,7 +733,7 @@ Content-Type: application/json
   "lastName": "Example",
   "email": "admin@example.com",
   "role": "admin",
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "token": ""
 }
 ```
 
