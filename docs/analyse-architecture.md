@@ -177,7 +177,7 @@ Content-Type: application/json
   "firstName": "Adem",
   "email": "admin@example.com",
   "role": "admin",
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "token": ""
 }
 ```
 
