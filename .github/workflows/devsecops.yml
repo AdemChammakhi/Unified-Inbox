@@ -449,3 +449,4 @@ jobs:
             sudo kubectl rollout status deployment/frontend -n production --timeout=180s
             sudo kubectl get pods -n production
             sudo kubectl get svc -n production
+
