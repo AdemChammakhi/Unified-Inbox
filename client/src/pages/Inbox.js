@@ -10,6 +10,8 @@ import { io } from "socket.io-client";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
+import { Search, RefreshCw, Send } from "lucide-react";
+import PlatformIcon from "../components/PlatformIcon";
 
 const CLASSIFICATION_LABELS = {
   non_classifie: "Non Classifié",
@@ -47,12 +49,21 @@ const Inbox = () => {
     email: 0,
   });
   const [unreadConvIds, setUnreadConvIds] = useState(new Set());
+  const [fetchError, setFetchError] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchDebounced, setSearchDebounced] = useState("");
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const activeTabRef = useRef(activeTab);
   const selectedConvRef = useRef(selectedConv);
   const conversationsRef = useRef(conversations);
   const fetchQuietRef = useRef(null);
+
+  // Debounce search input
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(searchQuery), 200);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -329,9 +340,14 @@ const Inbox = () => {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 15000,
       };
+      const slowOpts = {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 60000,
+      };
 
+      setFetchError(null);
       if (activeTab === "instagram") {
-        const res = await axios.get("/api/instagram/conversations", axiosOpts);
+        const res = await axios.get("/api/instagram/conversations", slowOpts);
         setConversations(res.data.conversations || []);
       } else if (activeTab === "facebook") {
         const res = await axios.get("/api/facebook/conversations", axiosOpts);
@@ -340,7 +356,7 @@ const Inbox = () => {
         const res = await axios.get("/api/instagram/messages", axiosOpts);
         setConversations(res.data.messages || []);
       } else if (activeTab === "email") {
-        const res = await axios.get("/api/email/conversations", axiosOpts);
+        const res = await axios.get("/api/email/conversations", slowOpts);
         setConversations(res.data.conversations || []);
       }
     } catch (error) {
@@ -349,10 +365,15 @@ const Inbox = () => {
         navigate("/login");
         return;
       }
+      const errMsg =
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        error.message;
+      setFetchError(errMsg);
       console.error(
         "Failed to fetch conversations:",
         error.response?.status,
-        error.response?.data || error.message,
+        errMsg,
       );
     } finally {
       setLoading(false);
@@ -367,7 +388,7 @@ const Inbox = () => {
       const tab = activeTabRef.current;
       const opts = {
         headers: { Authorization: `Bearer ${token}` },
-        timeout: 15000,
+        timeout: 60000,
       };
       let newConvs = [];
 
@@ -464,13 +485,33 @@ const Inbox = () => {
     }
   };
 
-  // Sorted & filtered conversations: unclassified first, then filtered
+  // Sorted, filtered, and searched conversations
   const sortedConversations = useMemo(() => {
     let filtered = conversations;
     if (classFilter !== "all") {
       filtered = conversations.filter((conv) => {
         const cls = classifications[conv.id] || "non_classifie";
         return cls === classFilter;
+      });
+    }
+    // Search filter
+    if (searchDebounced.trim()) {
+      const q = searchDebounced.toLowerCase();
+      filtered = filtered.filter((conv) => {
+        const name =
+          conv.participants
+            ?.map((p) => p.name)
+            .join(" ")
+            .toLowerCase() || "";
+        const email = (conv.email || "").toLowerCase();
+        const id = (conv.id || "").toLowerCase();
+        const lastMsg = (conv.lastMessage?.text || "").toLowerCase();
+        return (
+          name.includes(q) ||
+          email.includes(q) ||
+          id.includes(q) ||
+          lastMsg.includes(q)
+        );
       });
     }
     return [...filtered].sort((a, b) => {
@@ -480,7 +521,7 @@ const Inbox = () => {
       if (clsA !== "non_classifie" && clsB === "non_classifie") return 1;
       return 0;
     });
-  }, [conversations, classifications, classFilter]);
+  }, [conversations, classifications, classFilter, searchDebounced]);
 
   // Keep fetchQuietRef always pointing to the latest function
   useEffect(() => {
@@ -496,14 +537,13 @@ const Inbox = () => {
     setUnreadCounts((prev) => ({ ...prev, [activeTab]: 0 }));
   }, [activeTab, fetchConversations, fetchClassifications, fetchLocks]);
 
-  // Auto-poll every 10 seconds so new messages appear without manual refresh
+  // Auto-poll every 60 seconds as a safety net; socket handles real-time updates
   useEffect(() => {
     const interval = setInterval(() => {
       if (fetchQuietRef.current) fetchQuietRef.current();
-      fetchLocks();
-    }, 10000);
+    }, 60000);
     return () => clearInterval(interval);
-  }, [fetchLocks]);
+  }, []);
 
   // When selecting a conversation, keep it in sync with latest data
   const handleSelectConv = useCallback((conv) => {
@@ -704,7 +744,7 @@ const Inbox = () => {
   };
 
   return (
-    <DashboardLayout>
+    <DashboardLayout noPadding>
       <div style={styles.container}>
         {/* Accent shimmer line */}
         <div style={styles.accentLine} />
@@ -732,10 +772,10 @@ const Inbox = () => {
           {/* Platform Tabs */}
           <div style={styles.tabGroup}>
             {[
-              { key: "instagram", icon: "📸", label: "Instagram" },
-              { key: "facebook", icon: "💬", label: "Facebook" },
-              { key: "whatsapp", icon: "📱", label: "WhatsApp" },
-              { key: "email", icon: "✉️", label: "Email" },
+              { key: "instagram", label: "Instagram" },
+              { key: "facebook", label: "Facebook" },
+              { key: "whatsapp", label: "WhatsApp" },
+              { key: "email", label: "Email" },
             ].map((p) => (
               <button
                 key={p.key}
@@ -749,7 +789,7 @@ const Inbox = () => {
                   setSelectedConv(null);
                 }}
               >
-                <span style={{ fontSize: 13 }}>{p.icon}</span>
+                <PlatformIcon platform={p.key} size={16} />
                 <span>{p.label}</span>
                 {unreadCounts[p.key] > 0 && (
                   <span style={styles.unreadBadge}>{unreadCounts[p.key]}</span>
@@ -769,9 +809,24 @@ const Inbox = () => {
                 className="inbox-refresh-icon"
                 onClick={fetchConversations}
                 style={styles.refreshBtn}
+                title="Refresh"
               >
-                ↻
+                <RefreshCw size={15} />
               </button>
+            </div>
+
+            {/* Search bar */}
+            <div style={{ padding: "10px 14px 4px" }}>
+              <div className="conv-search-wrap">
+                <Search size={14} className="conv-search-icon" />
+                <input
+                  className="conv-search-input"
+                  type="text"
+                  placeholder="Search conversations…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
             </div>
 
             {/* Classification Filter */}
@@ -825,21 +880,59 @@ const Inbox = () => {
             {/* Conversation Items */}
             <div className="inbox-conv-scroll" style={styles.convScrollArea}>
               {loading ? (
-                <div style={styles.loadingState}>
-                  <div
-                    style={{
-                      animation: "inboxPulse 1.5s ease-in-out infinite",
-                    }}
-                  >
-                    Loading conversations…
-                  </div>
+                <div style={{ padding: "12px" }}>
+                  {[0, 1, 2, 3].map((i) => (
+                    <div
+                      key={i}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        padding: "12px",
+                        gap: "10px",
+                        borderBottom: "1px solid var(--border-primary)",
+                      }}
+                    >
+                      <div
+                        className="skeleton"
+                        style={{
+                          width: 38,
+                          height: 38,
+                          borderRadius: 10,
+                          flexShrink: 0,
+                        }}
+                      />
+                      <div style={{ flex: 1 }}>
+                        <div
+                          className="skeleton"
+                          style={{ height: 12, width: "60%", marginBottom: 8 }}
+                        />
+                        <div
+                          className="skeleton"
+                          style={{ height: 10, width: "80%" }}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : sortedConversations.length === 0 ? (
                 <div style={styles.emptyState}>
                   <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.3 }}>
                     ◇
                   </div>
-                  No conversations found
+                  {fetchError ? (
+                    <span
+                      style={{
+                        color: "#E06C6C",
+                        fontSize: 12,
+                        textAlign: "center",
+                        padding: "0 8px",
+                      }}
+                    >
+                      Error: {fetchError}
+                    </span>
+                  ) : (
+                    "No conversations found"
+                  )}
                 </div>
               ) : (
                 sortedConversations.map((conv, index) => {
@@ -872,8 +965,9 @@ const Inbox = () => {
                       <div
                         style={{
                           ...styles.convAvatar,
-                          background:
-                            isUnread && !isSelected
+                          background: conv.participants?.[0]?.profilePicUrl
+                            ? "transparent"
+                            : isUnread && !isSelected
                               ? "linear-gradient(135deg, #6ECC8B33, #6ECC8B11)"
                               : `linear-gradient(135deg, ${CLASSIFICATION_COLORS[cls]}33, ${CLASSIFICATION_COLORS[cls]}11)`,
                           border:
@@ -884,9 +978,54 @@ const Inbox = () => {
                             isUnread && !isSelected
                               ? "#6ECC8B"
                               : CLASSIFICATION_COLORS[cls],
+                          overflow: "hidden",
+                          padding: 0,
                         }}
                       >
-                        {(conv.participants?.[0]?.name || "?")[0].toUpperCase()}
+                        {conv.participants?.[0]?.profilePicUrl ? (
+                          <img
+                            src={conv.participants[0].profilePicUrl}
+                            alt={conv.participants[0].name}
+                            style={{
+                              width: "100%",
+                              height: "100%",
+                              objectFit: "cover",
+                              borderRadius: "50%",
+                              display: "block",
+                            }}
+                            onError={(e) => {
+                              e.target.style.display = "none";
+                              e.target.nextSibling.style.display = "flex";
+                            }}
+                          />
+                        ) : null}
+                        <span
+                          style={{
+                            display: conv.participants?.[0]?.profilePicUrl
+                              ? "none"
+                              : "flex",
+                            width: "100%",
+                            height: "100%",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: "inherit",
+                          }}
+                        >
+                          {(conv.participants?.[0]?.name ||
+                            "?")[0].toUpperCase()}
+                        </span>
+                        <span
+                          style={{
+                            position: "absolute",
+                            bottom: -3,
+                            right: -3,
+                            fontSize: 12,
+                            lineHeight: 1,
+                            filter: "drop-shadow(0 0 2px rgba(0,0,0,0.4))",
+                          }}
+                        >
+                          <PlatformIcon platform={activeTab} size={13} />
+                        </span>
                       </div>
                       <div style={styles.convInfo}>
                         <div style={styles.convNameRow}>
@@ -911,25 +1050,19 @@ const Inbox = () => {
                               🔒 {locks[conv.id].agentName?.split(" ")[0]}
                             </span>
                           )}
-                          <select
-                            value={cls}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) =>
-                              updateClassification(conv.id, e.target.value)
-                            }
-                            className="inbox-class-dropdown"
+                          <span
+                            title={CLASSIFICATION_LABELS[cls]}
                             style={{
-                              ...styles.classSelect,
-                              color: CLASSIFICATION_COLORS[cls],
-                              borderColor: CLASSIFICATION_COLORS[cls] + "55",
+                              display: "inline-block",
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              backgroundColor: CLASSIFICATION_COLORS[cls],
+                              flexShrink: 0,
+                              marginLeft: "auto",
+                              boxShadow: `0 0 4px ${CLASSIFICATION_COLORS[cls]}88`,
                             }}
-                          >
-                            <option value="non_classifie">Non Classifié</option>
-                            <option value="cible">Cible</option>
-                            <option value="hors_cible">Hors Cible</option>
-                            <option value="suivi">Suivi</option>
-                            <option value="priorite">Priorité</option>
-                          </select>
+                          />
                         </div>
                         <p
                           style={{
@@ -946,7 +1079,21 @@ const Inbox = () => {
                         </p>
                         <small style={styles.time}>
                           {conv.lastMessage?.time
-                            ? new Date(conv.lastMessage.time).toLocaleString()
+                            ? (() => {
+                                const diff =
+                                  Date.now() -
+                                  new Date(conv.lastMessage.time).getTime();
+                                if (diff < 60000) return "just now";
+                                if (diff < 3600000)
+                                  return `${Math.floor(diff / 60000)}m ago`;
+                                if (diff < 86400000)
+                                  return `${Math.floor(diff / 3600000)}h ago`;
+                                if (diff < 604800000)
+                                  return `${Math.floor(diff / 86400000)}d ago`;
+                                return new Date(
+                                  conv.lastMessage.time,
+                                ).toLocaleDateString();
+                              })()
                             : ""}
                         </small>
                       </div>
@@ -963,6 +1110,24 @@ const Inbox = () => {
               <>
                 <div style={styles.messageHeader}>
                   <div style={styles.messageHeaderRow}>
+                    {/* Profile picture in header */}
+                    {selectedConv.participants?.[0]?.profilePicUrl && (
+                      <img
+                        src={selectedConv.participants[0].profilePicUrl}
+                        alt={selectedConv.participants[0].name}
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: "50%",
+                          objectFit: "cover",
+                          flexShrink: 0,
+                          border: "2px solid var(--border-primary)",
+                        }}
+                        onError={(e) => {
+                          e.target.style.display = "none";
+                        }}
+                      />
+                    )}
                     <h3 style={styles.messageHeaderName}>
                       {selectedConv.participants
                         ?.map((p) => p.name)
@@ -971,6 +1136,33 @@ const Inbox = () => {
                     <span style={styles.platformTag}>
                       {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
                     </span>
+                    <select
+                      value={
+                        classifications[selectedConv.id] || "non_classifie"
+                      }
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) =>
+                        updateClassification(selectedConv.id, e.target.value)
+                      }
+                      className="inbox-class-dropdown"
+                      style={{
+                        ...styles.classSelect,
+                        color:
+                          CLASSIFICATION_COLORS[
+                            classifications[selectedConv.id] || "non_classifie"
+                          ],
+                        borderColor:
+                          CLASSIFICATION_COLORS[
+                            classifications[selectedConv.id] || "non_classifie"
+                          ] + "55",
+                      }}
+                    >
+                      <option value="non_classifie">Non Classifié</option>
+                      <option value="cible">Cible</option>
+                      <option value="hors_cible">Hors Cible</option>
+                      <option value="suivi">Suivi</option>
+                      <option value="priorite">Priorité</option>
+                    </select>
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"
@@ -1237,10 +1429,10 @@ const Inbox = () => {
 
 const styles = {
   container: {
-    margin: "-32px",
+    margin: 0,
     padding: 0,
     fontFamily: "'Hanken Grotesk', sans-serif",
-    height: "calc(100% + 64px)",
+    height: "100vh",
     display: "flex",
     flexDirection: "column",
     background: "var(--gradient-bg)",
@@ -1382,6 +1574,7 @@ const styles = {
     padding: "10px 14px",
     borderBottom: "1px solid var(--border-primary)",
     flexWrap: "wrap",
+    overflowX: "hidden",
     backgroundColor: "var(--bg-nav)",
     transition: "background-color 0.3s ease",
   },
@@ -1426,6 +1619,7 @@ const styles = {
     marginRight: "12px",
     flexShrink: 0,
     transition: "all 0.2s ease",
+    position: "relative",
   },
   convInfo: {
     flex: 1,

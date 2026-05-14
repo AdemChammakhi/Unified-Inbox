@@ -7,277 +7,340 @@ const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
-// GET /api/instagram/conversations - Fetch Instagram conversations
-router.get("/conversations", protect, async (req, res) => {
-  try {
-    const accessToken =
-      process.env.INSTAGRAM_ACCESS_TOKEN ||
-      process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-    const pageId = process.env.FACEBOOK_PAGE_ID;
+// In-memory cache — avoids hitting the slow Graph API on every poll
+let _igCache = null;
+let _igCacheTime = 0;
+const IG_CACHE_TTL = 30000; // 30 seconds
+// In-flight promise — ensures only ONE Graph API request runs at a time even if many
+// clients ask concurrently (prevents thundering herd / rate-limit hammering)
+let _igFetch = null;
 
-    if (!accessToken || !pageId) {
-      return res.status(400).json({
-        message:
-          "No access token found. Set INSTAGRAM_ACCESS_TOKEN or FACEBOOK_PAGE_ACCESS_TOKEN in .env",
-      });
-    }
+async function fetchInstagramConversations() {
+  const accessToken =
+    process.env.INSTAGRAM_ACCESS_TOKEN ||
+    process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+  const pageId = process.env.FACEBOOK_PAGE_ID;
 
-    console.log("Using Facebook Page ID:", pageId);
+  if (!accessToken || !pageId) {
+    throw Object.assign(new Error("No access token configured"), {
+      status: 400,
+    });
+  }
 
-    // Fetch conversations using the Facebook Page ID
-    // Fetch from BOTH "inbox" and "other" (message requests) folders
-    // so that DMs from people you don't follow are also included
-    const conversationFields =
-      "participants,messages{message,from,to,created_time,attachments}";
-    let conversations = [];
-    const seenConvIds = new Set();
-    const folders = ["inbox", "other"]; // "other" = message requests
+  console.log("Using Facebook Page ID:", pageId);
 
-    for (const folder of folders) {
-      let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
-      let params = {
-        platform: "instagram",
-        folder,
-        fields: conversationFields,
-        limit: 60,
-        access_token: accessToken,
-      };
-      const maxPages = 3;
-      for (let page = 0; page < maxPages; page++) {
-        try {
-          const convRes =
-            page === 0
-              ? await axios.get(nextUrl, { params })
-              : await axios.get(nextUrl);
-          const pageData = convRes.data.data || [];
-          for (const conv of pageData) {
-            if (!seenConvIds.has(conv.id)) {
-              seenConvIds.add(conv.id);
-              conversations.push(conv);
-            }
+  const conversationFields =
+    "participants{id,name,username,profile_pic},messages{message,from,to,created_time,attachments}";
+  let conversations = [];
+  const seenConvIds = new Set();
+  const folders = ["inbox", "other"];
+
+  for (const folder of folders) {
+    let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
+    let params = {
+      platform: "instagram",
+      folder,
+      fields: conversationFields,
+      limit: 60,
+      access_token: accessToken,
+    };
+    const maxPages = 1;
+    for (let page = 0; page < maxPages; page++) {
+      try {
+        const convRes =
+          page === 0
+            ? await axios.get(nextUrl, { params })
+            : await axios.get(nextUrl);
+        const pageData = convRes.data.data || [];
+        for (const conv of pageData) {
+          if (!seenConvIds.has(conv.id)) {
+            seenConvIds.add(conv.id);
+            conversations.push(conv);
           }
-          nextUrl = convRes.data.paging?.next;
-          if (!nextUrl || pageData.length === 0) break;
-        } catch (folderErr) {
-          console.error(
-            `Instagram folder=${folder} page=${page} error:`,
-            folderErr.response?.data?.error?.message || folderErr.message,
-          );
-          break;
         }
-      }
-    }
-
-    // ALSO fetch conversations WITHOUT the platform filter —
-    // some Instagram DMs appear here when they don't show with platform=instagram
-    try {
-      let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
-      let params = {
-        fields: conversationFields,
-        limit: 60,
-        access_token: accessToken,
-      };
-      const convRes = await axios.get(nextUrl, { params });
-      const pageData = convRes.data.data || [];
-      for (const conv of pageData) {
-        // Only include if it looks like an Instagram conversation
-        // (participant has username field or participant ID matches IG account)
-        const participants = conv.participants?.data || [];
-        const isIg = participants.some(
-          (p) => p.username || p.id === process.env.INSTAGRAM_ACCOUNT_ID,
+        nextUrl = convRes.data.paging?.next;
+        if (!nextUrl || pageData.length === 0) break;
+      } catch (folderErr) {
+        console.error(
+          `Instagram folder=${folder} page=${page} error:`,
+          folderErr.response?.data?.error?.message || folderErr.message,
         );
-        if (isIg && !seenConvIds.has(conv.id)) {
-          seenConvIds.add(conv.id);
-          conversations.push(conv);
-          console.log(`Found IG conversation from unfiltered API: ${conv.id}`);
-        }
+        break;
       }
-    } catch (unfilteredErr) {
-      console.error(
-        "Unfiltered conversations fetch error (non-fatal):",
-        unfilteredErr.response?.data?.error?.message || unfilteredErr.message,
-      );
     }
+  }
 
-    console.log(
-      `Instagram API returned ${conversations.length} conversations total`,
+  console.log(
+    `Instagram API returned ${conversations.length} conversations total`,
+  );
+
+  const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+
+  // --- Pass 1: build formatted list from Graph API response ---
+  const formatted = conversations.map((conv) => {
+    const participants = conv.participants?.data || [];
+    const messages = conv.messages?.data || [];
+    const lastMessage = messages[0];
+
+    const otherParticipants = participants.filter(
+      (p) => p.id !== igAccountId && p.id !== pageId,
     );
-    if (conversations.length > 0) {
-      console.log(
-        "Conv IDs:",
-        conversations.map((c) => c.id),
-      );
-    }
 
-    // Format conversations
-    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
-    const formatted = conversations.map((conv) => {
-      const participants = conv.participants?.data || [];
-      const messages = conv.messages?.data || [];
-      const lastMessage = messages[0];
-
-      // Filter out the page's own Instagram account so participants[0] is always the other user
-      const otherParticipants = participants.filter(
-        (p) => p.id !== igAccountId && p.id !== pageId,
-      );
-
-      // Build a name lookup from participants
-      const nameMap = {};
-      participants.forEach((p) => {
-        nameMap[p.id] = p.username || p.name || "Unknown";
-      });
-
-      // Sync all messages to database (non-blocking)
-      for (const m of messages) {
-        const direction =
-          m.from?.id === igAccountId || m.from?.id === pageId
-            ? "outgoing"
-            : "incoming";
-        Message.findOneAndUpdate(
-          { externalId: m.id },
-          {
-            $setOnInsert: {
-              platform: "instagram",
-              conversationId: conv.id,
-              senderId: m.from?.id || "unknown",
-              senderName:
-                m.from?.username ||
-                m.from?.name ||
-                nameMap[m.from?.id] ||
-                "Unknown",
-              recipientId: m.to?.data?.[0]?.id || igAccountId,
-              content: m.message || "",
-              messageType: m.attachments ? "attachment" : "text",
-              direction,
-              status: direction === "outgoing" ? "sent" : "delivered",
-              externalId: m.id,
-              timestamp: m.created_time,
-            },
-          },
-          { upsert: true },
-        ).catch((err) =>
-          console.error("IG message sync error (non-fatal):", err.message),
-        );
-      }
-
-      return {
-        id: conv.id,
-        participants: otherParticipants.map((p) => ({
-          id: p.id,
-          name: p.username || p.name || "Unknown",
-        })),
-        lastMessage: lastMessage
-          ? {
-              text: lastMessage.message || "[Attachment]",
-              from:
-                lastMessage.from?.username ||
-                lastMessage.from?.name ||
-                "Unknown",
-              time: lastMessage.created_time,
-            }
-          : null,
-        messages: messages.map((m) => ({
-          id: m.id,
-          text: m.message || "",
-          from: m.from?.username || m.from?.name || "Unknown",
-          fromId: m.from?.id,
-          to: m.to?.data?.[0]?.username || m.to?.data?.[0]?.name || "Unknown",
-          time: m.created_time,
-          attachments: m.attachments?.data || [],
-        })),
-      };
+    // nameMap: participant id → best available name (username preferred over display name)
+    const nameMap = {};
+    participants.forEach((p) => {
+      const best = p.username || p.name;
+      if (best && !/^\d{6,}$/.test(best)) nameMap[p.id] = best;
     });
 
-    // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
-    try {
-      const knownIds = new Set();
-      formatted.forEach((c) => {
-        knownIds.add(c.id);
-        c.participants.forEach((p) => knownIds.add(p.id));
-      });
-      console.log(
-        `Instagram merge: ${formatted.length} API conversations, knownIds count=${knownIds.size}`,
+    const resolveFromName = (fromObj) =>
+      fromObj?.username || fromObj?.name || nameMap[fromObj?.id] || null;
+
+    for (const m of messages) {
+      const direction =
+        m.from?.id === igAccountId || m.from?.id === pageId
+          ? "outgoing"
+          : "incoming";
+      Message.findOneAndUpdate(
+        { externalId: m.id },
+        {
+          $setOnInsert: {
+            platform: "instagram",
+            conversationId: conv.id,
+            senderId: m.from?.id || "unknown",
+            senderName: resolveFromName(m.from) || "Unknown",
+            recipientId: m.to?.data?.[0]?.id || igAccountId,
+            content: m.message || "",
+            messageType: m.attachments ? "attachment" : "text",
+            direction,
+            status: direction === "outgoing" ? "sent" : "delivered",
+            externalId: m.id,
+            timestamp: m.created_time,
+          },
+        },
+        { upsert: true },
+      ).catch((err) =>
+        console.error("IG message sync error (non-fatal):", err.message),
       );
-
-      // Get recent messages from DB for this platform (both incoming AND outgoing)
-      // so webhook-delivered conversations always surface even if the Graph API is stale
-      const recentDbMsgs = await Message.find({
-        platform: "instagram",
-      })
-        .sort({ createdAt: -1 })
-        .limit(500);
-
-      console.log(
-        `Instagram merge: ${recentDbMsgs.length} recent DB messages found`,
-      );
-
-      // Group by conversationId, only keep those not already in API results
-      const newConvMap = {};
-      let skippedKnown = 0;
-      for (const m of recentDbMsgs) {
-        if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) {
-          skippedKnown++;
-          continue;
-        }
-        const key = m.conversationId || m.senderId;
-        if (!newConvMap[key]) {
-          newConvMap[key] = {
-            id: key,
-            participants: [{ id: m.senderId, name: m.senderName || "Unknown" }],
-            lastMessage: null,
-            messages: [],
-            _fromDb: true,
-          };
-        }
-        const conv = newConvMap[key];
-        const msg = {
-          id: m.externalId || m._id.toString(),
-          text: m.content || "",
-          from: m.senderName || "Unknown",
-          fromId: m.senderId,
-          time: m.timestamp || m.createdAt,
-          direction: m.direction,
-        };
-        conv.messages.push(msg);
-        if (
-          !conv.lastMessage ||
-          new Date(msg.time) > new Date(conv.lastMessage.time)
-        ) {
-          conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
-        }
-      }
-
-      const dbOnlyConvs = Object.values(newConvMap);
-      console.log(
-        `Instagram merge: ${skippedKnown} msgs matched known API convos, ${dbOnlyConvs.length} DB-only conversation(s) to add`,
-      );
-      if (dbOnlyConvs.length > 0) {
-        console.log(
-          "DB-only convos:",
-          dbOnlyConvs.map((c) => ({
-            id: c.id,
-            name: c.participants[0]?.name,
-            msgs: c.messages.length,
-          })),
-        );
-        formatted.unshift(...dbOnlyConvs);
-      }
-    } catch (mergeErr) {
-      console.error("DB merge non-fatal error:", mergeErr.message);
     }
 
-    formatted.sort(
-      (a, b) =>
-        new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
+    return {
+      id: conv.id,
+      participants: otherParticipants.map((p) => ({
+        id: p.id,
+        name: p.username || p.name || null, // null signals "needs resolution"
+        profilePicUrl: p.profile_pic || null,
+      })),
+      lastMessage: lastMessage
+        ? {
+            text: lastMessage.message || "[Attachment]",
+            from: resolveFromName(lastMessage.from),
+            time: lastMessage.created_time,
+          }
+        : null,
+      messages: messages.map((m) => ({
+        id: m.id,
+        text: m.message || "",
+        from: resolveFromName(m.from),
+        fromId: m.from?.id,
+        to: m.to?.data?.[0]?.username || m.to?.data?.[0]?.name || "Unknown",
+        time: m.created_time,
+        attachments: m.attachments?.data || [],
+      })),
+      _nameMap: nameMap, // carry forward for resolution pass
+    };
+  });
+
+  // --- Pass 2: supplementary lookup for participants still without a name ---
+  // The Graph API sometimes omits username/name in the participants sub-fields.
+  // For those, directly call /{igsid}?fields=username,name to get the real handle.
+  const unknownIds = new Set();
+  formatted.forEach((conv) => {
+    conv.participants.forEach((p) => {
+      if (!p.name) unknownIds.add(p.id);
+    });
+  });
+
+  const resolvedExtra = {};
+  if (unknownIds.size > 0) {
+    await Promise.all(
+      [...unknownIds].map(async (id) => {
+        try {
+          const r = await axios.get(`${GRAPH_API}/${id}`, {
+            params: { fields: "username,name", access_token: accessToken },
+            timeout: 4000,
+          });
+          const n = r.data?.username || r.data?.name;
+          if (n && !/^\d{6,}$/.test(n)) resolvedExtra[id] = n;
+        } catch {
+          // non-fatal — will fall back to senderId partial display
+        }
+      }),
     );
-    return res.json({ conversations: formatted.slice(0, 20) });
+  }
+
+  // Apply resolved names and clean up the temporary _nameMap
+  formatted.forEach((conv) => {
+    delete conv._nameMap;
+    conv.participants = conv.participants.map((p) => ({
+      ...p,
+      name: p.name || resolvedExtra[p.id] || `User ${p.id.slice(-4)}`,
+    }));
+    // Patch lastMessage.from and each message.from with resolved names
+    if (conv.lastMessage && !conv.lastMessage.from) {
+      conv.lastMessage.from = "Unknown";
+    }
+    conv.messages = conv.messages.map((m) => ({
+      ...m,
+      from: m.from || resolvedExtra[m.fromId] || "Unknown",
+    }));
+  });
+
+  // Merge in DB-only conversations
+  try {
+    const knownIds = new Set();
+    formatted.forEach((c) => {
+      knownIds.add(c.id);
+      c.participants.forEach((p) => knownIds.add(p.id));
+    });
+
+    const recentDbMsgs = await Message.find({ platform: "instagram" })
+      .sort({ createdAt: -1 })
+      .limit(500);
+
+    const newConvMap = {};
+    for (const m of recentDbMsgs) {
+      if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) continue;
+      const key = m.conversationId || m.senderId;
+      // Resolve name: prefer stored name, then supplementary lookup, then partial ID
+      const isUnknown =
+        !m.senderName ||
+        m.senderName === "Unknown" ||
+        /^\d{6,}$/.test(m.senderName);
+      const resolvedName = isUnknown
+        ? resolvedExtra[m.senderId] || `User ${m.senderId.slice(-4)}`
+        : m.senderName;
+      if (!newConvMap[key]) {
+        newConvMap[key] = {
+          id: key,
+          participants: [{ id: m.senderId, name: resolvedName }],
+          lastMessage: null,
+          messages: [],
+          _fromDb: true,
+        };
+      }
+      const conv = newConvMap[key];
+      const msg = {
+        id: m.externalId || m._id.toString(),
+        text: m.content || "",
+        from: m.senderName || "Unknown",
+        fromId: m.senderId,
+        time: m.timestamp || m.createdAt,
+        direction: m.direction,
+      };
+      conv.messages.push(msg);
+      if (
+        !conv.lastMessage ||
+        new Date(msg.time) > new Date(conv.lastMessage.time)
+      ) {
+        conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
+      }
+    }
+
+    const dbOnlyConvs = Object.values(newConvMap);
+    if (dbOnlyConvs.length > 0) {
+      formatted.unshift(...dbOnlyConvs);
+    }
+  } catch (mergeErr) {
+    console.error("DB merge non-fatal error:", mergeErr.message);
+  }
+
+  formatted.sort(
+    (a, b) =>
+      new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
+  );
+  const result = formatted.slice(0, 20);
+  _igCache = result;
+  _igCacheTime = Date.now();
+  return result;
+}
+
+// GET /api/instagram/conversations - Fetch Instagram conversations
+// Uses in-flight deduplication: if a fetch is already running, concurrent requests
+// wait on the same promise instead of each launching a separate Graph API call.
+router.get("/conversations", protect, async (req, res) => {
+  if (_igCache && Date.now() - _igCacheTime < IG_CACHE_TTL) {
+    return res.json({ conversations: _igCache });
+  }
+  try {
+    if (!_igFetch) {
+      _igFetch = fetchInstagramConversations().finally(() => {
+        _igFetch = null;
+      });
+    }
+    const result = await _igFetch;
+
+    // Background: patch any DB messages that have null or "Unknown" senderName
+    // using the names we just resolved from the Graph API (non-blocking)
+    setImmediate(async () => {
+      try {
+        const badMsgs = await Message.find({
+          platform: "instagram",
+          direction: "incoming",
+          $or: [{ senderName: null }, { senderName: "Unknown" }],
+        }).select("_id senderId");
+        if (badMsgs.length === 0) return;
+        const accessToken =
+          process.env.INSTAGRAM_ACCESS_TOKEN ||
+          process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+        if (!accessToken) return;
+        const uniqueSenderIds = [...new Set(badMsgs.map((m) => m.senderId))];
+        const nameUpdates = {};
+        await Promise.all(
+          uniqueSenderIds.map(async (id) => {
+            try {
+              const r = await axios.get(`${GRAPH_API}/${id}`, {
+                params: { fields: "username,name", access_token: accessToken },
+                timeout: 4000,
+              });
+              const n = r.data?.username || r.data?.name;
+              if (n && !/^\d{6,}$/.test(n)) nameUpdates[id] = n;
+            } catch {}
+          }),
+        );
+        for (const [senderId, name] of Object.entries(nameUpdates)) {
+          await Message.updateMany(
+            {
+              platform: "instagram",
+              senderId,
+              $or: [{ senderName: null }, { senderName: "Unknown" }],
+            },
+            { $set: { senderName: name } },
+          );
+        }
+        if (Object.keys(nameUpdates).length > 0) {
+          // Bust cache so the next fetch reflects the healed names
+          _igCache = null;
+          console.log(
+            `IG name heal: patched ${Object.keys(nameUpdates).length} sender(s)`,
+          );
+        }
+      } catch (healErr) {
+        console.error("IG name heal error (non-fatal):", healErr.message);
+      }
+    });
+
+    return res.json({ conversations: result });
   } catch (error) {
+    if (error.status === 400) {
+      return res.status(400).json({ message: error.message });
+    }
     console.error(
       "Instagram API error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
 
-    // If the Graph API fails, fall back to conversations built from the local DB
+    // Fallback to DB-only conversations
     try {
       const dbMessages = await Message.find({ platform: "instagram" })
         .sort({ timestamp: -1 })
@@ -285,13 +348,20 @@ router.get("/conversations", protect, async (req, res) => {
 
       const convMap = {};
       for (const m of dbMessages) {
+        const isUnknown =
+          !m.senderName ||
+          m.senderName === "Unknown" ||
+          /^\d{6,}$/.test(m.senderName);
+        const displayName = isUnknown
+          ? `User ${m.senderId.slice(-4)}`
+          : m.senderName;
         if (!convMap[m.conversationId]) {
           convMap[m.conversationId] = {
             id: m.conversationId,
             participants: [
               {
                 id: m.direction === "incoming" ? m.senderId : m.recipientId,
-                name: m.direction === "incoming" ? m.senderName : m.recipientId,
+                name: m.direction === "incoming" ? displayName : "Page",
               },
             ],
             lastMessage: null,
@@ -363,11 +433,31 @@ router.post("/send", protect, async (req, res) => {
     }
     // Auto-lock on first reply (marketing agents)
     if (!existingLock && req.user.role === "marketing") {
-      await ConversationLock.create({
-        conversationId: lockConvId,
-        platform: "instagram",
-        lockedBy: req.user._id,
-      });
+      try {
+        await ConversationLock.create({
+          conversationId: lockConvId,
+          platform: "instagram",
+          lockedBy: req.user._id,
+        });
+      } catch (lockErr) {
+        // Duplicate key: another agent locked between our check and create
+        if (lockErr.code === 11000) {
+          const raceLock = await ConversationLock.findOne({
+            conversationId: lockConvId,
+            platform: "instagram",
+          });
+          if (
+            raceLock &&
+            raceLock.lockedBy.toString() !== req.user._id.toString()
+          ) {
+            return res.status(403).json({
+              message: "This conversation was just locked by another agent.",
+            });
+          }
+        } else {
+          throw lockErr;
+        }
+      }
     }
 
     // Instagram Messaging API requires the Instagram Business Account ID, not the Page ID
@@ -531,4 +621,10 @@ router.get("/messages", protect, async (req, res) => {
   }
 });
 
+function clearIgCache() {
+  _igCache = null;
+  _igCacheTime = 0;
+}
+
 module.exports = router;
+module.exports.clearCache = clearIgCache;

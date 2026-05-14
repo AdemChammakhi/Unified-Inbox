@@ -4,6 +4,8 @@ const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
 const { protect } = require("../middleware/auth");
+const instagramRoute = require("./instagram");
+const emailRoute = require("./email");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -328,7 +330,7 @@ router.post("/instagram", async (req, res) => {
             );
 
             // Look up Instagram sender name (with timeout)
-            const igSenderName = await getSenderName(senderId, "instagram");
+            let igSenderName = await getSenderName(senderId, "instagram");
 
             // Upsert to DB (avoids duplicate errors if webhook fires twice)
             const newMessage = await Message.findOneAndUpdate(
@@ -338,7 +340,7 @@ router.post("/instagram", async (req, res) => {
                   platform: "instagram",
                   conversationId: senderId,
                   senderId: senderId,
-                  senderName: igSenderName,
+                  senderName: igSenderName || `User ${senderId.slice(-4)}`,
                   recipientId: recipientId,
                   content: msgText,
                   messageType: event.message.attachments
@@ -355,6 +357,7 @@ router.post("/instagram", async (req, res) => {
 
             console.log("Instagram message saved:", newMessage._id);
             trimConversation("instagram", senderId).catch(() => {});
+            instagramRoute.clearCache();
 
             // Emit real-time event with formatted data for instant UI update
             if (io) {
@@ -363,13 +366,13 @@ router.post("/instagram", async (req, res) => {
                 message: {
                   id: msgMid,
                   text: msgText,
-                  from: igSenderName,
+                  from: igSenderName || `User ${senderId.slice(-4)}`,
                   fromId: senderId,
                   time: new Date().toISOString(),
                 },
                 conversationId: senderId,
                 senderId: senderId,
-                senderName: igSenderName,
+                senderName: igSenderName || `User ${senderId.slice(-4)}`,
               });
             }
           }

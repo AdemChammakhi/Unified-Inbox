@@ -3,6 +3,18 @@ import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
+} from "recharts";
 
 const EMPTY_FORM = {
   firstName: "",
@@ -25,9 +37,45 @@ const ROLES = [
   { key: "marketing", icon: "📢", label: "Marketing" },
 ];
 
+const CHART_COLORS = ["#C8956A", "#6ECC8B", "#7BA3CC", "#E06C6C", "#D4A24C"];
+
 const AdminDashboard = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [analyticsRange, setAnalyticsRange] = useState(7);
+  const [analytics, setAnalytics] = useState(null);
+  const [agentStats, setAgentStats] = useState([]);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
+
+  const fetchAnalytics = useCallback(
+    async (range) => {
+      const token = user?.token;
+      if (!token) return;
+      setAnalyticsLoading(true);
+      try {
+        const [summaryRes, agentsRes] = await Promise.all([
+          axios.get(`/api/analytics/summary?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          axios.get("/api/analytics/agents", {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
+        setAnalytics(summaryRes.data);
+        setAgentStats(agentsRes.data || []);
+      } catch (err) {
+        console.error("Analytics fetch failed:", err.message);
+      } finally {
+        setAnalyticsLoading(false);
+      }
+    },
+    [user?.token],
+  );
+
+  useEffect(() => {
+    fetchAnalytics(analyticsRange);
+  }, [fetchAnalytics, analyticsRange]);
+
   const [locks, setLocks] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -110,11 +158,12 @@ const AdminDashboard = () => {
     }
   };
 
-  const grouped = locks.reduce((acc, lock) => {
-    if (!acc[lock.platform]) acc[lock.platform] = [];
-    acc[lock.platform].push(lock);
-    return acc;
-  }, {});
+  const platformPieData = analytics
+    ? Object.entries(analytics.byPlatform || {}).map(([name, value]) => ({
+        name,
+        value,
+      }))
+    : [];
 
   return (
     <DashboardLayout>
@@ -126,25 +175,224 @@ const AdminDashboard = () => {
           </p>
         </div>
 
-        {/* Stats Row */}
-        <div style={styles.statsRow}>
-          <div style={styles.statCard}>
-            <div style={styles.statValue}>{locks.length}</div>
-            <div style={styles.statLabel}>Active Assignments</div>
-          </div>
-          <div style={styles.statCard}>
-            <div style={styles.statValue}>{Object.keys(grouped).length}</div>
-            <div style={styles.statLabel}>Platforms Active</div>
-          </div>
-          <div style={styles.statCard}>
-            <div style={styles.statValue}>
-              {new Set(locks.map((l) => l.agentId)).size}
+        {/* ── Analytics Section ── */}
+        <div style={{ marginBottom: 28 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 14,
+            }}
+          >
+            <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
+              Analytics Overview
+            </h2>
+            <div className="range-tabs">
+              {[1, 7, 30].map((r) => (
+                <button
+                  key={r}
+                  className={`range-tab${analyticsRange === r ? " active" : ""}`}
+                  onClick={() => setAnalyticsRange(r)}
+                >
+                  {r === 1 ? "Today" : r === 7 ? "7 days" : "30 days"}
+                </button>
+              ))}
             </div>
-            <div style={styles.statLabel}>Agents Working</div>
           </div>
-        </div>
 
-        {/* Active Assignments Table */}
+          {analyticsLoading ? (
+            <div className="analytics-grid">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="analytics-card">
+                  <div
+                    className="skeleton"
+                    style={{ height: 12, width: "50%", marginBottom: 10 }}
+                  />
+                  <div
+                    className="skeleton"
+                    style={{ height: 28, width: "40%" }}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <div className="analytics-grid">
+                <div className="analytics-card">
+                  <div className="analytics-card-label">
+                    Total ({analyticsRange}d)
+                  </div>
+                  <div
+                    className="analytics-card-value"
+                    style={{ color: "#C8956A" }}
+                  >
+                    {analytics?.totalInRange ?? "—"}
+                  </div>
+                  <div className="analytics-card-sub">conversations</div>
+                </div>
+                <div className="analytics-card">
+                  <div className="analytics-card-label">Today</div>
+                  <div
+                    className="analytics-card-value"
+                    style={{ color: "#6ECC8B" }}
+                  >
+                    {analytics?.todayCount ?? "—"}
+                  </div>
+                  <div className="analytics-card-sub">new today</div>
+                </div>
+                <div className="analytics-card">
+                  <div className="analytics-card-label">This Week</div>
+                  <div
+                    className="analytics-card-value"
+                    style={{ color: "#7BA3CC" }}
+                  >
+                    {analytics?.weekCount ?? "—"}
+                  </div>
+                  <div className="analytics-card-sub">last 7 days</div>
+                </div>
+                <div className="analytics-card">
+                  <div className="analytics-card-label">Active Agents</div>
+                  <div
+                    className="analytics-card-value"
+                    style={{ color: "#D4A24C" }}
+                  >
+                    {analytics?.activeAgentCount ?? "—"}
+                  </div>
+                  <div className="analytics-card-sub">agents working</div>
+                </div>
+              </div>
+
+              <div className="charts-grid">
+                {/* Daily message volume */}
+                <div className="chart-card">
+                  <div className="chart-card-title">Daily Volume</div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <BarChart
+                      data={analytics?.dailyData || []}
+                      margin={{ top: 0, right: 0, left: -20, bottom: 0 }}
+                    >
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 11, fill: "var(--text-faint)" }}
+                      />
+                      <YAxis
+                        tick={{ fontSize: 11, fill: "var(--text-faint)" }}
+                        allowDecimals={false}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          background: "var(--bg-card)",
+                          border: "1px solid var(--border-primary)",
+                          borderRadius: 8,
+                          fontSize: 12,
+                        }}
+                        cursor={{ fill: "var(--bg-hover)" }}
+                      />
+                      <Bar
+                        dataKey="count"
+                        fill="#C8956A"
+                        radius={[4, 4, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Platform breakdown */}
+                <div className="chart-card">
+                  <div className="chart-card-title">By Platform</div>
+                  {platformPieData.length === 0 ? (
+                    <div
+                      style={{
+                        textAlign: "center",
+                        padding: "40px 0",
+                        color: "var(--text-faint)",
+                        fontSize: 13,
+                      }}
+                    >
+                      No data
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <PieChart>
+                        <Pie
+                          data={platformPieData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={50}
+                          outerRadius={80}
+                          paddingAngle={3}
+                          dataKey="value"
+                          label={({ name, percent }) =>
+                            `${name} ${(percent * 100).toFixed(0)}%`
+                          }
+                          labelLine={false}
+                        >
+                          {platformPieData.map((_, idx) => (
+                            <Cell
+                              key={idx}
+                              fill={CHART_COLORS[idx % CHART_COLORS.length]}
+                            />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            background: "var(--bg-card)",
+                            border: "1px solid var(--border-primary)",
+                            borderRadius: 8,
+                            fontSize: 12,
+                          }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+
+                {/* Agent performance */}
+                {agentStats.length > 0 && (
+                  <div className="chart-card" style={{ gridColumn: "1 / -1" }}>
+                    <div className="chart-card-title">
+                      Agent Performance (Locked Conversations)
+                    </div>
+                    <ResponsiveContainer width="100%" height={180}>
+                      <BarChart
+                        data={agentStats}
+                        layout="vertical"
+                        margin={{ top: 0, right: 20, left: 60, bottom: 0 }}
+                      >
+                        <XAxis
+                          type="number"
+                          tick={{ fontSize: 11, fill: "var(--text-faint)" }}
+                          allowDecimals={false}
+                        />
+                        <YAxis
+                          type="category"
+                          dataKey="agentName"
+                          tick={{ fontSize: 12, fill: "var(--text-secondary)" }}
+                          width={80}
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            background: "var(--bg-card)",
+                            border: "1px solid var(--border-primary)",
+                            borderRadius: 8,
+                            fontSize: 12,
+                          }}
+                          cursor={{ fill: "var(--bg-hover)" }}
+                        />
+                        <Bar
+                          dataKey="count"
+                          fill="#7BA3CC"
+                          radius={[0, 4, 4, 0]}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
         <div style={styles.section}>
           <h2 style={styles.sectionTitle}>Active Agent Assignments</h2>
 

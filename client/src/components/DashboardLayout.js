@@ -1,67 +1,135 @@
-import React from "react";
+import React, { useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, Link, useLocation } from "react-router-dom";
+import {
+  Inbox,
+  LayoutDashboard,
+  LogOut,
+  Sun,
+  Moon,
+  ChevronLeft,
+  ChevronRight,
+  MessageSquare,
+} from "lucide-react";
 
-const DashboardLayout = ({ children }) => {
+const NAV_ITEMS = [
+  { to: "/inbox", icon: Inbox, label: "Inbox" },
+  { to: null, icon: LayoutDashboard, label: "Dashboard", roleLink: true },
+];
+
+const DashboardLayout = ({ children, noPadding = false }) => {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
 
   const handleLogout = () => {
     logout();
     navigate("/login");
   };
 
+  const dashboardPath = user?.role ? `/${user.role}` : "/";
+
+  const initials = user
+    ? `${user.firstName?.[0] || ""}${user.lastName?.[0] || ""}`.toUpperCase()
+    : "?";
+
   return (
-    <div className="dashboard">
-      <nav className="dashboard-nav">
-        <div className="nav-brand">
-          <img src="/logo.png" alt="Logo" className="brand-logo" />
-          <span className="brand-text">Unified Inbox</span>
+    <div className="app-shell">
+      {/* ── Sidebar ── */}
+      <aside className={`sidebar${collapsed ? " sidebar-collapsed" : ""}`}>
+        {/* Brand */}
+        <div className="sidebar-brand">
+          <div className="sidebar-brand-icon">
+            <MessageSquare size={20} />
+          </div>
+          {!collapsed && (
+            <span className="sidebar-brand-text">Unified Inbox</span>
+          )}
         </div>
-        <div className="nav-right">
+
+        {/* Nav */}
+        <nav className="sidebar-nav">
           <Link
             to="/inbox"
-            style={{
-              textDecoration: "none",
-              marginRight: 15,
-              fontWeight: 600,
-            }}
+            className={`sidebar-link${location.pathname === "/inbox" ? " active" : ""}`}
+            title="Inbox"
           >
-            📥 Inbox
+            <Inbox size={18} className="sidebar-link-icon" />
+            {!collapsed && <span>Inbox</span>}
           </Link>
+
           <Link
-            to={`/${user?.role}`}
-            style={{
-              textDecoration: "none",
-              marginRight: 15,
-              fontWeight: 600,
-            }}
+            to={dashboardPath}
+            className={`sidebar-link${location.pathname === dashboardPath ? " active" : ""}`}
+            title="Dashboard"
           >
-            📊 Dashboard
+            <LayoutDashboard size={18} className="sidebar-link-icon" />
+            {!collapsed && <span>Dashboard</span>}
           </Link>
-          <div className="user-info">
-            <strong>
-              {user?.firstName} {user?.lastName}
-            </strong>
-          </div>
-          <span className={`badge badge-${user?.role}`}>{user?.role}</span>
+        </nav>
+
+        {/* Spacer */}
+        <div style={{ flex: 1 }} />
+
+        {/* Bottom section */}
+        <div className="sidebar-bottom">
+          {/* Theme toggle */}
           <button
-            className="theme-toggle"
+            className="sidebar-icon-btn"
             onClick={toggleTheme}
             title={
               theme === "dark" ? "Switch to light mode" : "Switch to dark mode"
             }
           >
-            {theme === "dark" ? "☀️" : "🌙"}
+            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            {!collapsed && (
+              <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+            )}
           </button>
-          <button className="btn-logout" onClick={handleLogout}>
-            Logout
+
+          {/* User info */}
+          <div className="sidebar-user">
+            <div className="sidebar-avatar">{initials}</div>
+            {!collapsed && (
+              <div className="sidebar-user-info">
+                <span className="sidebar-user-name">
+                  {user?.firstName} {user?.lastName}
+                </span>
+                <span className={`sidebar-role-badge role-${user?.role}`}>
+                  {user?.role}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Logout */}
+          <button
+            className="sidebar-icon-btn sidebar-logout"
+            onClick={handleLogout}
+            title="Logout"
+          >
+            <LogOut size={16} />
+            {!collapsed && <span>Logout</span>}
           </button>
         </div>
-      </nav>
-      <div className="dashboard-content">{children}</div>
+
+        {/* Collapse toggle */}
+        <button
+          className="sidebar-collapse-btn"
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+        </button>
+      </aside>
+
+      {/* ── Main content ── */}
+      <main className={`main-content${noPadding ? " no-padding" : ""}`}>
+        {children}
+      </main>
     </div>
   );
 };

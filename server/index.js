@@ -55,6 +55,7 @@ app.use("/api/email", require("./routes/email"));
 app.use("/api/classifications", require("./routes/classifications"));
 app.use("/api/locks", require("./routes/locks"));
 app.use("/api/conversations", require("./routes/conversations"));
+app.use("/api/analytics", require("./routes/analytics"));
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =

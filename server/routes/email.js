@@ -7,6 +7,13 @@ const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 
+// In-memory cache for email conversations
+let _emailCache = null;
+let _emailCacheTime = 0;
+const EMAIL_CACHE_TTL = 60000; // 60 seconds
+// In-flight promise — prevents concurrent IMAP connections when multiple agents load at once
+let _emailFetch = null;
+
 // Helper: connect to IMAP and fetch emails
 function fetchEmails(limit = 50) {
   return new Promise((resolve, reject) => {
@@ -17,14 +24,7 @@ function fetchEmails(limit = 50) {
       port: parseInt(process.env.EMAIL_IMAP_PORT || "993"),
       tls: true,
       tlsOptions: { rejectUnauthorized: false },
-      connTimeout: 10000,
-      authTimeout: 8000,
     });
-
-    const timer = setTimeout(() => {
-      imap.destroy();
-      reject(new Error("IMAP connection timed out after 10s"));
-    }, 12000);
 
     const emails = [];
 
@@ -47,76 +47,76 @@ function fetchEmails(limit = 50) {
           struct: true,
         });
 
+        const parsePromises = [];
+
         fetch.on("message", (msg) => {
-          msg.on("body", (stream) => {
-            simpleParser(stream, (err, parsed) => {
-              if (err) return;
-              // Convert inline CID attachments to base64 data URIs
-              let htmlContent = parsed.html || "";
-              const inlineAttachments = [];
-              if (parsed.attachments && parsed.attachments.length > 0) {
-                for (const att of parsed.attachments) {
-                  if (att.contentId && att.content) {
-                    const cid = att.contentId.replace(/[<>]/g, "");
-                    const base64 = att.content.toString("base64");
-                    const dataUri = `data:${att.contentType};base64,${base64}`;
-                    htmlContent = htmlContent.replace(
-                      new RegExp(
-                        `cid:${cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-                        "gi",
-                      ),
-                      dataUri,
-                    );
-                  }
-                  // Also expose non-inline attachments with base64 data
-                  if (att.content && att.contentType) {
-                    inlineAttachments.push({
-                      filename: att.filename || "attachment",
-                      contentType: att.contentType,
-                      size: att.size,
-                      url: `data:${att.contentType};base64,${att.content.toString("base64")}`,
-                    });
+          const p = new Promise((res) => {
+            msg.on("body", (stream) => {
+              simpleParser(stream, (err, parsed) => {
+                res(); // always resolve — errors are non-fatal
+                if (err) return;
+                // Convert inline CID attachments to base64 data URIs
+                let htmlContent = parsed.html || "";
+                const inlineAttachments = [];
+                if (parsed.attachments && parsed.attachments.length > 0) {
+                  for (const att of parsed.attachments) {
+                    if (att.contentId && att.content) {
+                      const cid = att.contentId.replace(/[<>]/g, "");
+                      const base64 = att.content.toString("base64");
+                      const dataUri = `data:${att.contentType};base64,${base64}`;
+                      htmlContent = htmlContent.replace(
+                        new RegExp(
+                          `cid:${cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+                          "gi",
+                        ),
+                        dataUri,
+                      );
+                    }
+                    // Also expose non-inline attachments with base64 data
+                    if (att.content && att.contentType) {
+                      inlineAttachments.push({
+                        filename: att.filename || "attachment",
+                        contentType: att.contentType,
+                        size: att.size,
+                        url: `data:${att.contentType};base64,${att.content.toString("base64")}`,
+                      });
+                    }
                   }
                 }
-              }
 
-              emails.push({
-                id: parsed.messageId || `email_${Date.now()}_${Math.random()}`,
-                from: parsed.from?.text || "Unknown",
-                fromAddress: parsed.from?.value?.[0]?.address || "",
-                to: parsed.to?.text || "",
-                toAddress: parsed.to?.value?.[0]?.address || "",
-                subject: parsed.subject || "(No Subject)",
-                text: parsed.text || "",
-                html: htmlContent,
-                date: parsed.date || new Date(),
-                attachments: inlineAttachments,
+                emails.push({
+                  id:
+                    parsed.messageId || `email_${Date.now()}_${Math.random()}`,
+                  from: parsed.from?.text || "Unknown",
+                  fromAddress: parsed.from?.value?.[0]?.address || "",
+                  to: parsed.to?.text || "",
+                  toAddress: parsed.to?.value?.[0]?.address || "",
+                  subject: parsed.subject || "(No Subject)",
+                  text: parsed.text || "",
+                  html: htmlContent,
+                  date: parsed.date || new Date(),
+                  attachments: inlineAttachments,
+                });
               });
             });
           });
+          parsePromises.push(p);
         });
 
         fetch.once("error", (err) => {
-          clearTimeout(timer);
           imap.end();
           reject(err);
         });
 
         fetch.once("end", () => {
           imap.end();
-          // Wait a bit for all parsers to finish
-          setTimeout(() => {
-            clearTimeout(timer);
-            resolve(emails);
-          }, 500);
+          // Wait for ALL parsers to finish before resolving
+          Promise.all(parsePromises).then(() => resolve(emails));
         });
       });
     });
 
-    imap.once("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    imap.once("error", (err) => reject(err));
     imap.connect();
   });
 }
@@ -133,13 +133,16 @@ router.get("/conversations", protect, async (req, res) => {
       return res.json({ conversations: [] });
     }
 
-    let emails = [];
-    try {
-      emails = await fetchEmails(100);
-    } catch (imapErr) {
-      console.error("IMAP connection error:", imapErr.message);
-      return res.json({ conversations: [], error: imapErr.message });
+    if (_emailCache && Date.now() - _emailCacheTime < EMAIL_CACHE_TTL) {
+      return res.json({ conversations: _emailCache });
     }
+
+    if (!_emailFetch) {
+      _emailFetch = fetchEmails(30).finally(() => {
+        _emailFetch = null;
+      });
+    }
+    const emails = await _emailFetch;
 
     // Group by sender address into "conversations"
     const convMap = {};
@@ -219,6 +222,8 @@ router.get("/conversations", protect, async (req, res) => {
       return timeB - timeA;
     });
 
+    _emailCache = conversations;
+    _emailCacheTime = Date.now();
     return res.json({ conversations });
   } catch (error) {
     console.error("Email fetch error:", error.message);
@@ -329,4 +334,10 @@ router.post("/send", protect, async (req, res) => {
   }
 });
 
+function clearEmailCache() {
+  _emailCache = null;
+  _emailCacheTime = 0;
+}
+
 module.exports = router;
+module.exports.clearCache = clearEmailCache;

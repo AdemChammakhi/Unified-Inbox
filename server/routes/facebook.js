@@ -38,7 +38,7 @@ router.get("/conversations", protect, async (req, res) => {
     let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
     let params = {
       fields:
-        "participants,messages.limit(20){message,from,to,created_time,attachments}",
+        "participants{id,name,picture{url}},messages.limit(20){message,from,to,created_time,attachments}",
       limit: 20,
       access_token: accessToken,
     };
@@ -112,6 +112,7 @@ router.get("/conversations", protect, async (req, res) => {
         participants: otherParticipants.map((p) => ({
           id: p.id,
           name: p.name || "Unknown",
+          profilePicUrl: p.picture?.data?.url || null,
         })),
         lastMessage: lastMessage
           ? {
@@ -283,11 +284,31 @@ router.post("/send", protect, async (req, res) => {
     }
     // Auto-lock on first reply (marketing agents)
     if (!existingLock && req.user.role === "marketing") {
-      await ConversationLock.create({
-        conversationId: lockConvId,
-        platform: "facebook",
-        lockedBy: req.user._id,
-      });
+      try {
+        await ConversationLock.create({
+          conversationId: lockConvId,
+          platform: "facebook",
+          lockedBy: req.user._id,
+        });
+      } catch (lockErr) {
+        // Duplicate key: another agent locked between our check and create
+        if (lockErr.code === 11000) {
+          const raceLock = await ConversationLock.findOne({
+            conversationId: lockConvId,
+            platform: "facebook",
+          });
+          if (
+            raceLock &&
+            raceLock.lockedBy.toString() !== req.user._id.toString()
+          ) {
+            return res.status(403).json({
+              message: "This conversation was just locked by another agent.",
+            });
+          }
+        } else {
+          throw lockErr;
+        }
+      }
     }
 
     // Send message via Messenger Send API
