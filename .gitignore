@@ -27,4 +27,4 @@ pnpm-debug.log*
 DEVSECOPS-PLAN.md
 Claude.md
 AGENTS.md
-server/docs/mongodb-architecture.md
+/server/docs/mongodb-architecture.md
