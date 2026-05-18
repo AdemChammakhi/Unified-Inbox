@@ -125,7 +125,17 @@ async function fetchInstagramConversations() {
     `Instagram API returned ${conversations.length} conversations total`,
   );
 
-  const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+  // Resolve the IG Business Account ID (uses env var or auto-discovers via API).
+  // This ensures participant filtering always excludes the correct account ID even
+  // if INSTAGRAM_ACCOUNT_ID is not set in the environment.
+  let igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+  if (!igAccountId) {
+    try {
+      igAccountId = await resolveIgAccountId(accessToken, pageId);
+    } catch {
+      // Non-fatal: fall back to undefined — filtering will only exclude by pageId
+    }
+  }
 
   // --- Pass 1: build formatted list from Graph API response ---
   const formatted = conversations.map((conv) => {
