@@ -7,6 +7,57 @@ const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
+// Cache for the auto-discovered Instagram Business Account ID
+let _resolvedIgAccountId = null;
+
+/**
+ * Resolve the Instagram Business Account ID reliably:
+ * 1. Use INSTAGRAM_ACCOUNT_ID env var if set.
+ * 2. Otherwise fetch it from the Graph API via the linked Facebook Page.
+ * Result is cached in memory so the API is only hit once per process lifetime.
+ */
+async function resolveIgAccountId(accessToken, pageId) {
+  if (_resolvedIgAccountId) return _resolvedIgAccountId;
+
+  const envId = process.env.INSTAGRAM_ACCOUNT_ID;
+  if (envId) {
+    _resolvedIgAccountId = envId;
+    return _resolvedIgAccountId;
+  }
+
+  // Auto-discover via the Page's linked Instagram Business Account
+  try {
+    const res = await axios.get(`${GRAPH_API}/${pageId}`, {
+      params: {
+        fields: "instagram_business_account",
+        access_token: accessToken,
+      },
+      timeout: 5000,
+    });
+    const discovered = res.data?.instagram_business_account?.id;
+    if (!discovered) {
+      throw new Error(
+        "No Instagram Business Account linked to this Facebook Page. " +
+          "Link your Instagram Professional account to the Page in Meta Business Suite.",
+      );
+    }
+    console.log(
+      `[Instagram] Auto-discovered IG Business Account ID: ${discovered} (INSTAGRAM_ACCOUNT_ID env var not set)`,
+    );
+    _resolvedIgAccountId = discovered;
+  } catch (err) {
+    // Re-throw with a clear message so the send route can surface it
+    throw Object.assign(
+      new Error(
+        `Could not resolve Instagram Business Account ID: ${err.response?.data?.error?.message || err.message}`,
+      ),
+      { status: 500 },
+    );
+  }
+
+  return _resolvedIgAccountId;
+}
+
 // In-memory cache — avoids hitting the slow Graph API on every poll
 let _igCache = null;
 let _igCacheTime = 0;
@@ -265,6 +316,43 @@ async function fetchInstagramConversations() {
   return result;
 }
 
+// GET /api/instagram/account-info - Resolve and return the IG Business Account ID in use
+router.get("/account-info", protect, async (req, res) => {
+  try {
+    const accessToken =
+      process.env.INSTAGRAM_ACCESS_TOKEN ||
+      process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.FACEBOOK_PAGE_ID;
+    if (!accessToken || !pageId) {
+      return res
+        .status(400)
+        .json({ message: "Access token or Page ID not configured" });
+    }
+    // Always re-check live from the API on this debug endpoint
+    const liveRes = await axios.get(`${GRAPH_API}/${pageId}`, {
+      params: {
+        fields: "instagram_business_account,name",
+        access_token: accessToken,
+      },
+      timeout: 5000,
+    });
+    return res.json({
+      configuredIgAccountId:
+        process.env.INSTAGRAM_ACCOUNT_ID || "(not set — will auto-discover)",
+      cachedIgAccountId: _resolvedIgAccountId || "(not cached yet)",
+      liveIgAccountId:
+        liveRes.data?.instagram_business_account?.id || "(none linked)",
+      facebookPageId: pageId,
+      pageName: liveRes.data?.name,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to fetch account info",
+      error: err.response?.data?.error?.message || err.message,
+    });
+  }
+});
+
 // GET /api/instagram/conversations - Fetch Instagram conversations
 // Uses in-flight deduplication: if a fetch is already running, concurrent requests
 // wait on the same promise instead of each launching a separate Graph API call.
@@ -460,21 +548,23 @@ router.post("/send", protect, async (req, res) => {
       }
     }
 
-    // Instagram Messaging API requires the Instagram Business Account ID, not the Page ID
-    const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID || pageId;
+    // Send via the Facebook Page ID endpoint — this works for both Instagram DMs
+    // and Messenger when the Instagram Business Account is linked to the Page.
+    // Using /{ig-account-id}/messages causes code 3 "capability" errors even with
+    // correct scopes; /{page-id}/messages is the correct endpoint for this setup.
     console.log(
       "Instagram send - recipientId:",
       recipientId,
-      "igAccountId:",
-      igAccountId,
+      "pageId:",
+      pageId,
     );
 
-    // Send message via Instagram Messaging API
+    // Send message via Page messages endpoint
     // Try RESPONSE first (within 24h window), fall back to HUMAN_AGENT tag (7-day window)
     let sendRes;
     try {
       sendRes = await axios.post(
-        `${GRAPH_API}/${igAccountId}/messages`,
+        `${GRAPH_API}/${pageId}/messages`,
         {
           recipient: { id: recipientId },
           message: { text: message },
@@ -490,7 +580,7 @@ router.post("/send", protect, async (req, res) => {
         firstErr.response?.data?.error?.message || firstErr.message,
       );
       sendRes = await axios.post(
-        `${GRAPH_API}/${igAccountId}/messages`,
+        `${GRAPH_API}/${pageId}/messages`,
         {
           recipient: { id: recipientId },
           message: { text: message },
@@ -548,11 +638,40 @@ router.post("/send", protect, async (req, res) => {
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
 
+    // Detect app capability / Development Mode restriction (code 3)
+    if (apiError?.code === 3) {
+      return res.status(400).json({
+        message:
+          "Instagram messaging is blocked by the Meta App configuration. " +
+          "Most likely cause: the app is in Development Mode and the recipient is not an App Tester. " +
+          "Fix: add the recipient as a Tester at developers.facebook.com → App Roles, " +
+          "or complete Meta App Review to switch to Live Mode.",
+        error: apiError?.message,
+      });
+    }
+
     // Detect 24-hour window error
     if (apiError?.code === 10 || apiError?.error_subcode === 2534022) {
       return res.status(400).json({
         message:
           "Cannot send: the 24-hour messaging window has expired. The user must message you first before you can reply.",
+        error: apiError?.message,
+      });
+    }
+
+    // Detect "Object does not exist / wrong IG Account ID" error (code 100)
+    // Reset the cached ID so the next call re-discovers it from the Graph API
+    if (
+      apiError?.code === 100 &&
+      typeof apiError?.message === "string" &&
+      apiError.message.includes("does not exist")
+    ) {
+      _resolvedIgAccountId = null;
+      return res.status(400).json({
+        message:
+          `Instagram Business Account ID may be misconfigured (used: ${igAccountId}). ` +
+          "The cached ID has been cleared and will be re-discovered on next send. " +
+          "Verify INSTAGRAM_ACCOUNT_ID in .env matches the IG Professional Account linked to your Facebook Page.",
         error: apiError?.message,
       });
     }

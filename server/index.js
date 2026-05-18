@@ -79,6 +79,52 @@ if (!isLocalDevRun && fs.existsSync(clientBuildPath)) {
 }
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  subscribePageToMessaging();
+});
+
+// Subscribe the app to the Facebook Page's 'messages' field so the
+// Instagram Messaging Send API (POST /{ig-user-id}/messages) works.
+// Error code 3 "Application does not have the capability" is the symptom
+// when this subscription is missing even if the token has the right scopes.
+async function subscribePageToMessaging() {
+  const axios = require("axios");
+  const pageId = process.env.FACEBOOK_PAGE_ID;
+  const token =
+    process.env.FACEBOOK_PAGE_ACCESS_TOKEN ||
+    process.env.INSTAGRAM_ACCESS_TOKEN;
+
+  if (!pageId || !token) {
+    console.warn(
+      "[Startup] Skipping page subscription: FACEBOOK_PAGE_ID or page token not set",
+    );
+    return;
+  }
+
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/v24.0/${pageId}/subscribed_apps`,
+      null,
+      {
+        params: {
+          subscribed_fields:
+            "messages,messaging_postbacks,message_deliveries,message_reads",
+          access_token: token,
+        },
+      },
+    );
+    if (res.data?.success) {
+      console.log("[Startup] Page subscription to messaging: OK");
+    } else {
+      console.warn("[Startup] Page subscription response:", res.data);
+    }
+  } catch (err) {
+    console.warn(
+      "[Startup] Page subscription failed (non-fatal):",
+      err.response?.data?.error?.message || err.message,
+    );
+  }
+}
 
 module.exports = app;

@@ -376,7 +376,6 @@ router.post("/instagram", async (req, res) => {
               });
             }
           }
-
           // Handle message reactions
           if (event.reaction) {
             if (io) {
@@ -423,7 +422,6 @@ router.post("/facebook", async (req, res) => {
   try {
     const body = req.body;
     const io = req.app.get("io");
-
     if (body.object === "page") {
       for (const entry of body.entry || []) {
         const messaging = entry.messaging || [];
