@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import DashboardLayout from "../components/DashboardLayout";
+import PlatformIcon from "../components/PlatformIcon";
 import { useAuth } from "../context/AuthContext";
 import {
   BarChart,
@@ -10,13 +11,6 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-
-const PLATFORM_ICONS = {
-  instagram: "📸",
-  facebook: "📘",
-  whatsapp: "💬",
-  email: "📧",
-};
 
 const MarketingDashboard = () => {
   const { user } = useAuth();
@@ -43,9 +37,9 @@ const MarketingDashboard = () => {
   }, [fetchSummary]);
 
   const platformData = summary
-    ? Object.entries(summary.byPlatform || {}).map(([name, count]) => ({
-        name,
-        count,
+    ? (summary.byPlatform || []).map((p) => ({
+        name: p._id,
+        count: p.count,
       }))
     : [];
 
@@ -95,7 +89,7 @@ const MarketingDashboard = () => {
                 className="analytics-card-value"
                 style={{ color: "#C8956A" }}
               >
-                {summary?.totalMessages ?? "—"}
+                {summary?.totalCount ?? "—"}
               </div>
               <div className="analytics-card-sub">all time</div>
             </div>
@@ -105,7 +99,7 @@ const MarketingDashboard = () => {
                 className="analytics-card-value"
                 style={{ color: "#6ECC8B" }}
               >
-                {summary?.todayMessages ?? "—"}
+                {summary?.todayCount ?? "—"}
               </div>
               <div className="analytics-card-sub">messages today</div>
             </div>
@@ -115,7 +109,7 @@ const MarketingDashboard = () => {
                 className="analytics-card-value"
                 style={{ color: "#7BA3CC" }}
               >
-                {summary?.weekMessages ?? "—"}
+                {summary?.weekCount ?? "—"}
               </div>
               <div className="analytics-card-sub">last 7 days</div>
             </div>
@@ -207,8 +201,8 @@ const MarketingDashboard = () => {
                         i < 4 ? "1px solid var(--border-primary)" : "none",
                     }}
                   >
-                    <span style={{ fontSize: 18, flexShrink: 0 }}>
-                      {PLATFORM_ICONS[msg.platform] || "📩"}
+                    <span style={{ fontSize: 0, flexShrink: 0, lineHeight: 0 }}>
+                      <PlatformIcon platform={msg.platform} size={26} />
                     </span>
                     <div style={{ flex: 1, overflow: "hidden" }}>
                       <div
@@ -232,7 +226,7 @@ const MarketingDashboard = () => {
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {msg.text || "(no text)"}
+                        {msg.content || "(no text)"}
                       </div>
                     </div>
                     <div
@@ -242,10 +236,10 @@ const MarketingDashboard = () => {
                         flexShrink: 0,
                       }}
                     >
-                      {msg.timestamp
+                      {msg.createdAt
                         ? (() => {
                             const diff =
-                              Date.now() - new Date(msg.timestamp).getTime();
+                              Date.now() - new Date(msg.createdAt).getTime();
                             if (diff < 60000) return "just now";
                             if (diff < 3600000)
                               return `${Math.floor(diff / 60000)}m ago`;

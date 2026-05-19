@@ -620,6 +620,7 @@ router.post("/send", protect, async (req, res) => {
         direction: "outgoing",
         status: "sent",
         externalId: messageId,
+        sentBy: req.user?._id || null,
       });
     } catch (dbErr) {
       console.error("DB save error (non-fatal):", dbErr.message);

@@ -62,7 +62,7 @@ const AdminDashboard = () => {
           }),
         ]);
         setAnalytics(summaryRes.data);
-        setAgentStats(agentsRes.data || []);
+        setAgentStats(agentsRes.data?.agents || []);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
       } finally {
@@ -159,9 +159,9 @@ const AdminDashboard = () => {
   };
 
   const platformPieData = analytics
-    ? Object.entries(analytics.byPlatform || {}).map(([name, value]) => ({
-        name,
-        value,
+    ? (analytics.byPlatform || []).map((p) => ({
+        name: p._id,
+        value: p.count,
       }))
     : [];
 
@@ -290,7 +290,7 @@ const AdminDashboard = () => {
                         cursor={{ fill: "var(--bg-hover)" }}
                       />
                       <Bar
-                        dataKey="count"
+                        dataKey="total"
                         fill="#C8956A"
                         radius={[4, 4, 0, 0]}
                       />
@@ -343,50 +343,129 @@ const AdminDashboard = () => {
                             fontSize: 12,
                           }}
                         />
+                        <Legend
+                          formatter={(value) =>
+                            value.charAt(0).toUpperCase() + value.slice(1)
+                          }
+                          wrapperStyle={{ fontSize: 12 }}
+                        />
                       </PieChart>
                     </ResponsiveContainer>
                   )}
                 </div>
+              </div>
 
-                {/* Agent performance */}
-                {agentStats.length > 0 && (
-                  <div className="chart-card" style={{ gridColumn: "1 / -1" }}>
-                    <div className="chart-card-title">
-                      Agent Performance (Locked Conversations)
-                    </div>
-                    <ResponsiveContainer width="100%" height={180}>
-                      <BarChart
-                        data={agentStats}
-                        layout="vertical"
-                        margin={{ top: 0, right: 20, left: 60, bottom: 0 }}
-                      >
-                        <XAxis
-                          type="number"
-                          tick={{ fontSize: 11, fill: "var(--text-faint)" }}
-                          allowDecimals={false}
-                        />
-                        <YAxis
-                          type="category"
-                          dataKey="agentName"
-                          tick={{ fontSize: 12, fill: "var(--text-secondary)" }}
-                          width={80}
-                        />
-                        <Tooltip
-                          contentStyle={{
-                            background: "var(--bg-card)",
-                            border: "1px solid var(--border-primary)",
-                            borderRadius: 8,
-                            fontSize: 12,
+              {/* Agent Reply Ranking */}
+              <div className="chart-card" style={{ marginTop: 16 }}>
+                <div className="chart-card-title">
+                  🏆 Agent Ranking — Most Replies
+                </div>
+                {agentStats.length === 0 ? (
+                  <div
+                    style={{
+                      textAlign: "center",
+                      padding: "28px 0",
+                      color: "var(--text-faint)",
+                      fontSize: 13,
+                    }}
+                  >
+                    No reply data yet
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 10,
+                      padding: "8px 0",
+                    }}
+                  >
+                    {agentStats.map((agent, idx) => {
+                      const max = agentStats[0]?.replies || 1;
+                      const pct = Math.round((agent.replies / max) * 100);
+                      const medal =
+                        idx === 0
+                          ? "🥇"
+                          : idx === 1
+                            ? "🥈"
+                            : idx === 2
+                              ? "🥉"
+                              : `${idx + 1}.`;
+                      return (
+                        <div
+                          key={agent.agentId || idx}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
                           }}
-                          cursor={{ fill: "var(--bg-hover)" }}
-                        />
-                        <Bar
-                          dataKey="count"
-                          fill="#7BA3CC"
-                          radius={[0, 4, 4, 0]}
-                        />
-                      </BarChart>
-                    </ResponsiveContainer>
+                        >
+                          <span
+                            style={{
+                              width: 28,
+                              fontSize: 16,
+                              flexShrink: 0,
+                              textAlign: "center",
+                            }}
+                          >
+                            {medal}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: 600,
+                                  color: "var(--text-primary)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {agent.name}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  color:
+                                    CHART_COLORS[idx % CHART_COLORS.length],
+                                  fontWeight: 700,
+                                  marginLeft: 8,
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {agent.replies} replies
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                height: 6,
+                                borderRadius: 3,
+                                background: "var(--bg-hover)",
+                                overflow: "hidden",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  height: "100%",
+                                  borderRadius: 3,
+                                  width: `${pct}%`,
+                                  background:
+                                    CHART_COLORS[idx % CHART_COLORS.length],
+                                  transition: "width 0.4s ease",
+                                }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

@@ -62,6 +62,11 @@ const messageSchema = new mongoose.Schema(
     externalId: {
       type: String,
     },
+    sentBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     timestamp: {
       type: Date,
       default: Date.now,

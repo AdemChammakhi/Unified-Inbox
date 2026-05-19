@@ -66,9 +66,14 @@ router.get(
         if (!dateMap[date]) dateMap[date] = { date };
         dateMap[date][platform] = row.count;
       }
-      const dailyData = Object.values(dateMap).sort((a, b) =>
-        a.date.localeCompare(b.date),
-      );
+      const dailyData = Object.values(dateMap)
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((day) => {
+          const total = Object.entries(day)
+            .filter(([k]) => k !== "date")
+            .reduce((sum, [, v]) => sum + v, 0);
+          return { ...day, total };
+        });
 
       return res.json({
         totalInRange,
@@ -85,32 +90,39 @@ router.get(
   },
 );
 
-// GET /api/analytics/agents — agent performance (messages handled per agent via locks)
+// GET /api/analytics/agents — agent reply leaderboard
 router.get(
   "/agents",
   protect,
   authorize("admin", "manager"),
   async (req, res) => {
     try {
-      const locks = await ConversationLock.find({})
-        .populate("lockedBy", "firstName lastName role")
-        .lean();
+      // Count outgoing messages per agent (sentBy field, set when reply is sent)
+      const replyCounts = await Message.aggregate([
+        { $match: { direction: "outgoing", sentBy: { $ne: null } } },
+        { $group: { _id: "$sentBy", replies: { $sum: 1 } } },
+        { $sort: { replies: -1 } },
+        {
+          $lookup: {
+            from: "users",
+            localField: "_id",
+            foreignField: "_id",
+            as: "user",
+          },
+        },
+        { $unwind: "$user" },
+        {
+          $project: {
+            _id: 0,
+            agentId: "$_id",
+            name: { $concat: ["$user.firstName", " ", "$user.lastName"] },
+            role: "$user.role",
+            replies: 1,
+          },
+        },
+      ]);
 
-      const agentMap = {};
-      for (const lock of locks) {
-        if (!lock.lockedBy) continue;
-        const id = lock.lockedBy._id.toString();
-        if (!agentMap[id]) {
-          agentMap[id] = {
-            name: `${lock.lockedBy.firstName} ${lock.lockedBy.lastName}`,
-            role: lock.lockedBy.role,
-            conversations: 0,
-          };
-        }
-        agentMap[id].conversations += 1;
-      }
-
-      return res.json({ agents: Object.values(agentMap) });
+      return res.json({ agents: replyCounts });
     } catch (err) {
       console.error("Agents analytics error:", err.message);
       return res.status(500).json({ message: "Agent analytics failed" });
