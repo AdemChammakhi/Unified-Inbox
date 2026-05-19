@@ -182,13 +182,11 @@ const Inbox = () => {
           );
         }
 
-        // Also refetch to get full data from API + DB merge
-        if (fetchQuietRef.current) fetchQuietRef.current();
-
-        // If still not found after refetch, retry with delays
+        // Only refetch for new/unknown senders — known conversations are updated inline above
+        // (background refetch on known convs overwrites socket-delivered messages with stale API data)
         if (!isKnown && fetchQuietRef.current) {
-          setTimeout(() => fetchQuietRef.current(), 4000);
-          setTimeout(() => fetchQuietRef.current(), 10000);
+          setTimeout(() => fetchQuietRef.current(), 5000);
+          setTimeout(() => fetchQuietRef.current(), 15000);
         }
 
         // Also try to append the message inline to the selected conversation
@@ -261,13 +259,19 @@ const Inbox = () => {
         }));
       }
 
-      // Play notification sound
+      // Play notification sound via Web Audio API (no external files needed)
       try {
-        const audio = new Audio(
-          "data:audio/wav;base64,UklGRl9vT19teleVhZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQ==",
-        );
-        audio.volume = 0.3;
-        audio.play().catch(() => {});
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = "sine";
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.25, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.35);
       } catch {}
     });
 
@@ -350,7 +354,7 @@ const Inbox = () => {
         const res = await axios.get("/api/instagram/conversations", slowOpts);
         setConversations(res.data.conversations || []);
       } else if (activeTab === "facebook") {
-        const res = await axios.get("/api/facebook/conversations", axiosOpts);
+        const res = await axios.get("/api/facebook/conversations", slowOpts);
         setConversations(res.data.conversations || []);
       } else if (activeTab === "whatsapp") {
         const res = await axios.get("/api/instagram/messages", axiosOpts);
@@ -406,14 +410,44 @@ const Inbox = () => {
         newConvs = res.data.messages || [];
       }
 
-      setConversations(newConvs);
+      setConversations((prev) => {
+        // Preserve socket-injected temp conversations that the API hasn't returned yet
+        // (Graph API can lag a few seconds behind the webhook)
+        const socketOnly = prev.filter(
+          (c) =>
+            c._fromSocket &&
+            !newConvs.some(
+              (n) =>
+                n.id === c.id ||
+                n.participants?.some((p) =>
+                  c.participants?.some((cp) => cp.id === p.id),
+                ),
+            ),
+        );
+        return [...socketOnly, ...newConvs];
+      });
 
       // Also update selectedConv if it's currently open
       const currentConv = selectedConvRef.current;
       if (currentConv) {
         const updated = newConvs.find((c) => c.id === currentConv.id);
         if (updated) {
-          setSelectedConv(updated);
+          setSelectedConv((prev) => {
+            if (!prev) return updated;
+            // Merge: keep socket-delivered messages not yet in the API response
+            const apiMsgIds = new Set(
+              (updated.messages || []).map((m) => m.id),
+            );
+            const extraMsgs = (prev.messages || []).filter(
+              (m) => m.id && !apiMsgIds.has(m.id),
+            );
+            return {
+              ...updated,
+              messages: [...(updated.messages || []), ...extraMsgs].sort(
+                (a, b) => new Date(a.time || 0) - new Date(b.time || 0),
+              ),
+            };
+          });
         }
       }
     } catch (error) {
@@ -515,11 +549,9 @@ const Inbox = () => {
       });
     }
     return [...filtered].sort((a, b) => {
-      const clsA = classifications[a.id] || "non_classifie";
-      const clsB = classifications[b.id] || "non_classifie";
-      if (clsA === "non_classifie" && clsB !== "non_classifie") return -1;
-      if (clsA !== "non_classifie" && clsB === "non_classifie") return 1;
-      return 0;
+      const tA = new Date(a.lastMessage?.time || 0).getTime();
+      const tB = new Date(b.lastMessage?.time || 0).getTime();
+      return tB - tA;
     });
   }, [conversations, classifications, classFilter, searchDebounced]);
 
@@ -625,6 +657,7 @@ const Inbox = () => {
     const messageText = replyText.trim();
     setReplyText("");
     const tempId = "temp_" + Date.now();
+    let sendRes;
 
     try {
       setSending(true);
@@ -674,7 +707,7 @@ const Inbox = () => {
       );
 
       if (activeTab === "instagram") {
-        await axios.post(
+        sendRes = await axios.post(
           "/api/instagram/send",
           {
             recipientId: recipient?.id || selectedConv.id,
@@ -684,7 +717,7 @@ const Inbox = () => {
           { headers: { Authorization: `Bearer ${token}` } },
         );
       } else if (activeTab === "facebook") {
-        await axios.post(
+        sendRes = await axios.post(
           "/api/facebook/send",
           {
             recipientId: recipient?.id || selectedConv.id,
@@ -694,7 +727,7 @@ const Inbox = () => {
           { headers: { Authorization: `Bearer ${token}` } },
         );
       } else if (activeTab === "email") {
-        await axios.post(
+        sendRes = await axios.post(
           "/api/email/send",
           {
             to: recipient?.email || selectedConv.email,
@@ -709,19 +742,27 @@ const Inbox = () => {
       // Refresh locks after sending (may have auto-locked)
       fetchLocks();
 
-      // Mark optimistic message as sent (remove sending state)
+      // Replace the optimistic temp message with the confirmed real ID from the
+      // HTTP response. This makes the message persistent immediately — no need to
+      // wait for the socket messageSent event.
+      const confirmedId = sendRes?.data?.messageId || tempId;
       setSelectedConv((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
           messages: (prev.messages || []).map((m) =>
-            m.id === tempId ? { ...m, sending: false } : m,
+            m.id === tempId ? { ...m, id: confirmedId, sending: false } : m,
           ),
         };
       });
 
-      // Background refresh to sync real data after a short delay
-      setTimeout(() => fetchConversationsQuiet(), 2000);
+      // Safety-net: refresh conversations list after ~8 s so the sidebar syncs
+      // with the Graph API (gives it time to index the sent message). The merge
+      // logic in fetchConversationsQuiet will NOT create a duplicate because the
+      // confirmed real ID is already present in the API response.
+      setTimeout(() => {
+        if (fetchQuietRef.current) fetchQuietRef.current();
+      }, 8000);
     } catch (error) {
       console.error("Failed to send reply:", error);
       alert(

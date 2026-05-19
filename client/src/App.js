@@ -25,7 +25,7 @@ const RootRedirect = () => {
 
 function App() {
   return (
-    <Router>
+    <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <div className="app-container">
         <Routes>
           <Route path="/login" element={<Login />} />

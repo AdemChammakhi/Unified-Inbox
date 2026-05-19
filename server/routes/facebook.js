@@ -7,6 +7,13 @@ const { protect } = require("../middleware/auth");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
+// In-memory cache — avoids slow Graph API calls on every request
+let _fbCache = null;
+let _fbCacheTime = 0;
+const FB_CACHE_TTL = 120000; // 2 minutes
+// In-flight dedup — one Graph API request at a time
+let _fbFetch = null;
+
 // Returns a display-friendly name from what is already stored in the DB.
 // Does NOT make any external API calls — name resolution happens once at
 // webhook-receive time (webhooks.js getSenderName) and is persisted then.
@@ -17,185 +24,211 @@ function resolveStoredName(senderName) {
   return senderName;
 }
 
-// GET /api/facebook/conversations - Fetch Facebook Page conversations
-router.get("/conversations", protect, async (req, res) => {
-  try {
-    const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-    const pageId = process.env.FACEBOOK_PAGE_ID;
+async function fetchFacebookConversations() {
+  const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+  const pageId = process.env.FACEBOOK_PAGE_ID;
 
-    if (!accessToken || !pageId) {
-      return res.status(400).json({
-        message:
-          "FACEBOOK_PAGE_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
-      });
-    }
+  if (!accessToken || !pageId) {
+    throw Object.assign(
+      new Error(
+        "FACEBOOK_PAGE_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
+      ),
+      { status: 400 },
+    );
+  }
 
-    console.log("Fetching Facebook conversations for Page:", pageId);
+  console.log("Fetching Facebook conversations for Page:", pageId);
 
-    // Fetch conversations from the Page
-    // Paginate to get all conversations (new ones may not be on the first page)
-    let conversations = [];
-    let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
-    let params = {
-      fields:
-        "participants{id,name,picture{url}},messages.limit(20){message,from,to,created_time,attachments}",
-      limit: 20,
-      access_token: accessToken,
-    };
-    const maxPages = 1;
-    for (let page = 0; page < maxPages; page++) {
-      const convRes =
-        page === 0
-          ? await axios.get(nextUrl, { params })
-          : await axios.get(nextUrl);
-      const pageData = convRes.data.data || [];
-      conversations = conversations.concat(pageData);
-      nextUrl = convRes.data.paging?.next;
-      if (!nextUrl || pageData.length === 0) break;
-    }
-    console.log(`Facebook API returned ${conversations.length} conversations`);
+  // Fetch conversations from the Page
+  // Paginate to get all conversations (new ones may not be on the first page)
+  let conversations = [];
+  let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
+  let params = {
+    fields:
+      "participants{id,name,picture{url}},messages.limit(20){message,from,to,created_time,attachments}",
+    limit: 50,
+    access_token: accessToken,
+  };
+  const maxPages = 1;
+  for (let page = 0; page < maxPages; page++) {
+    const convRes =
+      page === 0
+        ? await axios.get(nextUrl, { params })
+        : await axios.get(nextUrl);
+    const pageData = convRes.data.data || [];
+    conversations = conversations.concat(pageData);
+    nextUrl = convRes.data.paging?.next;
+    if (!nextUrl || pageData.length === 0) break;
+  }
+  console.log(`Facebook API returned ${conversations.length} conversations`);
 
-    // Format conversations
-    const formatted = conversations.map((conv) => {
-      const participants = conv.participants?.data || [];
-      const messages = conv.messages?.data || [];
-      const lastMessage = messages[0];
+  // Format conversations
+  const formatted = conversations.map((conv) => {
+    const participants = conv.participants?.data || [];
+    const messages = conv.messages?.data || [];
+    const lastMessage = messages[0];
 
-      // Filter out the Page from participants to show only the user
-      const otherParticipants = participants.filter((p) => p.id !== pageId);
+    // Filter out the Page from participants to show only the user
+    const otherParticipants = participants.filter((p) => p.id !== pageId);
 
-      // Sync all messages to database (non-blocking)
-      for (const m of messages) {
-        const direction = m.from?.id === pageId ? "outgoing" : "incoming";
-        Message.findOneAndUpdate(
-          { externalId: m.id },
-          {
-            $setOnInsert: {
-              platform: "facebook",
-              conversationId: conv.id,
-              senderId: m.from?.id || "unknown",
-              senderName: m.from?.name || "Unknown",
-              recipientId: m.to?.data?.[0]?.id || pageId,
-              content: m.message || "",
-              messageType: m.attachments ? "attachment" : "text",
-              direction,
-              status: direction === "outgoing" ? "sent" : "delivered",
-              externalId: m.id,
-              timestamp: m.created_time,
-            },
+    // Sync all messages to database (non-blocking)
+    for (const m of messages) {
+      const direction = m.from?.id === pageId ? "outgoing" : "incoming";
+      Message.findOneAndUpdate(
+        { externalId: m.id },
+        {
+          $setOnInsert: {
+            platform: "facebook",
+            conversationId: conv.id,
+            senderId: m.from?.id || "unknown",
+            senderName: m.from?.name || "Unknown",
+            recipientId: m.to?.data?.[0]?.id || pageId,
+            content: m.message || "",
+            messageType: m.attachments ? "attachment" : "text",
+            direction,
+            status: direction === "outgoing" ? "sent" : "delivered",
+            externalId: m.id,
+            timestamp: m.created_time,
           },
-          { upsert: true },
-        ).catch((err) =>
-          console.error("FB message sync error (non-fatal):", err.message),
-        );
-      }
+        },
+        { upsert: true },
+      ).catch((err) =>
+        console.error("FB message sync error (non-fatal):", err.message),
+      );
+    }
 
-      // Build a name map from participants so messages with empty from.name
-      // still resolve to the real person's name (Graph API sometimes omits
-      // from.name even when participants[].name is populated)
-      const participantMap = {};
-      participants.forEach((p) => {
-        if (p.id && p.name) participantMap[p.id] = p.name;
-      });
-
-      const resolveMsgFrom = (fromObj) => {
-        if (!fromObj) return "Unknown";
-        return (
-          fromObj.name ||
-          participantMap[fromObj.id] ||
-          (fromObj.id === pageId ? "Page" : "Unknown")
-        );
-      };
-
-      return {
-        id: conv.id,
-        participants: otherParticipants.map((p) => ({
-          id: p.id,
-          name: p.name || "Unknown",
-          profilePicUrl: p.picture?.data?.url || null,
-        })),
-        lastMessage: lastMessage
-          ? {
-              text: lastMessage.message || "[Attachment]",
-              from: resolveMsgFrom(lastMessage.from),
-              time: lastMessage.created_time,
-            }
-          : null,
-        messages: messages.map((m) => ({
-          id: m.id,
-          text: m.message || "",
-          from: resolveMsgFrom(m.from),
-          fromId: m.from?.id,
-          to: m.to?.data?.[0]?.name || "Unknown",
-          time: m.created_time,
-          attachments: m.attachments?.data || [],
-        })),
-      };
+    // Build a name map from participants so messages with empty from.name
+    // still resolve to the real person's name (Graph API sometimes omits
+    // from.name even when participants[].name is populated)
+    const participantMap = {};
+    participants.forEach((p) => {
+      if (p.id && p.name) participantMap[p.id] = p.name;
     });
 
-    // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
-    try {
-      const knownIds = new Set();
-      formatted.forEach((c) => {
-        knownIds.add(c.id);
-        c.participants.forEach((p) => knownIds.add(p.id));
-      });
+    const resolveMsgFrom = (fromObj) => {
+      if (!fromObj) return "Unknown";
+      return (
+        fromObj.name ||
+        participantMap[fromObj.id] ||
+        (fromObj.id === pageId ? "Page" : "Unknown")
+      );
+    };
 
-      const recentDbMsgs = await Message.find({
-        platform: "facebook",
-        direction: "incoming",
-      })
-        .sort({ timestamp: -1 })
-        .limit(200);
+    return {
+      id: conv.id,
+      participants: otherParticipants.map((p) => ({
+        id: p.id,
+        name: p.name || "Unknown",
+        profilePicUrl: p.picture?.data?.url || null,
+      })),
+      lastMessage: lastMessage
+        ? {
+            text: lastMessage.message || "[Attachment]",
+            from: resolveMsgFrom(lastMessage.from),
+            time: lastMessage.created_time,
+          }
+        : null,
+      messages: messages.map((m) => ({
+        id: m.id,
+        text: m.message || "",
+        from: resolveMsgFrom(m.from),
+        fromId: m.from?.id,
+        to: m.to?.data?.[0]?.name || "Unknown",
+        time: m.created_time,
+        attachments: m.attachments?.data || [],
+      })),
+    };
+  });
 
-      const newConvMap = {};
-      for (const m of recentDbMsgs) {
-        if (knownIds.has(m.senderId) || knownIds.has(m.conversationId))
-          continue;
-        const key = m.conversationId || m.senderId;
-        const displayName = resolveStoredName(m.senderName);
-        if (!newConvMap[key]) {
-          newConvMap[key] = {
-            id: key,
-            participants: [{ id: m.senderId, name: displayName }],
-            lastMessage: null,
-            messages: [],
-          };
-        }
-        const conv = newConvMap[key];
-        const msg = {
-          id: m.externalId || m._id.toString(),
-          text: m.content || "",
-          from: displayName,
-          fromId: m.senderId,
-          time: m.timestamp || m.createdAt,
+  // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
+  try {
+    const knownIds = new Set();
+    formatted.forEach((c) => {
+      knownIds.add(c.id);
+      c.participants.forEach((p) => knownIds.add(p.id));
+    });
+
+    const recentDbMsgs = await Message.find({
+      platform: "facebook",
+      direction: "incoming",
+    })
+      .sort({ timestamp: -1 })
+      .limit(200);
+
+    const newConvMap = {};
+    for (const m of recentDbMsgs) {
+      if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) continue;
+      const key = m.conversationId || m.senderId;
+      const displayName = resolveStoredName(m.senderName);
+      if (!newConvMap[key]) {
+        newConvMap[key] = {
+          id: key,
+          participants: [{ id: m.senderId, name: displayName }],
+          lastMessage: null,
+          messages: [],
         };
-        conv.messages.push(msg);
-        if (
-          !conv.lastMessage ||
-          new Date(msg.time) > new Date(conv.lastMessage.time)
-        ) {
-          conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
-        }
       }
-
-      const dbOnlyConvs = Object.values(newConvMap);
-      if (dbOnlyConvs.length > 0) {
-        console.log(
-          `Merging ${dbOnlyConvs.length} DB-only Facebook conversation(s)`,
-        );
-        formatted.unshift(...dbOnlyConvs);
+      const conv = newConvMap[key];
+      const msg = {
+        id: m.externalId || m._id.toString(),
+        text: m.content || "",
+        from: displayName,
+        fromId: m.senderId,
+        time: m.timestamp || m.createdAt,
+      };
+      conv.messages.push(msg);
+      if (
+        !conv.lastMessage ||
+        new Date(msg.time) > new Date(conv.lastMessage.time)
+      ) {
+        conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
       }
-    } catch (mergeErr) {
-      console.error("DB merge non-fatal error:", mergeErr.message);
     }
 
-    formatted.sort(
-      (a, b) =>
-        new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
-    );
-    return res.json({ conversations: formatted.slice(0, 20) });
+    const dbOnlyConvs = Object.values(newConvMap);
+    if (dbOnlyConvs.length > 0) {
+      console.log(
+        `Merging ${dbOnlyConvs.length} DB-only Facebook conversation(s)`,
+      );
+      formatted.unshift(...dbOnlyConvs);
+    }
+  } catch (mergeErr) {
+    console.error("DB merge non-fatal error:", mergeErr.message);
+  }
+
+  formatted.sort(
+    (a, b) =>
+      new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
+  );
+  const result = formatted.slice(0, 50);
+  _fbCache = result;
+  _fbCacheTime = Date.now();
+  return result;
+}
+
+function clearFbCache() {
+  _fbCache = null;
+  _fbCacheTime = 0;
+}
+
+// GET /api/facebook/conversations - Fetch Facebook Page conversations
+// Uses in-memory cache (2 min TTL) and in-flight dedup like Instagram.
+router.get("/conversations", protect, async (req, res) => {
+  if (_fbCache && Date.now() - _fbCacheTime < FB_CACHE_TTL) {
+    return res.json({ conversations: _fbCache });
+  }
+  try {
+    if (!_fbFetch) {
+      _fbFetch = fetchFacebookConversations().finally(() => {
+        _fbFetch = null;
+      });
+    }
+    const result = await _fbFetch;
+    return res.json({ conversations: result });
   } catch (error) {
+    if (error.status === 400) {
+      return res.status(400).json({ message: error.message });
+    }
     console.error(
       "Facebook API error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
@@ -375,6 +408,8 @@ router.post("/send", protect, async (req, res) => {
 
     // Emit socket event so the UI updates in real-time
     const io = req.app.get("io");
+    // Clear cache so the next poll includes the sent message
+    clearFbCache();
     if (io) {
       io.emit("messageSent", {
         platform: "facebook",
@@ -474,3 +509,4 @@ router.get("/diagnose", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.clearCache = clearFbCache;

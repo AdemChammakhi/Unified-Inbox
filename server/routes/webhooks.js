@@ -5,6 +5,7 @@ const router = express.Router();
 const Message = require("../models/Message");
 const { protect } = require("../middleware/auth");
 const instagramRoute = require("./instagram");
+const facebookRoute = require("./facebook");
 const emailRoute = require("./email");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
@@ -478,6 +479,11 @@ router.post("/facebook", async (req, res) => {
 
             console.log(`${detectedPlatform} message saved:`, newMessage._id);
             trimConversation(detectedPlatform, senderId).catch(() => {});
+            if (detectedPlatform === "facebook") {
+              facebookRoute.clearCache();
+            } else {
+              instagramRoute.clearCache();
+            }
 
             // Emit real-time event with formatted data for instant UI update
             if (io) {

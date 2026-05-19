@@ -61,7 +61,7 @@ async function resolveIgAccountId(accessToken, pageId) {
 // In-memory cache — avoids hitting the slow Graph API on every poll
 let _igCache = null;
 let _igCacheTime = 0;
-const IG_CACHE_TTL = 30000; // 30 seconds
+const IG_CACHE_TTL = 120000; // 2 minutes
 // In-flight promise — ensures only ONE Graph API request runs at a time even if many
 // clients ask concurrently (prevents thundering herd / rate-limit hammering)
 let _igFetch = null;
@@ -224,8 +224,10 @@ async function fetchInstagramConversations() {
 
   const resolvedExtra = {};
   if (unknownIds.size > 0) {
+    // Cap at 10 lookups to prevent 50+ sequential Graph API calls from stalling the response
+    const idsToLookup = [...unknownIds].slice(0, 10);
     await Promise.all(
-      [...unknownIds].map(async (id) => {
+      idsToLookup.map(async (id) => {
         try {
           const r = await axios.get(`${GRAPH_API}/${id}`, {
             params: { fields: "username,name", access_token: accessToken },
@@ -320,7 +322,7 @@ async function fetchInstagramConversations() {
     (a, b) =>
       new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
   );
-  const result = formatted.slice(0, 20);
+  const result = formatted.slice(0, 50);
   _igCache = result;
   _igCacheTime = Date.now();
   return result;
@@ -625,6 +627,8 @@ router.post("/send", protect, async (req, res) => {
 
     // Emit socket event so the UI updates in real-time
     const io = req.app.get("io");
+    // Clear cache so the next poll returns fresh data with the sent message
+    clearIgCache();
     if (io) {
       io.emit("messageSent", {
         platform: "instagram",
