@@ -20,28 +20,43 @@ router.get(
       const weekStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
 
       const [
-        totalInRange,
-        todayCount,
-        weekCount,
+        totalInRangeRes,
+        todayCountRes,
+        weekCountRes,
         byPlatform,
         dailySeries,
         activeAgents,
       ] = await Promise.all([
-        // Total messages in range
-        Message.countDocuments({ createdAt: { $gte: since } }),
-        // Today
-        Message.countDocuments({ createdAt: { $gte: todayStart } }),
-        // This week
-        Message.countDocuments({ createdAt: { $gte: weekStart } }),
-        // By platform
+        // Distinct clients in range (1 per sender, not per message)
         Message.aggregate([
-          { $match: { createdAt: { $gte: since } } },
-          { $group: { _id: "$platform", count: { $sum: 1 } } },
+          { $match: { direction: "incoming", createdAt: { $gte: since } } },
+          { $group: { _id: "$senderId" } },
+          { $count: "count" },
+        ]),
+        // Distinct clients today
+        Message.aggregate([
+          {
+            $match: { direction: "incoming", createdAt: { $gte: todayStart } },
+          },
+          { $group: { _id: "$senderId" } },
+          { $count: "count" },
+        ]),
+        // Distinct clients this week
+        Message.aggregate([
+          { $match: { direction: "incoming", createdAt: { $gte: weekStart } } },
+          { $group: { _id: "$senderId" } },
+          { $count: "count" },
+        ]),
+        // Distinct clients by platform
+        Message.aggregate([
+          { $match: { direction: "incoming", createdAt: { $gte: since } } },
+          { $group: { _id: { platform: "$platform", senderId: "$senderId" } } },
+          { $group: { _id: "$_id.platform", count: { $sum: 1 } } },
           { $sort: { count: -1 } },
         ]),
-        // Daily series
+        // Daily series — distinct clients per day per platform
         Message.aggregate([
-          { $match: { createdAt: { $gte: since } } },
+          { $match: { direction: "incoming", createdAt: { $gte: since } } },
           {
             $group: {
               _id: {
@@ -49,7 +64,13 @@ router.get(
                   $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
                 },
                 platform: "$platform",
+                senderId: "$senderId",
               },
+            },
+          },
+          {
+            $group: {
+              _id: { date: "$_id.date", platform: "$_id.platform" },
               count: { $sum: 1 },
             },
           },
@@ -58,6 +79,10 @@ router.get(
         // Active agents (have locks)
         ConversationLock.distinct("lockedBy"),
       ]);
+
+      const totalInRange = totalInRangeRes[0]?.count || 0;
+      const todayCount = todayCountRes[0]?.count || 0;
+      const weekCount = weekCountRes[0]?.count || 0;
 
       // Reshape daily series into chart-friendly format
       const dateMap = {};
@@ -133,36 +158,59 @@ router.get(
 // GET /api/analytics/marketing-summary — for marketing agents
 router.get("/marketing-summary", protect, async (req, res) => {
   try {
+    const range = parseInt(req.query.range) || 7;
     const now = new Date();
+    const since = new Date(now - range * 24 * 60 * 60 * 1000);
     const todayStart = new Date(now);
     todayStart.setHours(0, 0, 0, 0);
     const weekStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
 
-    const token = req.user;
-    const filter =
-      req.user.role === "marketing"
-        ? {} // marketing sees all platform data
-        : {};
+    const [
+      rangeCountRes,
+      todayCountRes,
+      weekCountRes,
+      byPlatform,
+      recentMessages,
+    ] = await Promise.all([
+      // Distinct clients in selected range
+      Message.aggregate([
+        { $match: { direction: "incoming", createdAt: { $gte: since } } },
+        { $group: { _id: "$senderId" } },
+        { $count: "count" },
+      ]),
+      // Distinct clients today
+      Message.aggregate([
+        { $match: { direction: "incoming", createdAt: { $gte: todayStart } } },
+        { $group: { _id: "$senderId" } },
+        { $count: "count" },
+      ]),
+      // Distinct clients this week
+      Message.aggregate([
+        { $match: { direction: "incoming", createdAt: { $gte: weekStart } } },
+        { $group: { _id: "$senderId" } },
+        { $count: "count" },
+      ]),
+      // Distinct clients by platform in selected range
+      Message.aggregate([
+        { $match: { direction: "incoming", createdAt: { $gte: since } } },
+        { $group: { _id: { platform: "$platform", senderId: "$senderId" } } },
+        { $group: { _id: "$_id.platform", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      Message.find({ direction: "incoming" })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("platform senderName content createdAt"),
+    ]);
 
-    const [todayCount, weekCount, totalCount, byPlatform, recentMessages] =
-      await Promise.all([
-        Message.countDocuments({ ...filter, createdAt: { $gte: todayStart } }),
-        Message.countDocuments({ ...filter, createdAt: { $gte: weekStart } }),
-        Message.countDocuments(filter),
-        Message.aggregate([
-          { $match: { createdAt: { $gte: weekStart } } },
-          { $group: { _id: "$platform", count: { $sum: 1 } } },
-        ]),
-        Message.find({ direction: "incoming" })
-          .sort({ createdAt: -1 })
-          .limit(5)
-          .select("platform senderName content createdAt"),
-      ]);
+    const rangeCount = rangeCountRes[0]?.count || 0;
+    const todayCount = todayCountRes[0]?.count || 0;
+    const weekCount = weekCountRes[0]?.count || 0;
 
     return res.json({
+      rangeCount,
       todayCount,
       weekCount,
-      totalCount,
       byPlatform,
       recentMessages,
     });

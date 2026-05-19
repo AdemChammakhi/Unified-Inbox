@@ -16,25 +16,33 @@ const MarketingDashboard = () => {
   const { user } = useAuth();
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [range, setRange] = useState(7);
 
-  const fetchSummary = useCallback(async () => {
-    const token = user?.token;
-    if (!token) return;
-    try {
-      const res = await axios.get("/api/analytics/marketing-summary", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setSummary(res.data);
-    } catch (err) {
-      console.error("Marketing analytics failed:", err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.token]);
+  const fetchSummary = useCallback(
+    async (r) => {
+      const token = user?.token;
+      if (!token) return;
+      setLoading(true);
+      try {
+        const res = await axios.get(
+          `/api/analytics/marketing-summary?range=${r}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
+        setSummary(res.data);
+      } catch (err) {
+        console.error("Marketing analytics failed:", err.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [user?.token],
+  );
 
   useEffect(() => {
-    fetchSummary();
-  }, [fetchSummary]);
+    fetchSummary(range);
+  }, [fetchSummary, range]);
 
   const platformData = summary
     ? (summary.byPlatform || []).map((p) => ({
@@ -48,21 +56,43 @@ const MarketingDashboard = () => {
   return (
     <DashboardLayout>
       <div style={{ fontFamily: "'Hanken Grotesk', sans-serif" }}>
-        <div style={{ marginBottom: 28 }}>
-          <h1
-            style={{
-              fontFamily: "'Young Serif', serif",
-              fontSize: 26,
-              fontWeight: 400,
-              color: "var(--text-primary)",
-              margin: "0 0 6px",
-            }}
-          >
-            📢 Marketing Dashboard
-          </h1>
-          <p style={{ fontSize: 14, color: "var(--text-faint)", margin: 0 }}>
-            Track incoming message performance across all channels.
-          </p>
+        <div
+          style={{
+            marginBottom: 28,
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 12,
+          }}
+        >
+          <div>
+            <h1
+              style={{
+                fontFamily: "'Young Serif', serif",
+                fontSize: 26,
+                fontWeight: 400,
+                color: "var(--text-primary)",
+                margin: "0 0 6px",
+              }}
+            >
+              📢 Marketing Dashboard
+            </h1>
+            <p style={{ fontSize: 14, color: "var(--text-faint)", margin: 0 }}>
+              Track incoming message performance across all channels.
+            </p>
+          </div>
+          <div className="range-tabs">
+            {[1, 7, 30].map((r) => (
+              <button
+                key={r}
+                className={`range-tab${range === r ? " active" : ""}`}
+                onClick={() => setRange(r)}
+              >
+                {r === 1 ? "Today" : r === 7 ? "7 days" : "30 days"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Stats cards */}
@@ -84,14 +114,20 @@ const MarketingDashboard = () => {
         ) : (
           <div className="analytics-grid">
             <div className="analytics-card">
-              <div className="analytics-card-label">Total Messages</div>
+              <div className="analytics-card-label">
+                Total ({range === 1 ? "Today" : range === 7 ? "7d" : "30d"})
+              </div>
               <div
                 className="analytics-card-value"
                 style={{ color: "#C8956A" }}
               >
-                {summary?.totalCount ?? "—"}
+                {summary?.rangeCount ?? "—"}
               </div>
-              <div className="analytics-card-sub">all time</div>
+              <div className="analytics-card-sub">
+                {range === 1
+                  ? "unique clients today"
+                  : `unique clients — last ${range} days`}
+              </div>
             </div>
             <div className="analytics-card">
               <div className="analytics-card-label">Today</div>
@@ -101,7 +137,7 @@ const MarketingDashboard = () => {
               >
                 {summary?.todayCount ?? "—"}
               </div>
-              <div className="analytics-card-sub">messages today</div>
+              <div className="analytics-card-sub">unique clients today</div>
             </div>
             <div className="analytics-card">
               <div className="analytics-card-label">This Week</div>
