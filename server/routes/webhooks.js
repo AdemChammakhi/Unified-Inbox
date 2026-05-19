@@ -192,10 +192,10 @@ router.get("/whatsapp", (req, res) => {
 // POST - Receive WhatsApp messages
 router.post("/whatsapp", async (req, res) => {
   logWebhook("whatsapp", "POST", `object=${req.body?.object}`);
+  res.sendStatus(200); // Acknowledge immediately — prevents Meta retries on slow processing
+  const body = req.body;
+  const io = req.app.get("io");
   try {
-    const body = req.body;
-    const io = req.app.get("io");
-
     if (body.object === "whatsapp_business_account") {
       for (const entry of body.entry) {
         const changes = entry.changes || [];
@@ -262,10 +262,8 @@ router.post("/whatsapp", async (req, res) => {
         }
       }
     }
-    return res.sendStatus(200);
   } catch (error) {
     console.error("WhatsApp webhook error:", error);
-    return res.sendStatus(200);
   }
 });
 
@@ -297,6 +295,7 @@ router.post("/instagram", async (req, res) => {
     "=== INSTAGRAM WEBHOOK RAW ===",
     JSON.stringify(body, null, 2).slice(0, 2000),
   );
+  res.sendStatus(200); // Acknowledge immediately — prevents Meta retries on slow processing
   try {
     const io = req.app.get("io");
 
@@ -390,10 +389,8 @@ router.post("/instagram", async (req, res) => {
         }
       }
     }
-    return res.sendStatus(200);
   } catch (error) {
     console.error("Instagram webhook error:", error);
-    return res.sendStatus(200);
   }
 });
 
@@ -419,9 +416,10 @@ router.post("/facebook", async (req, res) => {
     "POST",
     `object=${req.body?.object}, entries=${req.body?.entry?.length}`,
   );
+  res.sendStatus(200); // Acknowledge immediately — prevents Meta retries on slow processing
+  const body = req.body;
+  const io = req.app.get("io");
   try {
-    const body = req.body;
-    const io = req.app.get("io");
     if (body.object === "page") {
       for (const entry of body.entry || []) {
         const messaging = entry.messaging || [];
@@ -511,10 +509,8 @@ router.post("/facebook", async (req, res) => {
         }
       }
     }
-    return res.sendStatus(200);
   } catch (error) {
     console.error("Facebook webhook error:", error);
-    return res.sendStatus(200);
   }
 });
 
