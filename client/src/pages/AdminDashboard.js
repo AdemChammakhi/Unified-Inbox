@@ -3,6 +3,7 @@ import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
+import PlatformIcon from "../components/PlatformIcon";
 import {
   BarChart,
   Bar,
@@ -22,13 +23,6 @@ const EMPTY_FORM = {
   email: "",
   password: "",
   role: "",
-};
-
-const PLATFORM_ICONS = {
-  instagram: "📸",
-  facebook: "📘",
-  whatsapp: "💬",
-  email: "📧",
 };
 
 const ROLES = [
@@ -506,7 +500,7 @@ const AdminDashboard = () => {
                     >
                       <td style={styles.td}>
                         <span style={styles.platformPill}>
-                          {PLATFORM_ICONS[lock.platform] || "📡"}{" "}
+                          <PlatformIcon platform={lock.platform} size={20} />{" "}
                           {lock.platform.charAt(0).toUpperCase() +
                             lock.platform.slice(1)}
                         </span>
