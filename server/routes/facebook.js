@@ -11,8 +11,12 @@ const GRAPH_API = "https://graph.facebook.com/v24.0";
 let _fbCache = null;
 let _fbCacheTime = 0;
 const FB_CACHE_TTL = 120000; // 2 minutes
+// Separate slim-mode cache (conversation list without embedded messages)
+let _fbCacheSlim = null;
+let _fbCacheSlimTime = 0;
 // In-flight dedup — one Graph API request at a time
 let _fbFetch = null;
+let _fbFetchSlim = null;
 
 // Returns a display-friendly name from what is already stored in the DB.
 // Does NOT make any external API calls — name resolution happens once at
@@ -24,7 +28,7 @@ function resolveStoredName(senderName) {
   return senderName;
 }
 
-async function fetchFacebookConversations() {
+async function fetchFacebookConversations(slim = false) {
   const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
   const pageId = process.env.FACEBOOK_PAGE_ID;
 
@@ -39,13 +43,17 @@ async function fetchFacebookConversations() {
 
   console.log("Fetching Facebook conversations for Page:", pageId);
 
+  // slim=true: only 1 message per conversation for the preview list.
+  const msgFields = slim
+    ? "messages.limit(1){message,from,created_time}"
+    : "messages.limit(20){message,from,to,created_time,attachments}";
+
   // Fetch conversations from the Page
   // Paginate to get all conversations (new ones may not be on the first page)
   let conversations = [];
   let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
   let params = {
-    fields:
-      "participants{id,name,picture{url}},messages.limit(20){message,from,to,created_time,attachments}",
+    fields: `participants{id,name,picture{url}},${msgFields}`,
     limit: 50,
     access_token: accessToken,
   };
@@ -71,30 +79,32 @@ async function fetchFacebookConversations() {
     // Filter out the Page from participants to show only the user
     const otherParticipants = participants.filter((p) => p.id !== pageId);
 
-    // Sync all messages to database (non-blocking)
-    for (const m of messages) {
-      const direction = m.from?.id === pageId ? "outgoing" : "incoming";
-      Message.findOneAndUpdate(
-        { externalId: m.id },
-        {
-          $setOnInsert: {
-            platform: "facebook",
-            conversationId: conv.id,
-            senderId: m.from?.id || "unknown",
-            senderName: m.from?.name || "Unknown",
-            recipientId: m.to?.data?.[0]?.id || pageId,
-            content: m.message || "",
-            messageType: m.attachments ? "attachment" : "text",
-            direction,
-            status: direction === "outgoing" ? "sent" : "delivered",
-            externalId: m.id,
-            timestamp: m.created_time,
+    // Skip DB sync in slim mode — we only need the lastMessage preview
+    if (!slim) {
+      for (const m of messages) {
+        const direction = m.from?.id === pageId ? "outgoing" : "incoming";
+        Message.findOneAndUpdate(
+          { externalId: m.id },
+          {
+            $setOnInsert: {
+              platform: "facebook",
+              conversationId: conv.id,
+              senderId: m.from?.id || "unknown",
+              senderName: m.from?.name || "Unknown",
+              recipientId: m.to?.data?.[0]?.id || pageId,
+              content: m.message || "",
+              messageType: m.attachments ? "attachment" : "text",
+              direction,
+              status: direction === "outgoing" ? "sent" : "delivered",
+              externalId: m.id,
+              timestamp: m.created_time,
+            },
           },
-        },
-        { upsert: true },
-      ).catch((err) =>
-        console.error("FB message sync error (non-fatal):", err.message),
-      );
+          { upsert: true },
+        ).catch((err) =>
+          console.error("FB message sync error (non-fatal):", err.message),
+        );
+      }
     }
 
     // Build a name map from participants so messages with empty from.name
@@ -128,15 +138,18 @@ async function fetchFacebookConversations() {
             time: lastMessage.created_time,
           }
         : null,
-      messages: messages.map((m) => ({
-        id: m.id,
-        text: m.message || "",
-        from: resolveMsgFrom(m.from),
-        fromId: m.from?.id,
-        to: m.to?.data?.[0]?.name || "Unknown",
-        time: m.created_time,
-        attachments: m.attachments?.data || [],
-      })),
+      // slim mode: omit messages array — frontend lazy-loads on conversation select
+      messages: slim
+        ? []
+        : messages.map((m) => ({
+            id: m.id,
+            text: m.message || "",
+            from: resolveMsgFrom(m.from),
+            fromId: m.from?.id,
+            to: m.to?.data?.[0]?.name || "Unknown",
+            time: m.created_time,
+            attachments: m.attachments?.data || [],
+          })),
     };
   });
 
@@ -201,19 +214,51 @@ async function fetchFacebookConversations() {
       new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
   );
   const result = formatted.slice(0, 50);
-  _fbCache = result;
-  _fbCacheTime = Date.now();
+  if (slim) {
+    _fbCacheSlim = result;
+    _fbCacheSlimTime = Date.now();
+  } else {
+    _fbCache = result;
+    _fbCacheTime = Date.now();
+  }
   return result;
 }
 
 function clearFbCache() {
   _fbCache = null;
   _fbCacheTime = 0;
+  _fbCacheSlim = null;
+  _fbCacheSlimTime = 0;
 }
 
 // GET /api/facebook/conversations - Fetch Facebook Page conversations
+// Supports ?slim=1 for a lightweight list (no embedded messages — frontend lazy-loads them).
 // Uses in-memory cache (2 min TTL) and in-flight dedup like Instagram.
 router.get("/conversations", protect, async (req, res) => {
+  const slim = req.query.slim === "1" || req.query.slim === "true";
+
+  // Fast path: slim mode — separate cache, skips DB sync side-effects
+  if (slim) {
+    if (_fbCacheSlim && Date.now() - _fbCacheSlimTime < FB_CACHE_TTL) {
+      return res.json({ conversations: _fbCacheSlim });
+    }
+    try {
+      if (!_fbFetchSlim) {
+        _fbFetchSlim = fetchFacebookConversations(true).finally(() => {
+          _fbFetchSlim = null;
+        });
+      }
+      const result = await _fbFetchSlim;
+      return res.json({ conversations: result });
+    } catch (slimErr) {
+      console.error(
+        "Slim FB fetch failed, falling back to full fetch:",
+        slimErr.message,
+      );
+      // Fall through to full fetch path below
+    }
+  }
+
   if (_fbCache && Date.now() - _fbCacheTime < FB_CACHE_TTL) {
     return res.json({ conversations: _fbCache });
   }
@@ -282,6 +327,50 @@ router.get("/conversations", protect, async (req, res) => {
       message: "Failed to fetch Facebook conversations",
       error: error.response?.data?.error?.message || error.message,
     });
+  }
+});
+
+// GET /api/facebook/messages-paged
+// Returns paginated messages for a specific conversation from MongoDB.
+// Cursor-based: pass `before` (ISO timestamp) to load messages older than that point.
+router.get("/messages-paged", protect, async (req, res) => {
+  try {
+    const { conversationId, participantId, limit = 30, before } = req.query;
+    if (!conversationId) {
+      return res.status(400).json({ message: "conversationId is required" });
+    }
+    const pageLimit = Math.min(Number(limit) || 30, 100);
+    // Webhook messages are saved with conversationId = senderId (PSID).
+    // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
+    // Accept both so we never miss webhook-saved messages when the user opens a conversation.
+    const convIdFilter =
+      participantId && participantId !== conversationId
+        ? { $in: [conversationId, participantId] }
+        : conversationId;
+    const query = { platform: "facebook", conversationId: convIdFilter };
+    if (before) query.timestamp = { $lt: new Date(before) };
+
+    const messages = await Message.find(query)
+      .sort({ timestamp: -1 })
+      .limit(pageLimit)
+      .lean();
+
+    return res.json({
+      messages: messages.reverse().map((m) => ({
+        id: m.externalId || m._id.toString(),
+        text: m.content || "",
+        from: m.senderName || "Unknown",
+        fromId: m.senderId,
+        time: m.timestamp || m.createdAt,
+        direction: m.direction,
+        messageType: m.messageType,
+        attachmentUrl: m.attachmentUrl || null,
+      })),
+      hasMore: messages.length === pageLimit,
+    });
+  } catch (err) {
+    console.error("FB messages-paged error:", err.message);
+    return res.status(500).json({ message: err.message });
   }
 });
 

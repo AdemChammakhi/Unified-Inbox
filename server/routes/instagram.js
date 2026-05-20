@@ -62,11 +62,15 @@ async function resolveIgAccountId(accessToken, pageId) {
 let _igCache = null;
 let _igCacheTime = 0;
 const IG_CACHE_TTL = 120000; // 2 minutes
+// Separate slim-mode cache (conversation list without embedded messages)
+let _igCacheSlim = null;
+let _igCacheSlimTime = 0;
 // In-flight promise — ensures only ONE Graph API request runs at a time even if many
 // clients ask concurrently (prevents thundering herd / rate-limit hammering)
 let _igFetch = null;
+let _igFetchSlim = null;
 
-async function fetchInstagramConversations() {
+async function fetchInstagramConversations(slim = false) {
   const accessToken =
     process.env.INSTAGRAM_ACCESS_TOKEN ||
     process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
@@ -80,8 +84,11 @@ async function fetchInstagramConversations() {
 
   console.log("Using Facebook Page ID:", pageId);
 
-  const conversationFields =
-    "participants{id,name,username,profile_pic},messages{message,from,to,created_time,attachments}";
+  // slim=true: request only 1 message per conversation (for the preview list).
+  // This cuts the Graph API payload by ~95% and skips the DB upsert loop.
+  const conversationFields = slim
+    ? "participants{id,name,username,profile_pic},messages.limit(1){message,from,created_time}"
+    : "participants{id,name,username,profile_pic},messages{message,from,to,created_time,attachments}";
   let conversations = [];
   const seenConvIds = new Set();
   const folders = ["inbox", "other"];
@@ -157,32 +164,35 @@ async function fetchInstagramConversations() {
     const resolveFromName = (fromObj) =>
       fromObj?.username || fromObj?.name || nameMap[fromObj?.id] || null;
 
-    for (const m of messages) {
-      const direction =
-        m.from?.id === igAccountId || m.from?.id === pageId
-          ? "outgoing"
-          : "incoming";
-      Message.findOneAndUpdate(
-        { externalId: m.id },
-        {
-          $setOnInsert: {
-            platform: "instagram",
-            conversationId: conv.id,
-            senderId: m.from?.id || "unknown",
-            senderName: resolveFromName(m.from) || "Unknown",
-            recipientId: m.to?.data?.[0]?.id || igAccountId,
-            content: m.message || "",
-            messageType: m.attachments ? "attachment" : "text",
-            direction,
-            status: direction === "outgoing" ? "sent" : "delivered",
-            externalId: m.id,
-            timestamp: m.created_time,
+    // Skip DB sync in slim mode — we only need the lastMessage preview
+    if (!slim) {
+      for (const m of messages) {
+        const direction =
+          m.from?.id === igAccountId || m.from?.id === pageId
+            ? "outgoing"
+            : "incoming";
+        Message.findOneAndUpdate(
+          { externalId: m.id },
+          {
+            $setOnInsert: {
+              platform: "instagram",
+              conversationId: conv.id,
+              senderId: m.from?.id || "unknown",
+              senderName: resolveFromName(m.from) || "Unknown",
+              recipientId: m.to?.data?.[0]?.id || igAccountId,
+              content: m.message || "",
+              messageType: m.attachments ? "attachment" : "text",
+              direction,
+              status: direction === "outgoing" ? "sent" : "delivered",
+              externalId: m.id,
+              timestamp: m.created_time,
+            },
           },
-        },
-        { upsert: true },
-      ).catch((err) =>
-        console.error("IG message sync error (non-fatal):", err.message),
-      );
+          { upsert: true },
+        ).catch((err) =>
+          console.error("IG message sync error (non-fatal):", err.message),
+        );
+      }
     }
 
     return {
@@ -199,15 +209,18 @@ async function fetchInstagramConversations() {
             time: lastMessage.created_time,
           }
         : null,
-      messages: messages.map((m) => ({
-        id: m.id,
-        text: m.message || "",
-        from: resolveFromName(m.from),
-        fromId: m.from?.id,
-        to: m.to?.data?.[0]?.username || m.to?.data?.[0]?.name || "Unknown",
-        time: m.created_time,
-        attachments: m.attachments?.data || [],
-      })),
+      // slim mode: omit messages array — frontend lazy-loads on conversation select
+      messages: slim
+        ? []
+        : messages.map((m) => ({
+            id: m.id,
+            text: m.message || "",
+            from: resolveFromName(m.from),
+            fromId: m.from?.id,
+            to: m.to?.data?.[0]?.username || m.to?.data?.[0]?.name || "Unknown",
+            time: m.created_time,
+            attachments: m.attachments?.data || [],
+          })),
       _nameMap: nameMap, // carry forward for resolution pass
     };
   });
@@ -323,8 +336,13 @@ async function fetchInstagramConversations() {
       new Date(b.lastMessage?.time || 0) - new Date(a.lastMessage?.time || 0),
   );
   const result = formatted.slice(0, 50);
-  _igCache = result;
-  _igCacheTime = Date.now();
+  if (slim) {
+    _igCacheSlim = result;
+    _igCacheSlimTime = Date.now();
+  } else {
+    _igCache = result;
+    _igCacheTime = Date.now();
+  }
   return result;
 }
 
@@ -366,9 +384,34 @@ router.get("/account-info", protect, async (req, res) => {
 });
 
 // GET /api/instagram/conversations - Fetch Instagram conversations
+// Supports ?slim=1 for a lightweight list (no embedded messages — frontend lazy-loads them).
 // Uses in-flight deduplication: if a fetch is already running, concurrent requests
 // wait on the same promise instead of each launching a separate Graph API call.
 router.get("/conversations", protect, async (req, res) => {
+  const slim = req.query.slim === "1" || req.query.slim === "true";
+
+  // Fast path: slim mode — separate cache, no name-healing side-effects
+  if (slim) {
+    if (_igCacheSlim && Date.now() - _igCacheSlimTime < IG_CACHE_TTL) {
+      return res.json({ conversations: _igCacheSlim });
+    }
+    try {
+      if (!_igFetchSlim) {
+        _igFetchSlim = fetchInstagramConversations(true).finally(() => {
+          _igFetchSlim = null;
+        });
+      }
+      const result = await _igFetchSlim;
+      return res.json({ conversations: result });
+    } catch (slimErr) {
+      console.error(
+        "Slim IG fetch failed, falling back to full fetch:",
+        slimErr.message,
+      );
+      // Fall through to the full fetch path below
+    }
+  }
+
   if (_igCache && Date.now() - _igCacheTime < IG_CACHE_TTL) {
     return res.json({ conversations: _igCache });
   }
@@ -494,6 +537,51 @@ router.get("/conversations", protect, async (req, res) => {
       message: "Failed to fetch Instagram conversations",
       error: error.response?.data?.error?.message || error.message,
     });
+  }
+});
+
+// GET /api/instagram/messages-paged
+// Returns paginated messages for a specific conversation from MongoDB.
+// Cursor-based: pass `before` (ISO timestamp) to load messages older than that point.
+// Uses the messages_paged index: { platform, conversationId, timestamp -1 }.
+router.get("/messages-paged", protect, async (req, res) => {
+  try {
+    const { conversationId, participantId, limit = 30, before } = req.query;
+    if (!conversationId) {
+      return res.status(400).json({ message: "conversationId is required" });
+    }
+    const pageLimit = Math.min(Number(limit) || 30, 100);
+    // Webhook messages are saved with conversationId = senderId (the participant's IGSID).
+    // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
+    // Accept both so we never miss webhook-saved messages when the user opens a conversation.
+    const convIdFilter =
+      participantId && participantId !== conversationId
+        ? { $in: [conversationId, participantId] }
+        : conversationId;
+    const query = { platform: "instagram", conversationId: convIdFilter };
+    if (before) query.timestamp = { $lt: new Date(before) };
+
+    const messages = await Message.find(query)
+      .sort({ timestamp: -1 })
+      .limit(pageLimit)
+      .lean();
+
+    return res.json({
+      messages: messages.reverse().map((m) => ({
+        id: m.externalId || m._id.toString(),
+        text: m.content || "",
+        from: m.senderName || "Unknown",
+        fromId: m.senderId,
+        time: m.timestamp || m.createdAt,
+        direction: m.direction,
+        messageType: m.messageType,
+        attachmentUrl: m.attachmentUrl || null,
+      })),
+      hasMore: messages.length === pageLimit,
+    });
+  } catch (err) {
+    console.error("IG messages-paged error:", err.message);
+    return res.status(500).json({ message: err.message });
   }
 });
 
@@ -758,6 +846,8 @@ router.get("/messages", protect, async (req, res) => {
 function clearIgCache() {
   _igCache = null;
   _igCacheTime = 0;
+  _igCacheSlim = null;
+  _igCacheSlimTime = 0;
 }
 
 module.exports = router;

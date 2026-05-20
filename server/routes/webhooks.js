@@ -225,7 +225,6 @@ router.post("/whatsapp", async (req, res) => {
               });
 
               console.log("WhatsApp message saved:", newMessage._id);
-              trimConversation("whatsapp", msg.from).catch(() => {});
 
               // Emit real-time event with formatted data
               if (io) {
@@ -329,18 +328,43 @@ router.post("/instagram", async (req, res) => {
               `Instagram incoming msg from ${senderId}: "${msgText.slice(0, 80)}" mid=${msgMid}`,
             );
 
-            // Look up Instagram sender name (with timeout)
+            const msgTime = new Date().toISOString();
+
+            // Emit IMMEDIATELY with a placeholder name so the UI updates
+            // without waiting for the Graph API name lookup (can take up to 5 s).
+            if (io) {
+              io.emit("newMessage", {
+                platform: "instagram",
+                message: {
+                  id: msgMid,
+                  text: msgText,
+                  from: `User ${senderId.slice(-4)}`,
+                  fromId: senderId,
+                  time: msgTime,
+                },
+                conversationId: senderId,
+                senderId: senderId,
+                senderName: `User ${senderId.slice(-4)}`,
+              });
+              console.log(
+                "[Socket] IG newMessage emitted immediately:",
+                msgMid,
+              );
+            }
+
+            // Look up Instagram sender name (can take up to 5 s — non-blocking relative to the emit above)
             let igSenderName = await getSenderName(senderId, "instagram");
+            const igDisplayName = igSenderName || `User ${senderId.slice(-4)}`;
 
             // Upsert to DB (avoids duplicate errors if webhook fires twice)
-            const newMessage = await Message.findOneAndUpdate(
+            await Message.findOneAndUpdate(
               { externalId: msgMid },
               {
                 $setOnInsert: {
                   platform: "instagram",
                   conversationId: senderId,
                   senderId: senderId,
-                  senderName: igSenderName || `User ${senderId.slice(-4)}`,
+                  senderName: igDisplayName,
                   recipientId: recipientId,
                   content: msgText,
                   messageType: event.message.attachments
@@ -352,27 +376,27 @@ router.post("/instagram", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true, new: true },
+              { upsert: true },
             );
 
-            console.log("Instagram message saved:", newMessage._id);
-            trimConversation("instagram", senderId).catch(() => {});
+            console.log("[DB] Instagram message saved:", msgMid);
             instagramRoute.clearCache();
 
-            // Emit real-time event with formatted data for instant UI update
-            if (io) {
+            // Re-emit with the resolved real name so the frontend can update
+            // the sender name in place (dedup by message ID prevents a duplicate bubble).
+            if (igSenderName && io) {
               io.emit("newMessage", {
                 platform: "instagram",
                 message: {
                   id: msgMid,
                   text: msgText,
-                  from: igSenderName || `User ${senderId.slice(-4)}`,
+                  from: igDisplayName,
                   fromId: senderId,
-                  time: new Date().toISOString(),
+                  time: msgTime,
                 },
                 conversationId: senderId,
                 senderId: senderId,
-                senderName: igSenderName || `User ${senderId.slice(-4)}`,
+                senderName: igDisplayName,
               });
             }
           }
@@ -450,14 +474,38 @@ router.post("/facebook", async (req, res) => {
               `New ${detectedPlatform} message from ${senderId}: ${message.text}`,
             );
 
-            // Look up sender name
+            const fbMsgTime = new Date().toISOString();
+
+            // Emit IMMEDIATELY with a placeholder name so the UI updates instantly.
+            if (io) {
+              io.emit("newMessage", {
+                platform: detectedPlatform,
+                message: {
+                  id: message.mid,
+                  text: message.text || "",
+                  from: `User ${senderId.slice(-4)}`,
+                  fromId: senderId,
+                  time: fbMsgTime,
+                },
+                conversationId: senderId,
+                senderId: senderId,
+                senderName: `User ${senderId.slice(-4)}`,
+              });
+              console.log(
+                `[Socket] ${detectedPlatform} newMessage emitted immediately:`,
+                message.mid,
+              );
+            }
+
+            // Look up sender name (can take up to 5 s — non-blocking relative to the emit above)
             const resolvedSenderName = await getSenderName(
               senderId,
               detectedPlatform,
             );
-            const fbSenderName = resolvedSenderName || "Unknown";
+            const fbSenderName =
+              resolvedSenderName || `User ${senderId.slice(-4)}`;
 
-            const newMessage = await Message.findOneAndUpdate(
+            await Message.findOneAndUpdate(
               { externalId: message.mid },
               {
                 $setOnInsert: {
@@ -474,19 +522,18 @@ router.post("/facebook", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true, new: true },
+              { upsert: true },
             );
 
-            console.log(`${detectedPlatform} message saved:`, newMessage._id);
-            trimConversation(detectedPlatform, senderId).catch(() => {});
+            console.log(`[DB] ${detectedPlatform} message saved:`, message.mid);
             if (detectedPlatform === "facebook") {
               facebookRoute.clearCache();
             } else {
               instagramRoute.clearCache();
             }
 
-            // Emit real-time event with formatted data for instant UI update
-            if (io) {
+            // Re-emit with the resolved name so the frontend can update the sender name in place.
+            if (resolvedSenderName && io) {
               io.emit("newMessage", {
                 platform: detectedPlatform,
                 message: {
@@ -494,7 +541,7 @@ router.post("/facebook", async (req, res) => {
                   text: message.text || "",
                   from: fbSenderName,
                   fromId: senderId,
-                  time: new Date().toISOString(),
+                  time: fbMsgTime,
                 },
                 conversationId: senderId,
                 senderId: senderId,

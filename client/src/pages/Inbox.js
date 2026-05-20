@@ -5,6 +5,11 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
+import {
+  useQuery,
+  useQueryClient,
+  keepPreviousData,
+} from "@tanstack/react-query";
 import axios from "axios";
 import { io } from "socket.io-client";
 import { useNavigate } from "react-router-dom";
@@ -32,10 +37,9 @@ const CLASSIFICATION_COLORS = {
 const Inbox = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const [conversations, setConversations] = useState([]);
+  const queryClient = useQueryClient();
   const [selectedConv, setSelectedConv] = useState(null);
   const [replyText, setReplyText] = useState("");
-  const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
@@ -49,15 +53,81 @@ const Inbox = () => {
     email: 0,
   });
   const [unreadConvIds, setUnreadConvIds] = useState(new Set());
-  const [fetchError, setFetchError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchDebounced, setSearchDebounced] = useState("");
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const audioCtxRef = useRef(null);
   const activeTabRef = useRef(activeTab);
   const selectedConvRef = useRef(selectedConv);
-  const conversationsRef = useRef(conversations);
-  const fetchQuietRef = useRef(null);
+  const conversationsRef = useRef([]);
+
+  // React Query — fetch conversations with stale-while-revalidate caching.
+  // Switching tabs shows cached data instantly; background refetch runs silently.
+  const {
+    data: conversations = [],
+    isLoading: loading,
+    error: convError,
+  } = useQuery({
+    queryKey: ["conversations", activeTab],
+    queryFn: async ({ queryKey }) => {
+      const [, tab] = queryKey;
+      const token = user?.token;
+      if (!token) return [];
+      const opts = {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 60000,
+      };
+      let newConvs = [];
+      if (tab === "instagram") {
+        const res = await axios.get(
+          "/api/instagram/conversations?slim=1",
+          opts,
+        );
+        newConvs = res.data.conversations || [];
+      } else if (tab === "facebook") {
+        const res = await axios.get("/api/facebook/conversations?slim=1", opts);
+        newConvs = res.data.conversations || [];
+      } else if (tab === "whatsapp") {
+        const res = await axios.get("/api/instagram/messages", opts);
+        newConvs = res.data.messages || [];
+      } else if (tab === "email") {
+        const res = await axios.get("/api/email/conversations", opts);
+        newConvs = res.data.conversations || [];
+      }
+      // Preserve socket-injected temp conversations not yet in API response
+      const cached = queryClient.getQueryData(["conversations", tab]) || [];
+      const socketOnly = cached.filter(
+        (c) =>
+          c._fromSocket &&
+          !newConvs.some(
+            (n) =>
+              n.id === c.id ||
+              n.participants?.some((p) =>
+                c.participants?.some((cp) => cp.id === p.id),
+              ),
+          ),
+      );
+      return [...socketOnly, ...newConvs];
+    },
+    enabled: !!user?.token,
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    retry: (failureCount, error) =>
+      error?.response?.status === 401 ? false : failureCount < 1,
+  });
+
+  const fetchError =
+    convError?.response?.data?.message || convError?.message || null;
+
+  // Handle auth errors from React Query
+  useEffect(() => {
+    if (convError?.response?.status === 401) {
+      logout();
+      navigate("/login");
+    }
+  }, [convError, logout, navigate]);
 
   // Debounce search input
   useEffect(() => {
@@ -78,18 +148,12 @@ const Inbox = () => {
 
   // Connect to Socket.IO — ONCE, not on every tab change
   useEffect(() => {
-    // In dev, allow an explicit API URL or fallback to local API.
-    // In production, always use same-origin so reverse proxy routes /socket.io.
-    const isDev = process.env.NODE_ENV === "development";
-    const configuredApiUrl = process.env.REACT_APP_API_URL;
-    const hasLocalhostOverride = /localhost|127\.0\.0\.1/i.test(
-      configuredApiUrl || "",
-    );
-    const socketUrl = isDev
-      ? configuredApiUrl || "http://localhost:5000"
-      : hasLocalhostOverride
-        ? window.location.origin
-        : configuredApiUrl || window.location.origin;
+    // In dev, connect directly to the backend dev server.
+    // In production, always use same-origin — Nginx proxies /socket.io to the backend.
+    const socketUrl =
+      process.env.NODE_ENV === "development"
+        ? "http://localhost:5000"
+        : window.location.origin;
 
     const socket = io(socketUrl, {
       transports: ["websocket", "polling"],
@@ -175,18 +239,32 @@ const Inbox = () => {
             ],
             _fromSocket: true,
           };
-          setConversations((prev) => [tempConv, ...prev]);
+          queryClient.setQueryData(
+            ["conversations", currentTab],
+            (prev = []) => [tempConv, ...(prev || [])],
+          );
           console.log(
             "Added temp conversation from socket for new sender:",
             data.senderId,
           );
         }
 
-        // Only refetch for new/unknown senders — known conversations are updated inline above
-        // (background refetch on known convs overwrites socket-delivered messages with stale API data)
-        if (!isKnown && fetchQuietRef.current) {
-          setTimeout(() => fetchQuietRef.current(), 5000);
-          setTimeout(() => fetchQuietRef.current(), 15000);
+        // For new/unknown senders, schedule a background refetch so real data arrives
+        if (!isKnown) {
+          setTimeout(
+            () =>
+              queryClient.invalidateQueries({
+                queryKey: ["conversations", currentTab],
+              }),
+            5000,
+          );
+          setTimeout(
+            () =>
+              queryClient.invalidateQueries({
+                queryKey: ["conversations", currentTab],
+              }),
+            15000,
+          );
         }
 
         // Also try to append the message inline to the selected conversation
@@ -205,8 +283,18 @@ const Inbox = () => {
                 fromId: message.fromId,
                 time: message.time,
               };
-              const exists = prev.messages?.some((m) => m.id === message.id);
-              if (exists) return prev;
+              const existingIdx = (prev.messages || []).findIndex(
+                (m) => m.id === message.id,
+              );
+              if (existingIdx !== -1) {
+                // Second emit with resolved sender name — update in place
+                const updated = [...prev.messages];
+                updated[existingIdx] = {
+                  ...updated[existingIdx],
+                  from: message.from,
+                };
+                return { ...prev, messages: updated };
+              }
               return {
                 ...prev,
                 messages: [...(prev.messages || []), newMsg],
@@ -222,14 +310,32 @@ const Inbox = () => {
 
         // If the message belongs to a known conversation, update it inline
         if (isKnown) {
-          setConversations((prev) =>
-            prev.map((c) => {
+          queryClient.setQueryData(["conversations", currentTab], (prev = []) =>
+            (prev || []).map((c) => {
               const matches =
                 c.id === data.conversationId ||
                 c.participants?.some((p) => p.id === data.senderId);
               if (!matches) return c;
-              const exists = c.messages?.some((m) => m.id === message.id);
-              if (exists) return c;
+              const existingIdx = (c.messages || []).findIndex(
+                (m) => m.id === message.id,
+              );
+              if (existingIdx !== -1) {
+                // Second emit with resolved name — update sender name and lastMessage
+                const msgs = [...c.messages];
+                msgs[existingIdx] = {
+                  ...msgs[existingIdx],
+                  from: message.from,
+                };
+                return {
+                  ...c,
+                  lastMessage: {
+                    text: message.text,
+                    from: message.from,
+                    time: message.time,
+                  },
+                  messages: msgs,
+                };
+              }
               return {
                 ...c,
                 lastMessage: {
@@ -259,9 +365,14 @@ const Inbox = () => {
         }));
       }
 
-      // Play notification sound via Web Audio API (no external files needed)
+      // Play notification sound via Web Audio API — reuse AudioContext to avoid GC pressure
       try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new (
+            window.AudioContext || window.webkitAudioContext
+          )();
+        }
+        const ctx = audioCtxRef.current;
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain);
@@ -333,132 +444,10 @@ const Inbox = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [selectedConv?.messages?.length]);
 
-  // Full fetch (with loading spinner)
-  const fetchConversations = useCallback(async () => {
-    const token = user?.token;
-    if (!token) return;
-    try {
-      setLoading(true);
-
-      const axiosOpts = {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 15000,
-      };
-      const slowOpts = {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 60000,
-      };
-
-      setFetchError(null);
-      if (activeTab === "instagram") {
-        const res = await axios.get("/api/instagram/conversations", slowOpts);
-        setConversations(res.data.conversations || []);
-      } else if (activeTab === "facebook") {
-        const res = await axios.get("/api/facebook/conversations", slowOpts);
-        setConversations(res.data.conversations || []);
-      } else if (activeTab === "whatsapp") {
-        const res = await axios.get("/api/instagram/messages", axiosOpts);
-        setConversations(res.data.messages || []);
-      } else if (activeTab === "email") {
-        const res = await axios.get("/api/email/conversations", slowOpts);
-        setConversations(res.data.conversations || []);
-      }
-    } catch (error) {
-      if (error.response?.status === 401) {
-        logout();
-        navigate("/login");
-        return;
-      }
-      const errMsg =
-        error.response?.data?.message ||
-        error.response?.data?.error ||
-        error.message;
-      setFetchError(errMsg);
-      console.error(
-        "Failed to fetch conversations:",
-        error.response?.status,
-        errMsg,
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [activeTab, user?.token, logout, navigate]);
-
-  // Quiet fetch (no loading spinner — used for background real-time updates)
-  const fetchConversationsQuiet = useCallback(async () => {
-    const token = user?.token;
-    if (!token) return;
-    try {
-      const tab = activeTabRef.current;
-      const opts = {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 60000,
-      };
-      let newConvs = [];
-
-      if (tab === "instagram") {
-        const res = await axios.get("/api/instagram/conversations", opts);
-        newConvs = res.data.conversations || [];
-      } else if (tab === "facebook") {
-        const res = await axios.get("/api/facebook/conversations", opts);
-        newConvs = res.data.conversations || [];
-      } else if (tab === "email") {
-        const res = await axios.get("/api/email/conversations", opts);
-        newConvs = res.data.conversations || [];
-      } else if (tab === "whatsapp") {
-        const res = await axios.get("/api/instagram/messages", opts);
-        newConvs = res.data.messages || [];
-      }
-
-      setConversations((prev) => {
-        // Preserve socket-injected temp conversations that the API hasn't returned yet
-        // (Graph API can lag a few seconds behind the webhook)
-        const socketOnly = prev.filter(
-          (c) =>
-            c._fromSocket &&
-            !newConvs.some(
-              (n) =>
-                n.id === c.id ||
-                n.participants?.some((p) =>
-                  c.participants?.some((cp) => cp.id === p.id),
-                ),
-            ),
-        );
-        return [...socketOnly, ...newConvs];
-      });
-
-      // Also update selectedConv if it's currently open
-      const currentConv = selectedConvRef.current;
-      if (currentConv) {
-        const updated = newConvs.find((c) => c.id === currentConv.id);
-        if (updated) {
-          setSelectedConv((prev) => {
-            if (!prev) return updated;
-            // Merge: keep socket-delivered messages not yet in the API response
-            const apiMsgIds = new Set(
-              (updated.messages || []).map((m) => m.id),
-            );
-            const extraMsgs = (prev.messages || []).filter(
-              (m) => m.id && !apiMsgIds.has(m.id),
-            );
-            return {
-              ...updated,
-              messages: [...(updated.messages || []), ...extraMsgs].sort(
-                (a, b) => new Date(a.time || 0) - new Date(b.time || 0),
-              ),
-            };
-          });
-        }
-      }
-    } catch (error) {
-      if (error.response?.status === 401) {
-        logout();
-        navigate("/login");
-        return;
-      }
-      console.error("Background fetch error:", error.message);
-    }
-  }, [user?.token, logout, navigate]);
+  // Wrapper so existing call-sites (e.g. refresh button) work unchanged
+  const fetchConversations = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["conversations", activeTab] });
+  }, [activeTab, queryClient]);
 
   // Fetch classifications for the current platform tab
   const fetchClassifications = useCallback(async () => {
@@ -555,39 +544,72 @@ const Inbox = () => {
     });
   }, [conversations, classifications, classFilter, searchDebounced]);
 
-  // Keep fetchQuietRef always pointing to the latest function
+  // When React Query refreshes conversations, sync selectedConv so header/preview stay current
+  // while preserving locally-loaded messages (not returned by slim mode).
   useEffect(() => {
-    fetchQuietRef.current = fetchConversationsQuiet;
-  }, [fetchConversationsQuiet]);
+    if (!selectedConv || !conversations.length) return;
+    const updated = conversations.find((c) => c.id === selectedConv.id);
+    if (!updated) return;
+    setSelectedConv((prev) =>
+      prev ? { ...updated, messages: prev.messages } : prev,
+    );
+  }, [conversations]); // eslint-disable-line
 
-  // Fetch on tab change
+  // Keep fetchQuietRef always pointing to the latest function — REMOVED (React Query handles background refetch)
+
+  // Fetch on tab change — React Query re-runs the queryFn when activeTab changes (key changes).
+  // We still need to trigger classifications/locks fetch and clear the unread badge.
   useEffect(() => {
-    fetchConversations();
     fetchClassifications();
     fetchLocks();
     // Clear unread count for this tab
     setUnreadCounts((prev) => ({ ...prev, [activeTab]: 0 }));
-  }, [activeTab, fetchConversations, fetchClassifications, fetchLocks]);
+  }, [activeTab, fetchClassifications, fetchLocks]);
 
-  // Auto-poll every 60 seconds as a safety net; socket handles real-time updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (fetchQuietRef.current) fetchQuietRef.current();
-    }, 60000);
-    return () => clearInterval(interval);
-  }, []);
+  // When selecting a conversation, lazy-load messages if slim mode returned none
+  const handleSelectConv = useCallback(
+    async (conv) => {
+      setSelectedConv(conv);
+      // Clear unread indicator when the conversation is opened
+      setUnreadConvIds((prev) => {
+        if (!prev.has(conv.id)) return prev;
+        const next = new Set(prev);
+        next.delete(conv.id);
+        return next;
+      });
 
-  // When selecting a conversation, keep it in sync with latest data
-  const handleSelectConv = useCallback((conv) => {
-    setSelectedConv(conv);
-    // Clear unread indicator when the conversation is opened
-    setUnreadConvIds((prev) => {
-      if (!prev.has(conv.id)) return prev;
-      const next = new Set(prev);
-      next.delete(conv.id);
-      return next;
-    });
-  }, []);
+      // Slim mode returns empty messages[] — fetch on demand from /messages-paged
+      if (!conv.messages?.length && !conv._fromSocket) {
+        const platform = activeTabRef.current;
+        if (platform !== "instagram" && platform !== "facebook") return;
+        const endpoint =
+          platform === "facebook"
+            ? "/api/facebook/messages-paged"
+            : "/api/instagram/messages-paged";
+        try {
+          // Pass the first participant's ID alongside conv.id so the backend can find
+          // messages saved by webhooks (which use senderId as conversationId) as well
+          // as messages saved by the full API sync (which use the Graph API conv.id).
+          const participantId = conv.participants?.[0]?.id;
+          const res = await axios.get(endpoint, {
+            params: { conversationId: conv.id, participantId, limit: 30 },
+            headers: { Authorization: `Bearer ${user?.token}` },
+          });
+          setSelectedConv((prev) => {
+            if (!prev || prev.id !== conv.id) return prev;
+            return {
+              ...prev,
+              messages: res.data.messages || [],
+              _hasMoreMessages: res.data.hasMore,
+            };
+          });
+        } catch (err) {
+          console.error("Failed to fetch messages:", err.message);
+        }
+      }
+    },
+    [user?.token],
+  );
 
   // Inject custom CSS for animations, scrollbar, hover effects
   useEffect(() => {
@@ -690,8 +712,8 @@ const Inbox = () => {
       });
 
       // Update conversation list preview
-      setConversations((prev) =>
-        prev.map((c) => {
+      queryClient.setQueryData(["conversations", activeTab], (prev = []) =>
+        (prev || []).map((c) => {
           if (c.id === selectedConv.id) {
             return {
               ...c,
@@ -757,11 +779,11 @@ const Inbox = () => {
       });
 
       // Safety-net: refresh conversations list after ~8 s so the sidebar syncs
-      // with the Graph API (gives it time to index the sent message). The merge
-      // logic in fetchConversationsQuiet will NOT create a duplicate because the
-      // confirmed real ID is already present in the API response.
+      // with the Graph API (gives it time to index the sent message).
       setTimeout(() => {
-        if (fetchQuietRef.current) fetchQuietRef.current();
+        queryClient.invalidateQueries({
+          queryKey: ["conversations", activeTab],
+        });
       }, 8000);
     } catch (error) {
       console.error("Failed to send reply:", error);
@@ -1226,8 +1248,12 @@ const Inbox = () => {
                                 platform: activeTab,
                               },
                             });
-                            setConversations((prev) =>
-                              prev.filter((c) => c.id !== selectedConv.id),
+                            queryClient.setQueryData(
+                              ["conversations", activeTab],
+                              (prev = []) =>
+                                (prev || []).filter(
+                                  (c) => c.id !== selectedConv.id,
+                                ),
                             );
                             setSelectedConv(null);
                           } catch (err) {
@@ -1246,169 +1272,165 @@ const Inbox = () => {
                 </div>
 
                 <div className="inbox-msg-scroll" style={styles.messageList}>
-                  {selectedConv.messages
-                    ?.slice()
-                    .reverse()
-                    .map((msg, idx) => {
-                      const isEmail = activeTab === "email";
-                      const isOther =
-                        msg.from === selectedConv.participants?.[0]?.name;
-                      return (
-                        <div
-                          key={msg.id || idx}
-                          style={{
-                            ...(isEmail
-                              ? styles.emailBubble
-                              : styles.messageBubble),
-                            alignSelf: isEmail
-                              ? "stretch"
-                              : isOther
-                                ? "flex-start"
-                                : "flex-end",
-                            backgroundColor: isEmail
-                              ? "var(--bg-elevated)"
-                              : isOther
-                                ? "var(--msg-received-bg)"
-                                : "var(--accent)",
-                            color: isEmail
-                              ? "var(--text-primary)"
-                              : isOther
-                                ? "var(--msg-received-color)"
-                                : "var(--bg-primary)",
-                            opacity: msg.sending ? 0.5 : 1,
-                            animation: `inboxFadeUp 0.3s ease-out ${idx * 0.02}s both`,
-                          }}
-                        >
-                          <small style={styles.msgFrom}>{msg.from}</small>
-                          {/* Subject for emails */}
-                          {isEmail && msg.subject && (
-                            <p
-                              style={{
-                                margin: "6px 0 10px",
-                                fontWeight: 700,
-                                fontSize: 14,
-                                color: "var(--accent)",
-                              }}
-                            >
-                              {msg.subject}
-                            </p>
-                          )}
-                          {/* Email HTML or text */}
-                          {msg.html && isEmail ? (
-                            <div
-                              className="inbox-email-render"
-                              style={styles.emailHtmlContent}
-                              dangerouslySetInnerHTML={{ __html: msg.html }}
-                            />
-                          ) : (
-                            msg.text && <p style={styles.msgText}>{msg.text}</p>
-                          )}
-                          {/* Attachments */}
-                          {msg.attachments && msg.attachments.length > 0 && (
-                            <div style={{ marginTop: 8 }}>
-                              {msg.attachments.map((att, attIdx) => {
-                                const mimeType =
-                                  att.mime_type || att.contentType || "";
-                                const imageUrl =
-                                  att.image_data?.url ||
-                                  att.url ||
-                                  att.file_url ||
-                                  "";
-                                const videoUrl =
-                                  att.video_data?.url || att.url || "";
-                                const fileName =
-                                  att.name || att.filename || "file";
+                  {selectedConv.messages?.map((msg, idx) => {
+                    const isEmail = activeTab === "email";
+                    const isOther =
+                      msg.from === selectedConv.participants?.[0]?.name;
+                    return (
+                      <div
+                        key={msg.id || idx}
+                        style={{
+                          ...(isEmail
+                            ? styles.emailBubble
+                            : styles.messageBubble),
+                          alignSelf: isEmail
+                            ? "stretch"
+                            : isOther
+                              ? "flex-start"
+                              : "flex-end",
+                          backgroundColor: isEmail
+                            ? "var(--bg-elevated)"
+                            : isOther
+                              ? "var(--msg-received-bg)"
+                              : "var(--accent)",
+                          color: isEmail
+                            ? "var(--text-primary)"
+                            : isOther
+                              ? "var(--msg-received-color)"
+                              : "var(--bg-primary)",
+                          opacity: msg.sending ? 0.5 : 1,
+                          animation: `inboxFadeUp 0.3s ease-out ${idx * 0.02}s both`,
+                        }}
+                      >
+                        <small style={styles.msgFrom}>{msg.from}</small>
+                        {/* Subject for emails */}
+                        {isEmail && msg.subject && (
+                          <p
+                            style={{
+                              margin: "6px 0 10px",
+                              fontWeight: 700,
+                              fontSize: 14,
+                              color: "var(--accent)",
+                            }}
+                          >
+                            {msg.subject}
+                          </p>
+                        )}
+                        {/* Email HTML or text */}
+                        {msg.html && isEmail ? (
+                          <div
+                            className="inbox-email-render"
+                            style={styles.emailHtmlContent}
+                            dangerouslySetInnerHTML={{ __html: msg.html }}
+                          />
+                        ) : (
+                          msg.text && <p style={styles.msgText}>{msg.text}</p>
+                        )}
+                        {/* Attachments */}
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div style={{ marginTop: 8 }}>
+                            {msg.attachments.map((att, attIdx) => {
+                              const mimeType =
+                                att.mime_type || att.contentType || "";
+                              const imageUrl =
+                                att.image_data?.url ||
+                                att.url ||
+                                att.file_url ||
+                                "";
+                              const videoUrl =
+                                att.video_data?.url || att.url || "";
+                              const fileName =
+                                att.name || att.filename || "file";
 
-                                if (
-                                  mimeType.startsWith("image") ||
-                                  att.image_data
-                                ) {
-                                  return (
-                                    <img
-                                      key={attIdx}
-                                      src={imageUrl}
-                                      alt="attachment"
-                                      style={{
-                                        maxWidth: "100%",
-                                        maxHeight: 300,
-                                        borderRadius: 10,
-                                        marginTop: 6,
-                                        cursor: "pointer",
-                                      }}
-                                      onClick={() =>
-                                        window.open(imageUrl, "_blank")
-                                      }
-                                    />
-                                  );
-                                } else if (
-                                  mimeType.startsWith("video") ||
-                                  att.video_data
-                                ) {
-                                  return (
-                                    <video
-                                      key={attIdx}
-                                      src={videoUrl}
-                                      controls
-                                      style={{
-                                        maxWidth: "100%",
-                                        maxHeight: 300,
-                                        borderRadius: 10,
-                                        marginTop: 6,
-                                      }}
-                                    />
-                                  );
-                                } else if (mimeType.startsWith("audio")) {
-                                  return (
-                                    <audio
-                                      key={attIdx}
-                                      src={att.url || att.file_url || ""}
-                                      controls
-                                      style={{
-                                        marginTop: 6,
-                                        width: "100%",
-                                      }}
-                                    />
-                                  );
-                                } else {
-                                  return (
-                                    <a
-                                      key={attIdx}
-                                      href={att.url || att.file_url || "#"}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        gap: 5,
-                                        marginTop: 6,
-                                        color: "var(--accent)",
-                                        textDecoration: "none",
-                                        fontSize: 12,
-                                        padding: "5px 10px",
-                                        borderRadius: 6,
-                                        backgroundColor: "var(--accent-bg)",
-                                        border:
-                                          "1px solid var(--accent-border)",
-                                      }}
-                                    >
-                                      📎 {fileName}
-                                    </a>
-                                  );
-                                }
-                              })}
-                            </div>
+                              if (
+                                mimeType.startsWith("image") ||
+                                att.image_data
+                              ) {
+                                return (
+                                  <img
+                                    key={attIdx}
+                                    src={imageUrl}
+                                    alt="attachment"
+                                    style={{
+                                      maxWidth: "100%",
+                                      maxHeight: 300,
+                                      borderRadius: 10,
+                                      marginTop: 6,
+                                      cursor: "pointer",
+                                    }}
+                                    onClick={() =>
+                                      window.open(imageUrl, "_blank")
+                                    }
+                                  />
+                                );
+                              } else if (
+                                mimeType.startsWith("video") ||
+                                att.video_data
+                              ) {
+                                return (
+                                  <video
+                                    key={attIdx}
+                                    src={videoUrl}
+                                    controls
+                                    style={{
+                                      maxWidth: "100%",
+                                      maxHeight: 300,
+                                      borderRadius: 10,
+                                      marginTop: 6,
+                                    }}
+                                  />
+                                );
+                              } else if (mimeType.startsWith("audio")) {
+                                return (
+                                  <audio
+                                    key={attIdx}
+                                    src={att.url || att.file_url || ""}
+                                    controls
+                                    style={{
+                                      marginTop: 6,
+                                      width: "100%",
+                                    }}
+                                  />
+                                );
+                              } else {
+                                return (
+                                  <a
+                                    key={attIdx}
+                                    href={att.url || att.file_url || "#"}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                      marginTop: 6,
+                                      color: "var(--accent)",
+                                      textDecoration: "none",
+                                      fontSize: 12,
+                                      padding: "5px 10px",
+                                      borderRadius: 6,
+                                      backgroundColor: "var(--accent-bg)",
+                                      border: "1px solid var(--accent-border)",
+                                    }}
+                                  >
+                                    📎 {fileName}
+                                  </a>
+                                );
+                              }
+                            })}
+                          </div>
+                        )}
+                        {!msg.text &&
+                          (!msg.attachments ||
+                            msg.attachments.length === 0) && (
+                            <p style={styles.msgText}>[Empty message]</p>
                           )}
-                          {!msg.text &&
-                            (!msg.attachments ||
-                              msg.attachments.length === 0) && (
-                              <p style={styles.msgText}>[Empty message]</p>
-                            )}
-                          <small style={styles.msgTime}>
-                            {new Date(msg.time).toLocaleString()}
-                          </small>
-                        </div>
-                      );
-                    })}
+                        <small style={styles.msgTime}>
+                          {new Date(msg.time).toLocaleString()}
+                        </small>
+                      </div>
+                    );
+                  })}
                   <div ref={messagesEndRef} />
                 </div>
 

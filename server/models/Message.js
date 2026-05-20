@@ -81,4 +81,20 @@ const messageSchema = new mongoose.Schema(
 messageSchema.index({ platform: 1, conversationId: 1 });
 messageSchema.index({ platform: 1, senderId: 1 });
 
+// Compound index for paginated message fetch sorted by time (most common query pattern)
+messageSchema.index(
+  { platform: 1, conversationId: 1, timestamp: -1 },
+  { name: "messages_paged" },
+);
+// For recent-messages scan used by the DB-merge pass in instagram/facebook routes
+messageSchema.index(
+  { platform: 1, timestamp: -1 },
+  { name: "messages_recent" },
+);
+// For webhook upsert lookups by external platform message ID
+messageSchema.index(
+  { externalId: 1 },
+  { sparse: true, name: "messages_extId" },
+);
+
 module.exports = mongoose.model("Message", messageSchema);
