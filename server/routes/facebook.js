@@ -340,6 +340,51 @@ router.get("/messages-paged", protect, async (req, res) => {
       return res.status(400).json({ message: "conversationId is required" });
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
+    // --- NEW: Sync missing messages from Graph API on first page load ---
+    if (!before && conversationId.startsWith("t_")) {
+      try {
+        const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+        const pageId = process.env.FACEBOOK_PAGE_ID;
+        if (accessToken && pageId) {
+          const convRes = await axios.get(`${GRAPH_API}/${conversationId}`, {
+            params: {
+              fields:
+                "messages.limit(30){message,from,to,created_time,attachments}",
+              access_token: accessToken,
+            },
+          });
+          const msgs = convRes.data.messages?.data || [];
+
+          // Wait for all DB insertions to finish so the following find() gets them
+          await Promise.all(
+            msgs.map(async (m) => {
+              const direction = m.from?.id === pageId ? "outgoing" : "incoming";
+              await Message.findOneAndUpdate(
+                { externalId: m.id },
+                {
+                  $setOnInsert: {
+                    platform: "facebook",
+                    conversationId: conversationId,
+                    senderId: m.from?.id || "unknown",
+                    senderName: m.from?.name || "Unknown",
+                    recipientId: m.to?.data?.[0]?.id || pageId,
+                    content: m.message || "",
+                    messageType: m.attachments ? "attachment" : "text",
+                    direction,
+                    status: direction === "outgoing" ? "sent" : "delivered",
+                    externalId: m.id,
+                    timestamp: m.created_time,
+                  },
+                },
+                { upsert: true },
+              );
+            }),
+          );
+        }
+      } catch (syncErr) {
+        console.error("Optional FB conversation sync failed:", syncErr.message);
+      }
+    }
     // Webhook messages are saved with conversationId = senderId (PSID).
     // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
     // Accept both so we never miss webhook-saved messages when the user opens a conversation.

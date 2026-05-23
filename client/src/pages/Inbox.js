@@ -108,7 +108,38 @@ const Inbox = () => {
               ),
           ),
       );
-      return [...socketOnly, ...newConvs];
+
+      // Merge to prevent local socket updates from being overwritten by delayed API responses
+      const mergedConvs = newConvs.map((newConv) => {
+        const cachedConv = cached.find((c) => c.id === newConv.id);
+        if (!cachedConv) return newConv;
+
+        // Preserve locally tracked messages
+        const mergedMessages =
+          cachedConv.messages?.length > 0
+            ? cachedConv.messages
+            : newConv.messages;
+
+        // Preserve optimistic lastMessage if the cached one is newer
+        const serverTime = new Date(newConv.lastMessage?.time || 0).getTime();
+        const cachedTime = new Date(
+          cachedConv.lastMessage?.time || 0,
+        ).getTime();
+        const mergedLastMessage =
+          cachedTime > serverTime
+            ? cachedConv.lastMessage
+            : newConv.lastMessage;
+
+        return {
+          ...newConv,
+          messages: mergedMessages,
+          lastMessage: mergedLastMessage,
+          _messagesLoaded:
+            cachedConv._messagesLoaded || newConv._messagesLoaded,
+        };
+      });
+
+      return [...socketOnly, ...mergedConvs];
     },
     enabled: !!user?.token,
     placeholderData: keepPreviousData,
@@ -579,7 +610,7 @@ const Inbox = () => {
       });
 
       // Slim mode returns empty messages[] — fetch on demand from /messages-paged
-      if (!conv.messages?.length && !conv._fromSocket) {
+      if (!conv._messagesLoaded && !conv._fromSocket) {
         const platform = activeTabRef.current;
         if (platform !== "instagram" && platform !== "facebook") return;
         const endpoint =
@@ -595,14 +626,43 @@ const Inbox = () => {
             params: { conversationId: conv.id, participantId, limit: 30 },
             headers: { Authorization: `Bearer ${user?.token}` },
           });
+
+          // If a socket message was added while we were fetching (or before), ensure it stays at the bottom
+          const loadedMessages = res.data.messages || [];
+
           setSelectedConv((prev) => {
             if (!prev || prev.id !== conv.id) return prev;
+
+            // Merge loaded messages with any existing newer socket messages
+            const existingMessages = prev.messages || [];
+            const merged = [...loadedMessages];
+
+            existingMessages.forEach((em) => {
+              if (!merged.some((m) => m.id === em.id)) {
+                merged.push(em);
+              }
+            });
+
+            // Sort by time to ensure correct order
+            merged.sort((a, b) => new Date(a.time) - new Date(b.time));
+
             return {
               ...prev,
-              messages: res.data.messages || [],
+              messages: merged,
               _hasMoreMessages: res.data.hasMore,
+              _messagesLoaded: true,
             };
           });
+
+          queryClient.setQueryData(
+            ["conversations", platform],
+            (prevConvs = []) =>
+              prevConvs.map((c) =>
+                c.id === conv.id
+                  ? { ...c, _messagesLoaded: true, messages: merged }
+                  : c,
+              ),
+          );
         } catch (err) {
           console.error("Failed to fetch messages:", err.message);
         }

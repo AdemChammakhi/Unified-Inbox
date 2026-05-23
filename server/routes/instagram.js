@@ -88,7 +88,7 @@ async function fetchInstagramConversations(slim = false) {
   // This cuts the Graph API payload by ~95% and skips the DB upsert loop.
   const conversationFields = slim
     ? "participants{id,name,username,profile_pic},messages.limit(1){message,from,created_time}"
-    : "participants{id,name,username,profile_pic},messages{message,from,to,created_time,attachments}";
+    : "participants{id,name,username,profile_pic},messages.limit(5){message,from,to,created_time,attachments}";
   let conversations = [];
   const seenConvIds = new Set();
   const folders = ["inbox", "other"];
@@ -99,7 +99,7 @@ async function fetchInstagramConversations(slim = false) {
       platform: "instagram",
       folder,
       fields: conversationFields,
-      limit: 60,
+      limit: 10,
       access_token: accessToken,
     };
     const maxPages = 1;
@@ -551,6 +551,52 @@ router.get("/messages-paged", protect, async (req, res) => {
       return res.status(400).json({ message: "conversationId is required" });
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
+    // --- NEW: Sync missing messages from Graph API on first page load ---
+    if (!before && conversationId.startsWith("t_")) {
+      try {
+        const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+        const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+        if (accessToken && accountId) {
+          const convRes = await axios.get(`${GRAPH_API}/${conversationId}`, {
+            params: {
+              fields:
+                "messages.limit(30){message,from,to,created_time,attachments}",
+              access_token: accessToken,
+            },
+          });
+          const msgs = convRes.data.messages?.data || [];
+
+          // Wait for all DB insertions to finish so the following find() gets them
+          await Promise.all(
+            msgs.map(async (m) => {
+              const direction =
+                m.from?.id === accountId ? "outgoing" : "incoming";
+              await Message.findOneAndUpdate(
+                { externalId: m.id },
+                {
+                  $setOnInsert: {
+                    platform: "instagram",
+                    conversationId: conversationId,
+                    senderId: m.from?.id || "unknown",
+                    senderName: m.from?.name || "Unknown",
+                    recipientId: m.to?.data?.[0]?.id || accountId,
+                    content: m.message || "",
+                    messageType: m.attachments ? "attachment" : "text",
+                    direction,
+                    status: direction === "outgoing" ? "sent" : "delivered",
+                    externalId: m.id,
+                    timestamp: m.created_time,
+                  },
+                },
+                { upsert: true },
+              );
+            }),
+          );
+        }
+      } catch (syncErr) {
+        console.error("Optional IG conversation sync failed:", syncErr.message);
+      }
+    }
     // Webhook messages are saved with conversationId = senderId (the participant's IGSID).
     // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
     // Accept both so we never miss webhook-saved messages when the user opens a conversation.
