@@ -30,6 +30,7 @@ on:
       - "server/Dockerfile"
       - "client/Dockerfile"
       - ".github/workflows/devsecops.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
