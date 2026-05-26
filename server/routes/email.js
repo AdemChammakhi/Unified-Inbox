@@ -259,12 +259,26 @@ router.post("/send", protect, async (req, res) => {
       });
     }
     // Auto-lock on first reply (marketing agents)
-    if (!existingLock && req.user.role === "marketing") {
-      await ConversationLock.create({
-        conversationId: lockConvId,
-        platform: "email",
-        lockedBy: req.user._id,
-      });
+    // --- Auto-lock functionality ---
+    if (!existingLock) {
+      try {
+        await ConversationLock.create({
+          conversationId: lockConvId,
+          platform: "email",
+          lockedBy: req.user._id,
+          lockedAt: new Date(),
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+        });
+      } catch (lockErr) {
+        if (lockErr.code === 11000) {
+          console.log("[Email:Lock] Lock race detected (non-fatal)");
+        } else {
+          throw lockErr;
+        }
+      }
+    } else {
+      existingLock.expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await existingLock.save();
     }
 
     if (

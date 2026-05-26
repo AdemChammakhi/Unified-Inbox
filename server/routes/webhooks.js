@@ -7,6 +7,7 @@ const { protect } = require("../middleware/auth");
 const instagramRoute = require("./instagram");
 const facebookRoute = require("./facebook");
 const emailRoute = require("./email");
+const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -14,17 +15,6 @@ function isLikelyRawId(value) {
   return typeof value === "string" && /^\d{6,}$/.test(value);
 }
 
-// Keep only the last 20 messages per conversation in the DB
-async function trimConversation(platform, conversationId) {
-  const messages = await Message.find({ platform, conversationId })
-    .sort({ createdAt: -1 })
-    .skip(20)
-    .select("_id");
-  if (messages.length > 0) {
-    const ids = messages.map((m) => m._id);
-    await Message.deleteMany({ _id: { $in: ids } });
-  }
-}
 
 // In-memory log of recent webhook hits (last 50) — for debugging
 const webhookLog = [];
@@ -206,25 +196,40 @@ router.post("/whatsapp", async (req, res) => {
             const messages = value.messages || [];
 
             for (const msg of messages) {
-              // Look up WhatsApp sender name from contacts
               const contact = value.contacts?.[0];
               const waName =
                 contact?.profile?.name || contact?.wa_id || msg.from;
 
-              const newMessage = await Message.create({
+              const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
+              const { conversation } = await getOrCreateConversation({
                 platform: "whatsapp",
-                conversationId: msg.from,
-                senderId: msg.from,
+                externalSenderId: msg.from,
                 senderName: waName,
-                recipientId: value.metadata.phone_number_id,
-                content: msg.text?.body || "",
-                messageType: msg.type || "text",
-                direction: "incoming",
-                status: "delivered",
-                externalId: msg.id,
               });
 
-              console.log("WhatsApp message saved:", newMessage._id);
+              const newMessage = await Message.findOneAndUpdate(
+                { externalId: msg.id },
+                {
+                  $setOnInsert: {
+                    platform: "whatsapp",
+                    conversationId: msg.from,
+                    senderId: msg.from,
+                    senderName: waName,
+                    recipientId: value.metadata.phone_number_id,
+                    content: msg.text?.body || "",
+                    messageType: msg.type || "text",
+                    direction: "incoming",
+                    status: "delivered",
+                    externalId: msg.id,
+                    timestamp: new Date(),
+                  },
+                },
+                { upsert: true, new: true }
+              );
+
+              console.log("[Webhook:WhatsApp] Message saved/upserted:", newMessage._id);
+
+              await updateConversationAfterMessage(conversation._id, newMessage);
 
               // Emit real-time event with formatted data
               if (io) {
@@ -290,11 +295,7 @@ router.post("/instagram", async (req, res) => {
     "POST",
     `object=${body?.object}, entries=${body?.entry?.length}, keys=${body?.entry?.map((e) => Object.keys(e).join("/")).join("; ")}`,
   );
-  // Log the full payload structure for debugging (first 2000 chars)
-  console.log(
-    "=== INSTAGRAM WEBHOOK RAW ===",
-    JSON.stringify(body, null, 2).slice(0, 2000),
-  );
+
   res.sendStatus(200); // Acknowledge immediately — prevents Meta retries on slow processing
   try {
     const io = req.app.get("io");
@@ -356,8 +357,15 @@ router.post("/instagram", async (req, res) => {
             let igSenderName = await getSenderName(senderId, "instagram");
             const igDisplayName = igSenderName || `User ${senderId.slice(-4)}`;
 
+            // Resolve Conversation document (creates Channel + Contact if needed)
+            const { conversation: igConv } = await getOrCreateConversation({
+              platform: "instagram",
+              externalSenderId: senderId,
+              senderName: igDisplayName,
+            });
+
             // Upsert to DB (avoids duplicate errors if webhook fires twice)
-            await Message.findOneAndUpdate(
+            const igSavedMsg = await Message.findOneAndUpdate(
               { externalId: msgMid },
               {
                 $setOnInsert: {
@@ -376,8 +384,11 @@ router.post("/instagram", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true },
+              { upsert: true, new: true },
             );
+
+            // Update Conversation lastMessage/counters
+            await updateConversationAfterMessage(igConv._id, igSavedMsg);
 
             console.log("[DB] Instagram message saved:", msgMid);
             instagramRoute.clearCache();
@@ -505,7 +516,14 @@ router.post("/facebook", async (req, res) => {
             const fbSenderName =
               resolvedSenderName || `User ${senderId.slice(-4)}`;
 
-            await Message.findOneAndUpdate(
+            // Resolve Conversation document (creates Channel + Contact if needed)
+            const { conversation: fbConv } = await getOrCreateConversation({
+              platform: detectedPlatform,
+              externalSenderId: senderId,
+              senderName: fbSenderName,
+            });
+
+            const fbSavedMsg = await Message.findOneAndUpdate(
               { externalId: message.mid },
               {
                 $setOnInsert: {
@@ -522,8 +540,11 @@ router.post("/facebook", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true },
+              { upsert: true, new: true },
             );
+
+            // Update Conversation lastMessage/counters
+            await updateConversationAfterMessage(fbConv._id, fbSavedMsg);
 
             console.log(`[DB] ${detectedPlatform} message saved:`, message.mid);
             if (detectedPlatform === "facebook") {

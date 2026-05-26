@@ -13,11 +13,6 @@ import {
   MessageSquare,
 } from "lucide-react";
 
-const NAV_ITEMS = [
-  { to: "/inbox", icon: Inbox, label: "Inbox" },
-  { to: null, icon: LayoutDashboard, label: "Dashboard", roleLink: true },
-];
-
 const DashboardLayout = ({ children, noPadding = false }) => {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();

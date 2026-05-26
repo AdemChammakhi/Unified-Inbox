@@ -89,8 +89,8 @@ const Inbox = () => {
         const res = await axios.get("/api/facebook/conversations?slim=1", opts);
         newConvs = res.data.conversations || [];
       } else if (tab === "whatsapp") {
-        const res = await axios.get("/api/instagram/messages", opts);
-        newConvs = res.data.messages || [];
+        const res = await axios.get("/api/whatsapp/conversations?slim=1", opts);
+        newConvs = res.data.conversations || [];
       } else if (tab === "email") {
         const res = await axios.get("/api/email/conversations", opts);
         newConvs = res.data.conversations || [];
@@ -177,8 +177,10 @@ const Inbox = () => {
     conversationsRef.current = conversations;
   }, [conversations]);
 
-  // Connect to Socket.IO — ONCE, not on every tab change
+  // Connect to Socket.IO — runs when user.token is available or changes
   useEffect(() => {
+    if (!user?.token) return;
+
     // In dev, connect directly to the backend dev server.
     // In production, always use same-origin — Nginx proxies /socket.io to the backend.
     const socketUrl =
@@ -192,6 +194,9 @@ const Inbox = () => {
       reconnectionDelay: 1000,
       reconnectionAttempts: Infinity,
       timeout: 10000,
+      auth: {
+        token: user?.token,
+      },
     });
     socketRef.current = socket;
 
@@ -429,34 +434,60 @@ const Inbox = () => {
       const currentTab = activeTabRef.current;
       const currentConv = selectedConvRef.current;
 
-      if (platform === currentTab && currentConv) {
-        // Check if this sent message belongs to current conversation
-        const matchesSelected = currentConv.participants?.some(
-          (p) => p.id === data.recipientId,
-        );
-        if (matchesSelected) {
-          // Replace optimistic message or add the sent message
-          setSelectedConv((prev) => {
-            if (!prev) return prev;
-            // Remove any temp optimistic messages with same text
-            const filtered = (prev.messages || []).filter(
+      if (platform === currentTab) {
+        // 1. Update active conversation messages if currently selected
+        if (currentConv) {
+          const matchesSelected =
+            currentConv.id === data.conversationId ||
+            currentConv.participants?.some((p) => p.id === data.recipientId);
+          if (matchesSelected) {
+            setSelectedConv((prev) => {
+              if (!prev) return prev;
+              const filtered = (prev.messages || []).filter(
+                (m) =>
+                  !(m.id && m.id.startsWith("temp_") && m.text === message.text),
+              );
+              const exists = filtered.some((m) => m.id === message.id);
+              if (exists) return { ...prev, messages: filtered };
+              return {
+                ...prev,
+                messages: [...filtered, message],
+                lastMessage: {
+                  text: message.text,
+                  from: message.from,
+                  time: message.time,
+                },
+              };
+            });
+          }
+        }
+
+        // 2. Update conversations list in query cache so sidebar updates and re-sorts
+        queryClient.setQueryData(["conversations", currentTab], (prev = []) =>
+          (prev || []).map((c) => {
+            const matches =
+              c.id === data.conversationId ||
+              c.participants?.some((p) => p.id === data.recipientId);
+            if (!matches) return c;
+
+            const filteredMsgs = (c.messages || []).filter(
               (m) =>
                 !(m.id && m.id.startsWith("temp_") && m.text === message.text),
             );
-            // Add the real message if not already there
-            const exists = filtered.some((m) => m.id === message.id);
-            if (exists) return { ...prev, messages: filtered };
+            const exists = filteredMsgs.some((m) => m.id === message.id);
+            const updatedMsgs = exists ? filteredMsgs : [...filteredMsgs, message];
+
             return {
-              ...prev,
-              messages: [...filtered, message],
+              ...c,
               lastMessage: {
                 text: message.text,
                 from: message.from,
                 time: message.time,
               },
+              messages: updatedMsgs,
             };
-          });
-        }
+          }),
+        );
       }
     });
 
@@ -468,7 +499,7 @@ const Inbox = () => {
     return () => {
       socket.disconnect();
     };
-  }, []); // eslint-disable-line
+  }, [user?.token, user?._id]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -610,13 +641,19 @@ const Inbox = () => {
       });
 
       // Slim mode returns empty messages[] — fetch on demand from /messages-paged
-      if (!conv._messagesLoaded && !conv._fromSocket) {
+      if (!conv._messagesLoaded) {
         const platform = activeTabRef.current;
-        if (platform !== "instagram" && platform !== "facebook") return;
-        const endpoint =
-          platform === "facebook"
-            ? "/api/facebook/messages-paged"
-            : "/api/instagram/messages-paged";
+        let endpoint;
+        if (platform === "facebook") {
+          endpoint = "/api/facebook/messages-paged";
+        } else if (platform === "instagram") {
+          endpoint = "/api/instagram/messages-paged";
+        } else if (platform === "whatsapp") {
+          endpoint = "/api/whatsapp/messages-paged";
+        } else {
+          // email or other platforms without paged endpoint — skip lazy-load
+          return;
+        }
         try {
           // Pass the first participant's ID alongside conv.id so the backend can find
           // messages saved by webhooks (which use senderId as conversationId) as well
@@ -630,22 +667,23 @@ const Inbox = () => {
           // If a socket message was added while we were fetching (or before), ensure it stays at the bottom
           const loadedMessages = res.data.messages || [];
 
+          // Resolve existing messages from cache or state to compute merged list synchronously
+          const cachedConvs = queryClient.getQueryData(["conversations", platform]) || [];
+          const currentCached = cachedConvs.find((c) => c.id === conv.id);
+          const existingMessages = currentCached?.messages || selectedConvRef.current?.messages || [];
+
+          const merged = [...loadedMessages];
+          existingMessages.forEach((em) => {
+            if (!merged.some((m) => m.id === em.id)) {
+              merged.push(em);
+            }
+          });
+
+          // Sort by time to ensure correct order
+          merged.sort((a, b) => new Date(a.time) - new Date(b.time));
+
           setSelectedConv((prev) => {
             if (!prev || prev.id !== conv.id) return prev;
-
-            // Merge loaded messages with any existing newer socket messages
-            const existingMessages = prev.messages || [];
-            const merged = [...loadedMessages];
-
-            existingMessages.forEach((em) => {
-              if (!merged.some((m) => m.id === em.id)) {
-                merged.push(em);
-              }
-            });
-
-            // Sort by time to ensure correct order
-            merged.sort((a, b) => new Date(a.time) - new Date(b.time));
-
             return {
               ...prev,
               messages: merged,
@@ -801,6 +839,16 @@ const Inbox = () => {
       } else if (activeTab === "facebook") {
         sendRes = await axios.post(
           "/api/facebook/send",
+          {
+            recipientId: recipient?.id || selectedConv.id,
+            conversationId: selectedConv.id,
+            message: messageText,
+          },
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+      } else if (activeTab === "whatsapp") {
+        sendRes = await axios.post(
+          "/api/whatsapp/send",
           {
             recipientId: recipient?.id || selectedConv.id,
             conversationId: selectedConv.id,
@@ -1335,7 +1383,7 @@ const Inbox = () => {
                   {selectedConv.messages?.map((msg, idx) => {
                     const isEmail = activeTab === "email";
                     const isOther =
-                      msg.from === selectedConv.participants?.[0]?.name;
+                      msg.direction === "incoming" || (msg.fromId && msg.fromId === selectedConv.participants?.[0]?.id) || msg.from === selectedConv.participants?.[0]?.name;
                     return (
                       <div
                         key={msg.id || idx}

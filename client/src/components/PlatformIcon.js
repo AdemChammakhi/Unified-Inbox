@@ -77,38 +77,8 @@ const WhatsAppIcon = ({ size }) => (
   </svg>
 );
 
+// Gmail icon (envelope style)
 const GmailIcon = ({ size }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 32 32"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-  >
-    <rect width="32" height="32" rx="6" fill="#ffffff" />
-    {/* Left red panel */}
-    <path d="M4 10v12l5-4V14L4 10z" fill="#EA4335" />
-    {/* Right green panel */}
-    <path d="M28 10v12l-5-4V14l5-4z" fill="#34A853" />
-    {/* Bottom blue panel */}
-    <path d="M9 22h14v4H9z" fill="#4285F4" />
-    {/* Top yellow M fold */}
-    <path d="M4 10l12 8 12-8H4z" fill="#FBBC04" />
-    {/* White center fill for M look */}
-    <path d="M9 14v8h14v-8L16 20 9 14z" fill="#4285F4" />
-    {/* The M envelope shape in red on top */}
-    <path
-      d="M4 10l12 9 12-9"
-      stroke="white"
-      strokeWidth="0.5"
-      fill="none"
-      opacity="0.3"
-    />
-  </svg>
-);
-
-// Simpler, more accurate Gmail icon
-const GmailIconV2 = ({ size }) => (
   <svg
     width={size}
     height={size}
@@ -133,7 +103,7 @@ const PlatformIcon = ({ platform, size = 18 }) => {
     case "whatsapp":
       return <WhatsAppIcon size={size} />;
     case "email":
-      return <GmailIconV2 size={size} />;
+      return <GmailIcon size={size} />;
     default:
       return null;
   }

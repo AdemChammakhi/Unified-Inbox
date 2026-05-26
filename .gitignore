@@ -31,3 +31,8 @@ AGENTS.md
 dev-server.err.log
 dev-server.out.log
 docs/*
+
+# Agent architecture
+.tmp/
+credentials.json
+token.json

@@ -253,51 +253,6 @@ conversationSchema.virtual("isSnoozed").get(function () {
   return this.snoozedUntil != null && this.snoozedUntil > new Date();
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Instance methods
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Atomically push a new-message update onto the conversation.
- * Call this inside the same transaction/operation as Message.create().
- *
- * @param {object} message - Saved Message document
- */
-conversationSchema.methods.applyNewMessage = function (message) {
-  const inc = { messageCount: 1 };
-  if (message.direction === "inbound") inc.unreadCount = 1;
-
-  return mongoose.model("Conversation").findByIdAndUpdate(
-    this._id,
-    {
-      $set: {
-        lastMessage: {
-          messageId: message._id,
-          content: message.text || "",
-          type: message.type,
-          direction: message.direction,
-          senderName: message.sender?.name || "",
-          sentAt: message.createdAt || new Date(),
-        },
-      },
-      $inc: inc,
-    },
-    { new: true },
-  );
-};
-
-/**
- * Mark all messages as read for an agent.
- */
-conversationSchema.methods.markReadBy = function (agentId) {
-  return mongoose.model("Conversation").findByIdAndUpdate(
-    this._id,
-    {
-      $set: { unreadCount: 0 },
-      $pull: { agentUnread: { agentId } },
-    },
-    { new: true },
-  );
-};
 
 module.exports = mongoose.model("Conversation", conversationSchema);
+

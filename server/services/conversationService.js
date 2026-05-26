@@ -127,19 +127,29 @@ async function getOrCreateConversation({
  * @param {object}   message   - Saved Message document
  */
 async function updateConversationAfterMessage(conversationId, message) {
-  const isInbound = message.direction === "inbound";
+  const isInbound = message.direction === "inbound" || message.direction === "incoming";
+  const normalizedDirection = isInbound ? "inbound" : "outbound";
 
-  return Conversation.findByIdAndUpdate(
-    conversationId,
+  const query = {};
+  const mongoose = require("mongoose");
+  if (mongoose.Types.ObjectId.isValid(conversationId)) {
+    query._id = conversationId;
+  } else {
+    query.externalId = conversationId;
+    query.platform = message.platform;
+  }
+
+  return Conversation.findOneAndUpdate(
+    query,
     {
       $set: {
         lastMessage: {
           messageId: message._id,
-          content: (message.text || "").substring(0, 200),
-          type: message.type || "text",
-          direction: message.direction,
-          senderName: message.sender?.name || "",
-          sentAt: message.createdAt || new Date(),
+          content: (message.content || message.text || "").substring(0, 200),
+          type: message.messageType || message.type || "text",
+          direction: normalizedDirection,
+          senderName: message.senderName || message.sender?.name || "",
+          sentAt: message.timestamp || message.createdAt || new Date(),
         },
       },
       $inc: {
@@ -147,7 +157,7 @@ async function updateConversationAfterMessage(conversationId, message) {
         unreadCount: isInbound ? 1 : 0,
       },
     },
-    { new: true },
+    { new: true }
   );
 }
 

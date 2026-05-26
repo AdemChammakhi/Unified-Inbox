@@ -163,10 +163,45 @@ async function fetchFacebookConversations(slim = false) {
 
     const recentDbMsgs = await Message.find({
       platform: "facebook",
-      direction: "incoming",
     })
       .sort({ timestamp: -1 })
       .limit(200);
+
+    // Build a map of key (conversationId/senderId) -> latest message in DB
+    const dbLatestMap = {};
+    for (const m of recentDbMsgs) {
+      const key = m.conversationId || m.senderId;
+      const displayName = resolveStoredName(m.senderName);
+      if (!dbLatestMap[key]) {
+        dbLatestMap[key] = {
+          text: m.content || "",
+          from: displayName,
+          time: m.timestamp || m.createdAt,
+        };
+      }
+    }
+
+    // Update Graph API conversations if DB has a newer message
+    formatted.forEach((c) => {
+      let dbLatest = dbLatestMap[c.id];
+      if (!dbLatest) {
+        // Try participant IDs
+        for (const p of c.participants || []) {
+          if (dbLatestMap[p.id]) {
+            dbLatest = dbLatestMap[p.id];
+            break;
+          }
+        }
+      }
+
+      if (dbLatest) {
+        const serverTime = new Date(c.lastMessage?.time || 0).getTime();
+        const dbTime = new Date(dbLatest.time).getTime();
+        if (dbTime > serverTime) {
+          c.lastMessage = dbLatest;
+        }
+      }
+    });
 
     const newConvMap = {};
     for (const m of recentDbMsgs) {
@@ -341,7 +376,7 @@ router.get("/messages-paged", protect, async (req, res) => {
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
     // --- NEW: Sync missing messages from Graph API on first page load ---
-    if (!before && conversationId.startsWith("t_")) {
+    if (!before && !/^\d+$/.test(conversationId)) {
       try {
         const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
         const pageId = process.env.FACEBOOK_PAGE_ID;
@@ -589,8 +624,8 @@ router.get("/messages", protect, async (req, res) => {
   }
 });
 
-// GET /api/facebook/diagnose — check token health, permissions, page subscription (no auth — temp debug)
-router.get("/diagnose", async (req, res) => {
+// GET /api/facebook/diagnose — check token health, permissions, page subscription
+router.get("/diagnose", protect, async (req, res) => {
   const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
   const pageId = process.env.FACEBOOK_PAGE_ID;
   const result = { pageId, hasToken: !!accessToken };

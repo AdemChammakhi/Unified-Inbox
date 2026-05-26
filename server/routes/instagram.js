@@ -284,6 +284,41 @@ async function fetchInstagramConversations(slim = false) {
       .sort({ createdAt: -1 })
       .limit(500);
 
+    // Build a map of key (conversationId/senderId) -> latest message in DB
+    const dbLatestMap = {};
+    for (const m of recentDbMsgs) {
+      const key = m.conversationId || m.senderId;
+      if (!dbLatestMap[key]) {
+        dbLatestMap[key] = {
+          text: m.content || "",
+          from: m.senderName || "Unknown",
+          time: m.timestamp || m.createdAt,
+        };
+      }
+    }
+
+    // Update Graph API conversations if DB has a newer message
+    formatted.forEach((c) => {
+      let dbLatest = dbLatestMap[c.id];
+      if (!dbLatest) {
+        // Try participant IDs
+        for (const p of c.participants || []) {
+          if (dbLatestMap[p.id]) {
+            dbLatest = dbLatestMap[p.id];
+            break;
+          }
+        }
+      }
+
+      if (dbLatest) {
+        const serverTime = new Date(c.lastMessage?.time || 0).getTime();
+        const dbTime = new Date(dbLatest.time).getTime();
+        if (dbTime > serverTime) {
+          c.lastMessage = dbLatest;
+        }
+      }
+    });
+
     const newConvMap = {};
     for (const m of recentDbMsgs) {
       if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) continue;
@@ -552,7 +587,7 @@ router.get("/messages-paged", protect, async (req, res) => {
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
     // --- NEW: Sync missing messages from Graph API on first page load ---
-    if (!before && conversationId.startsWith("t_")) {
+    if (!before && !/^\d+$/.test(conversationId)) {
       try {
         const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
         const accountId = process.env.INSTAGRAM_ACCOUNT_ID;

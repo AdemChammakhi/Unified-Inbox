@@ -27,6 +27,31 @@ const io = new Server(server, {
 // Make io accessible in routes
 app.set("io", io);
 
+const jwt = require("jsonwebtoken");
+
+// Authenticate Socket.IO connections
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (!token) {
+    console.warn("[Socket] Authentication failed: Token missing");
+    return next(new Error("Authentication error: Token missing"));
+  }
+
+  if (!process.env.JWT_SECRET) {
+    console.error("[Socket] Server configuration error: JWT_SECRET not configured");
+    return next(new Error("Server configuration error: JWT_SECRET missing"));
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    socket.user = decoded;
+    next();
+  } catch (err) {
+    console.warn("[Socket] Authentication failed: Invalid token", err.message);
+    next(new Error("Authentication error: Invalid token"));
+  }
+});
+
 // Socket.IO connection handling
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
@@ -51,6 +76,7 @@ app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/webhooks", require("./routes/webhooks"));
 app.use("/api/instagram", require("./routes/instagram"));
 app.use("/api/facebook", require("./routes/facebook"));
+app.use("/api/whatsapp", require("./routes/whatsapp"));
 app.use("/api/email", require("./routes/email"));
 app.use("/api/classifications", require("./routes/classifications"));
 app.use("/api/locks", require("./routes/locks"));

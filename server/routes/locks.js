@@ -1,6 +1,5 @@
 const express = require("express");
 const ConversationLock = require("../models/ConversationLock");
-const User = require("../models/User");
 const { protect, authorize } = require("../middleware/auth");
 
 const router = express.Router();
