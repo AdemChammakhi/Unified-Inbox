@@ -2,7 +2,7 @@
  * index.js — barrel export for all Mongoose models.
  *
  * Import from here instead of individual files so refactors only touch one place:
- *   const { Conversation, Message, Contact } = require("../models");
+ *   const { Conversation, Message, Contact } = require("../models"); teest
  */
 
 module.exports = {
