@@ -62,10 +62,10 @@ jobs:
           cache: npm
 
       - name: Install root deps
-        run: npm ci
+        run: npm install
 
       - name: Install client deps
-        run: cd client && npm ci
+        run: cd client && npm install
 
       - name: Lint backend (eslint)
         run: npx eslint server/ --ext .js --max-warnings 0 || true
@@ -88,10 +88,10 @@ jobs:
           cache: npm
 
       - name: Install root deps
-        run: npm ci
+        run: npm install
 
       - name: Install client deps
-        run: cd client && npm ci
+        run: cd client && npm install
 
       - name: Run backend tests
         run: npm test
@@ -151,7 +151,7 @@ jobs:
           cache: npm
 
       - name: Install deps
-        run: npm ci && cd client && npm ci
+        run: npm install && cd client && npm install
 
       - name: npm audit — backend
         run: npm audit --audit-level=high || true
