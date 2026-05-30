@@ -1,10 +1,10 @@
 # Frontend Dockerfile — hardened multi-stage build
 # Stage 1: Build the React app
-FROM node:22-alpine AS build
+FROM node:24-alpine AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 RUN npm ci && npm cache clean --force
 
 COPY . .

@@ -1,13 +1,13 @@
 # Backend Dockerfile — hardened
-FROM node:22-alpine AS deps
+FROM node:24-alpine AS deps
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # ── Production stage ─────────────────────────────────────────────────────────
-FROM node:22-alpine
+FROM node:24-alpine
 
 # Security: add non-root user
 RUN addgroup -g 1001 appgroup && adduser -u 1001 -G appgroup -s /bin/sh -D appuser
