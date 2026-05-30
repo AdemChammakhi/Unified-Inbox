@@ -329,31 +329,7 @@ router.post("/instagram", async (req, res) => {
               `Instagram incoming msg from ${senderId}: "${msgText.slice(0, 80)}" mid=${msgMid}`,
             );
 
-            const msgTime = new Date().toISOString();
-
-            // Emit IMMEDIATELY with a placeholder name so the UI updates
-            // without waiting for the Graph API name lookup (can take up to 5 s).
-            if (io) {
-              io.emit("newMessage", {
-                platform: "instagram",
-                message: {
-                  id: msgMid,
-                  text: msgText,
-                  from: `User ${senderId.slice(-4)}`,
-                  fromId: senderId,
-                  time: msgTime,
-                },
-                conversationId: senderId,
-                senderId: senderId,
-                senderName: `User ${senderId.slice(-4)}`,
-              });
-              console.log(
-                "[Socket] IG newMessage emitted immediately:",
-                msgMid,
-              );
-            }
-
-            // Look up Instagram sender name (can take up to 5 s — non-blocking relative to the emit above)
+            // Look up Instagram sender name
             let igSenderName = await getSenderName(senderId, "instagram");
             const igDisplayName = igSenderName || `User ${senderId.slice(-4)}`;
 
@@ -384,31 +360,38 @@ router.post("/instagram", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true, new: true },
+              { upsert: true, new: true, rawResult: true },
             );
 
-            // Update Conversation lastMessage/counters
-            await updateConversationAfterMessage(igConv._id, igSavedMsg);
+            // Only emit socket event if this was a NEW insert (not a duplicate upsert)
+            const wasInserted = igSavedMsg.lastErrorObject?.updatedExisting === false;
+            if (wasInserted) {
+              const savedDoc = igSavedMsg.value;
+              // Update Conversation lastMessage/counters
+              await updateConversationAfterMessage(igConv._id, savedDoc);
 
-            console.log("[DB] Instagram message saved:", msgMid);
-            instagramRoute.clearCache();
+              console.log("[DB] Instagram message saved:", msgMid);
+              instagramRoute.clearCache();
 
-            // Re-emit with the resolved real name so the frontend can update
-            // the sender name in place (dedup by message ID prevents a duplicate bubble).
-            if (igSenderName && io) {
-              io.emit("newMessage", {
-                platform: "instagram",
-                message: {
-                  id: msgMid,
-                  text: msgText,
-                  from: igDisplayName,
-                  fromId: senderId,
-                  time: msgTime,
-                },
-                conversationId: senderId,
-                senderId: senderId,
-                senderName: igDisplayName,
-              });
+              // Emit exactly once with the resolved name
+              if (io) {
+                io.emit("newMessage", {
+                  platform: "instagram",
+                  message: {
+                    id: msgMid,
+                    text: msgText,
+                    from: igDisplayName,
+                    fromId: senderId,
+                    time: new Date().toISOString(),
+                  },
+                  conversationId: senderId,
+                  senderId: senderId,
+                  senderName: igDisplayName,
+                });
+                console.log("[Socket] IG newMessage emitted:", msgMid);
+              }
+            } else {
+              console.log("[DB] Instagram message already exists, skipping emit:", msgMid);
             }
           }
           // Handle message reactions
@@ -467,16 +450,17 @@ router.post("/facebook", async (req, res) => {
           // Skip messages sent by the page itself
           if (senderId === process.env.FACEBOOK_PAGE_ID) continue;
 
-          // Detect Instagram messages arriving via Page subscription
-          // (happens if IG messaging events are routed through the Page webhook)
+          // Skip Instagram messages arriving via Page subscription —
+          // these are already handled by the dedicated /instagram webhook.
           const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
           const isInstagramMsg = igAccountId && recipientId === igAccountId;
-          const detectedPlatform = isInstagramMsg ? "instagram" : "facebook";
           if (isInstagramMsg) {
             console.log(
-              "INFO: Instagram message detected in Facebook webhook route, saving as instagram platform",
+              "INFO: Skipping Instagram message in Facebook webhook (handled by /instagram route)",
             );
+            continue;
           }
+          const detectedPlatform = "facebook";
 
           // Handle incoming messages
           if (event.message) {
@@ -485,30 +469,7 @@ router.post("/facebook", async (req, res) => {
               `New ${detectedPlatform} message from ${senderId}: ${message.text}`,
             );
 
-            const fbMsgTime = new Date().toISOString();
-
-            // Emit IMMEDIATELY with a placeholder name so the UI updates instantly.
-            if (io) {
-              io.emit("newMessage", {
-                platform: detectedPlatform,
-                message: {
-                  id: message.mid,
-                  text: message.text || "",
-                  from: `User ${senderId.slice(-4)}`,
-                  fromId: senderId,
-                  time: fbMsgTime,
-                },
-                conversationId: senderId,
-                senderId: senderId,
-                senderName: `User ${senderId.slice(-4)}`,
-              });
-              console.log(
-                `[Socket] ${detectedPlatform} newMessage emitted immediately:`,
-                message.mid,
-              );
-            }
-
-            // Look up sender name (can take up to 5 s — non-blocking relative to the emit above)
+            // Look up sender name
             const resolvedSenderName = await getSenderName(
               senderId,
               detectedPlatform,
@@ -540,34 +501,38 @@ router.post("/facebook", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true, new: true },
+              { upsert: true, new: true, rawResult: true },
             );
 
-            // Update Conversation lastMessage/counters
-            await updateConversationAfterMessage(fbConv._id, fbSavedMsg);
+            // Only emit socket event if this was a NEW insert (not a duplicate upsert)
+            const fbWasInserted = fbSavedMsg.lastErrorObject?.updatedExisting === false;
+            if (fbWasInserted) {
+              const savedDoc = fbSavedMsg.value;
+              // Update Conversation lastMessage/counters
+              await updateConversationAfterMessage(fbConv._id, savedDoc);
 
-            console.log(`[DB] ${detectedPlatform} message saved:`, message.mid);
-            if (detectedPlatform === "facebook") {
+              console.log(`[DB] ${detectedPlatform} message saved:`, message.mid);
               facebookRoute.clearCache();
-            } else {
-              instagramRoute.clearCache();
-            }
 
-            // Re-emit with the resolved name so the frontend can update the sender name in place.
-            if (resolvedSenderName && io) {
-              io.emit("newMessage", {
-                platform: detectedPlatform,
-                message: {
-                  id: message.mid,
-                  text: message.text || "",
-                  from: fbSenderName,
-                  fromId: senderId,
-                  time: fbMsgTime,
-                },
-                conversationId: senderId,
-                senderId: senderId,
-                senderName: fbSenderName,
-              });
+              // Emit exactly once with the resolved name
+              if (io) {
+                io.emit("newMessage", {
+                  platform: detectedPlatform,
+                  message: {
+                    id: message.mid,
+                    text: message.text || "",
+                    from: fbSenderName,
+                    fromId: senderId,
+                    time: new Date().toISOString(),
+                  },
+                  conversationId: senderId,
+                  senderId: senderId,
+                  senderName: fbSenderName,
+                });
+                console.log(`[Socket] ${detectedPlatform} newMessage emitted:`, message.mid);
+              }
+            } else {
+              console.log(`[DB] ${detectedPlatform} message already exists, skipping emit:`, message.mid);
             }
           }
 
