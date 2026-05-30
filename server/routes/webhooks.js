@@ -360,7 +360,7 @@ router.post("/instagram", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true, new: true, rawResult: true },
+              { upsert: true, new: true, includeResultMetadata: true },
             );
 
             // Only emit socket event if this was a NEW insert (not a duplicate upsert)
@@ -501,7 +501,7 @@ router.post("/facebook", async (req, res) => {
                   timestamp: new Date(),
                 },
               },
-              { upsert: true, new: true, rawResult: true },
+              { upsert: true, new: true, includeResultMetadata: true },
             );
 
             // Only emit socket event if this was a NEW insert (not a duplicate upsert)
