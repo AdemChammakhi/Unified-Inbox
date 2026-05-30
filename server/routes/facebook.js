@@ -10,7 +10,7 @@ const GRAPH_API = "https://graph.facebook.com/v24.0";
 // In-memory cache — avoids slow Graph API calls on every request
 let _fbCache = null;
 let _fbCacheTime = 0;
-const FB_CACHE_TTL = 120000; // 2 minutes
+const FB_CACHE_TTL = 5000; // 5 seconds
 // Separate slim-mode cache (conversation list without embedded messages)
 let _fbCacheSlim = null;
 let _fbCacheSlimTime = 0;

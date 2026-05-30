@@ -61,7 +61,7 @@ async function resolveIgAccountId(accessToken, pageId) {
 // In-memory cache — avoids hitting the slow Graph API on every poll
 let _igCache = null;
 let _igCacheTime = 0;
-const IG_CACHE_TTL = 120000; // 2 minutes
+const IG_CACHE_TTL = 5000; // 5 seconds
 // Separate slim-mode cache (conversation list without embedded messages)
 let _igCacheSlim = null;
 let _igCacheSlimTime = 0;
