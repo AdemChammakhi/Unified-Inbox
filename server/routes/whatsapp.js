@@ -11,8 +11,9 @@ const ConversationLock = require("../models/ConversationLock");
 router.post("/send", protect, async (req, res) => {
   try {
     const { recipientId, message, conversationId } = req.body;
-    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    console.log("[WA:Send] START", { recipientId, conversationId, messageLen: message?.length });
+    const accessToken = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+    const phoneNumberId = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
 
     if (!accessToken || !phoneNumberId) {
       return res.status(400).json({
@@ -23,10 +24,12 @@ router.post("/send", protect, async (req, res) => {
 
     // --- Conversation Lock Check ---
     const lockConvId = conversationId || recipientId;
+    console.log("[WA:Send] Step 1 - Lock check for:", lockConvId);
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
       platform: "whatsapp",
     });
+    console.log("[WA:Send] Step 1 - Lock result:", existingLock ? "locked" : "unlocked");
 
     if (
       existingLock &&
@@ -40,6 +43,7 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Save the outgoing message to DB ---
+    console.log("[WA:Send] Step 2 - Saving message to DB");
     const newMessage = await Message.create({
       platform: "whatsapp",
       senderId: "agent",
@@ -52,14 +56,17 @@ router.post("/send", protect, async (req, res) => {
       sentBy: req.user._id,
       status: "sent",
     });
+    console.log("[WA:Send] Step 2 - Message saved:", newMessage._id);
 
     // --- Send to WhatsApp API ---
     const apiUrl =
-      process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0";
+      (process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0").trim();
+    const fullUrl = `${apiUrl}/${phoneNumberId}/messages`;
+    console.log("[WA:Send] Step 3 - Calling WhatsApp API:", fullUrl, "to:", recipientId);
     let sendRes;
     try {
       sendRes = await axios.post(
-        `${apiUrl}/${phoneNumberId}/messages`,
+        fullUrl,
         {
           messaging_product: "whatsapp",
           recipient_type: "individual",
@@ -77,10 +84,11 @@ router.post("/send", protect, async (req, res) => {
           },
         },
       );
+      console.log("[WA:Send] Step 3 - API success:", sendRes.data);
     } catch (apiErr) {
       console.error(
-        "WhatsApp API send error:",
-        apiErr.response?.data || apiErr.message,
+        "[WA:Send] Step 3 - API FAILED:",
+        JSON.stringify(apiErr.response?.data || apiErr.message, null, 2),
       );
       // Fail the message in DB if it didn't send
       await Message.findByIdAndUpdate(newMessage._id, { status: "failed" });
@@ -91,13 +99,26 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Update the Conversation snippet ---
+    console.log("[WA:Send] Step 4 - Updating conversation snippet");
     await updateConversationAfterMessage(lockConvId, newMessage);
+    console.log("[WA:Send] Step 4 - Done");
 
     // --- Emit Socket event ---
     const io = req.app.get("io");
     if (io) {
-      const socketMsg = { ...newMessage.toObject(), id: newMessage._id };
-      io.emit("messageSent", socketMsg);
+      io.emit("messageSent", {
+        platform: "whatsapp",
+        conversationId: lockConvId,
+        recipientId: recipientId,
+        message: {
+          id: newMessage._id.toString(),
+          text: newMessage.content,
+          from: newMessage.senderName || "You",
+          fromId: newMessage.senderId,
+          time: newMessage.timestamp || newMessage.createdAt,
+          direction: newMessage.direction,
+        },
+      });
     }
 
     // --- Auto-lock functionality ---

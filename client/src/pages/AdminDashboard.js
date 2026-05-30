@@ -307,19 +307,35 @@ const AdminDashboard = () => {
                       No data
                     </div>
                   ) : (
-                    <ResponsiveContainer width="100%" height={200}>
+                    <ResponsiveContainer width="100%" height={240}>
                       <PieChart>
                         <Pie
                           data={platformPieData}
-                          cx="50%"
+                          cx="35%"
                           cy="50%"
-                          innerRadius={50}
-                          outerRadius={80}
+                          innerRadius={45}
+                          outerRadius={75}
                           paddingAngle={3}
                           dataKey="value"
-                          label={({ name, percent }) =>
-                            `${name} ${(percent * 100).toFixed(0)}%`
-                          }
+                          label={({ name, percent, cx: pcx, cy: pcy, midAngle, outerRadius: or }) => {
+                            const RADIAN = Math.PI / 180;
+                            const radius = or + 18;
+                            const x = pcx + radius * Math.cos(-midAngle * RADIAN);
+                            const y = pcy + radius * Math.sin(-midAngle * RADIAN);
+                            return (
+                              <text
+                                x={x}
+                                y={y}
+                                fill="var(--text-faint)"
+                                textAnchor={x > pcx ? "start" : "end"}
+                                dominantBaseline="central"
+                                fontSize={11}
+                                fontWeight={600}
+                              >
+                                {`${(percent * 100).toFixed(0)}%`}
+                              </text>
+                            );
+                          }}
                           labelLine={false}
                         >
                           {platformPieData.map((_, idx) => (
@@ -338,10 +354,15 @@ const AdminDashboard = () => {
                           }}
                         />
                         <Legend
+                          layout="vertical"
+                          align="right"
+                          verticalAlign="middle"
+                          iconType="circle"
+                          iconSize={8}
                           formatter={(value) =>
                             value.charAt(0).toUpperCase() + value.slice(1)
                           }
-                          wrapperStyle={{ fontSize: 12 }}
+                          wrapperStyle={{ fontSize: 12, lineHeight: "22px", paddingLeft: 10 }}
                         />
                       </PieChart>
                     </ResponsiveContainer>
