@@ -4,7 +4,7 @@
   "private": true,
   "dependencies": {
     "@tanstack/react-query": "^5.100.11",
-    "axios": "^1.15.2",
+    "axios": "^1.17.0",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.14.0",
     "react": "^18.2.0",
@@ -30,5 +30,9 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5",
+    "webpack-dev-server": "^5.2.4"
   }
 }

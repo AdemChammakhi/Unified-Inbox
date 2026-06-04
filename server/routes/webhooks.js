@@ -324,14 +324,36 @@ router.post("/instagram", async (req, res) => {
           if (event.message) {
             const msgText = event.message.text || "";
             const msgMid = event.message.mid;
+            const msgTime = new Date().toISOString();
 
             console.log(
               `Instagram incoming msg from ${senderId}: "${msgText.slice(0, 80)}" mid=${msgMid}`,
             );
 
-            // Look up Instagram sender name
+            // --- Emit socket event IMMEDIATELY with a placeholder name ---
+            // This ensures the client gets the notification and sees the message
+            // without waiting for the slow Graph API name lookup + DB operations.
+            const placeholderName = `User ${senderId.slice(-4)}`;
+            if (io) {
+              io.emit("newMessage", {
+                platform: "instagram",
+                message: {
+                  id: msgMid,
+                  text: msgText,
+                  from: placeholderName,
+                  fromId: senderId,
+                  time: msgTime,
+                },
+                conversationId: senderId,
+                senderId: senderId,
+                senderName: placeholderName,
+              });
+              console.log("[Socket] IG newMessage emitted immediately (placeholder):", msgMid);
+            }
+
+            // --- Now do the slow work: name resolution, DB upsert, conversation sync ---
             let igSenderName = await getSenderName(senderId, "instagram");
-            const igDisplayName = igSenderName || `User ${senderId.slice(-4)}`;
+            const igDisplayName = igSenderName || placeholderName;
 
             // Resolve Conversation document (creates Channel + Contact if needed)
             const { conversation: igConv } = await getOrCreateConversation({
@@ -363,7 +385,6 @@ router.post("/instagram", async (req, res) => {
               { upsert: true, new: true, includeResultMetadata: true },
             );
 
-            // Only emit socket event if this was a NEW insert (not a duplicate upsert)
             const wasInserted = igSavedMsg.lastErrorObject?.updatedExisting === false;
             if (wasInserted) {
               const savedDoc = igSavedMsg.value;
@@ -373,8 +394,9 @@ router.post("/instagram", async (req, res) => {
               console.log("[DB] Instagram message saved:", msgMid);
               instagramRoute.clearCache();
 
-              // Emit exactly once with the resolved name
-              if (io) {
+              // If we resolved a real name (different from placeholder), emit an
+              // update so the client can patch the sender name in-place.
+              if (igDisplayName !== placeholderName && io) {
                 io.emit("newMessage", {
                   platform: "instagram",
                   message: {
@@ -382,16 +404,16 @@ router.post("/instagram", async (req, res) => {
                     text: msgText,
                     from: igDisplayName,
                     fromId: senderId,
-                    time: new Date().toISOString(),
+                    time: msgTime,
                   },
                   conversationId: senderId,
                   senderId: senderId,
                   senderName: igDisplayName,
                 });
-                console.log("[Socket] IG newMessage emitted:", msgMid);
+                console.log("[Socket] IG newMessage name-update emitted:", msgMid, igDisplayName);
               }
             } else {
-              console.log("[DB] Instagram message already exists, skipping emit:", msgMid);
+              console.log("[DB] Instagram message already exists (duplicate webhook):", msgMid);
             }
           }
           // Handle message reactions
