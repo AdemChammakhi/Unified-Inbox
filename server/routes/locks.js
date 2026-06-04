@@ -34,8 +34,8 @@ router.get("/", protect, async (req, res) => {
   }
 });
 
-// GET /api/locks/all — Admin: get all locks across all platforms with agent info
-router.get("/all", protect, authorize("admin"), async (req, res) => {
+// GET /api/locks/all — Admin/Manager: get all locks across all platforms with agent info
+router.get("/all", protect, authorize("admin", "manager"), async (req, res) => {
   try {
     const locks = await ConversationLock.find({}).populate(
       "lockedBy",
@@ -60,11 +60,11 @@ router.get("/all", protect, authorize("admin"), async (req, res) => {
   }
 });
 
-// DELETE /api/locks/:conversationId — Admin: unlock a conversation
+// DELETE /api/locks/:conversationId — Admin/Manager: unlock a conversation
 router.delete(
   "/:conversationId",
   protect,
-  authorize("admin"),
+  authorize("admin", "manager"),
   async (req, res) => {
     try {
       const { conversationId } = req.params;

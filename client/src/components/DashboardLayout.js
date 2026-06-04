@@ -47,14 +47,16 @@ const DashboardLayout = ({ children, noPadding = false }) => {
 
         {/* Nav */}
         <nav className="sidebar-nav">
-          <Link
-            to="/inbox"
-            className={`sidebar-link${location.pathname === "/inbox" ? " active" : ""}`}
-            title="Inbox"
-          >
-            <Inbox size={18} className="sidebar-link-icon" />
-            {!collapsed && <span>Inbox</span>}
-          </Link>
+          {user?.role !== "manager" && (
+            <Link
+              to="/inbox"
+              className={`sidebar-link${location.pathname === "/inbox" ? " active" : ""}`}
+              title="Inbox"
+            >
+              <Inbox size={18} className="sidebar-link-icon" />
+              {!collapsed && <span>Inbox</span>}
+            </Link>
+          )}
 
           <Link
             to={dashboardPath}
