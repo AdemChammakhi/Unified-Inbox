@@ -98,12 +98,12 @@ if (!isLocalDevRun && fs.existsSync(clientBuildPath)) {
   app.use(express.static(clientBuildPath));
 
   // Catch-all: any non-API route serves index.html so React Router handles it
-  app.get("*", (req, res) => {
+  app.get("*", apiLimiter, (req, res) => {
     res.sendFile(path.join(clientBuildPath, "index.html"));
   });
 } else {
   // Dev mode fallback
-  app.get("/", (req, res) => {
+  app.get("/", apiLimiter, (req, res) => {
     res.json({ message: "Unified Inbox API is running" });
   });
 }

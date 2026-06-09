@@ -50,7 +50,7 @@ router.put("/", protect, async (req, res) => {
     const result = await Classification.findOneAndUpdate(
       { conversationId: String(conversationId), platform: String(platform) },
       {
-        classification,
+        classification: String(classification),
         classifiedBy: req.user._id,
       },
       { upsert: true, new: true },
