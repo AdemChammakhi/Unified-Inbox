@@ -177,7 +177,7 @@ router.get("/whatsapp", (req, res) => {
 
   if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
     console.log("WhatsApp webhook verified");
-    return res.status(200).send(challenge);
+    return res.status(200).type("text/plain").send(String(challenge).replace(/[^0-9]/g, ''));
   }
   return res.sendStatus(403);
 });
@@ -290,7 +290,7 @@ router.get("/instagram", (req, res) => {
 
   if (mode === "subscribe" && token === process.env.FACEBOOK_VERIFY_TOKEN) {
     console.log("Instagram webhook verified");
-    return res.status(200).send(challenge);
+    return res.status(200).type("text/plain").send(String(challenge).replace(/[^0-9]/g, ''));
   }
   return res.sendStatus(403);
 });
@@ -454,7 +454,7 @@ router.get("/facebook", (req, res) => {
 
   if (mode === "subscribe" && token === process.env.FACEBOOK_VERIFY_TOKEN) {
     console.log("Facebook Messenger webhook verified");
-    return res.status(200).send(challenge);
+    return res.status(200).type("text/plain").send(String(challenge).replace(/[^0-9]/g, ''));
   }
   return res.sendStatus(403);
 });

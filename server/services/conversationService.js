@@ -101,7 +101,7 @@ async function getOrCreateConversation({
   const resolvedName = senderName || senderUsername || externalSenderId;
 
   const conversation = await Conversation.findOneAndUpdate(
-    { platform, externalId: externalSenderId },
+    { platform: String(platform), externalId: String(externalSenderId) },
     {
       $setOnInsert: {
         platform,

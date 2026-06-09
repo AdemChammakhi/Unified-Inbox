@@ -2,6 +2,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const { protect } = require("../middleware/auth");
+const { authLimiter } = require("../middleware/rateLimiter");
 
 const router = express.Router();
 
@@ -34,7 +35,7 @@ router.post("/create-user", protect, async (req, res) => {
     }
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: String(email) });
     if (existingUser) {
       return res
         .status(400)
@@ -63,11 +64,11 @@ router.post("/create-user", protect, async (req, res) => {
 });
 
 // POST /api/auth/login
-router.post("/login", async (req, res) => {
+router.post("/login", authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: String(email) });
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password" });
     }

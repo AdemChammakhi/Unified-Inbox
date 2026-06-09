@@ -70,18 +70,22 @@ io.on("connection", (socket) => {
 app.use(cors());
 app.use(express.json());
 
-// Routes
-app.use("/api/auth", require("./routes/auth"));
-app.use("/api/dashboard", require("./routes/dashboard"));
-app.use("/api/webhooks", require("./routes/webhooks"));
-app.use("/api/instagram", require("./routes/instagram"));
-app.use("/api/facebook", require("./routes/facebook"));
-app.use("/api/whatsapp", require("./routes/whatsapp"));
-app.use("/api/email", require("./routes/email"));
-app.use("/api/classifications", require("./routes/classifications"));
-app.use("/api/locks", require("./routes/locks"));
-app.use("/api/conversations", require("./routes/conversations"));
-app.use("/api/analytics", require("./routes/analytics"));
+const { apiLimiter, webhookLimiter } = require("./middleware/rateLimiter");
+
+// Routes with specific rate limiters
+app.use("/api/webhooks", webhookLimiter, require("./routes/webhooks"));
+
+// Routes with general API rate limiter
+app.use("/api/auth", apiLimiter, require("./routes/auth"));
+app.use("/api/dashboard", apiLimiter, require("./routes/dashboard"));
+app.use("/api/instagram", apiLimiter, require("./routes/instagram"));
+app.use("/api/facebook", apiLimiter, require("./routes/facebook"));
+app.use("/api/whatsapp", apiLimiter, require("./routes/whatsapp"));
+app.use("/api/email", apiLimiter, require("./routes/email"));
+app.use("/api/classifications", apiLimiter, require("./routes/classifications"));
+app.use("/api/locks", apiLimiter, require("./routes/locks"));
+app.use("/api/conversations", apiLimiter, require("./routes/conversations"));
+app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =
