@@ -6,6 +6,7 @@ const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
+const { sanitizeId } = require("../utils/sanitize");
 
 // In-memory cache for email conversations
 let _emailCache = null;
@@ -243,7 +244,10 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Conversation Lock Check ---
-    const lockConvId = conversationId || to;
+    const lockConvId = sanitizeId(conversationId) || sanitizeId(to);
+    if (!lockConvId) {
+      return res.status(400).json({ message: "Invalid conversationId or recipient" });
+    }
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
       platform: "email",

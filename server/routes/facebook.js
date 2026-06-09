@@ -4,6 +4,7 @@ const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
+const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -380,8 +381,8 @@ router.get("/messages-paged", protect, async (req, res) => {
       try {
         const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
         const pageId = process.env.FACEBOOK_PAGE_ID;
-        if (accessToken && pageId) {
-          const convRes = await axios.get(`${GRAPH_API}/${conversationId}`, {
+        if (accessToken && pageId && isValidGraphId(conversationId)) {
+          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
             params: {
               fields:
                 "messages.limit(30){message,from,to,created_time,attachments}",
@@ -423,10 +424,15 @@ router.get("/messages-paged", protect, async (req, res) => {
     // Webhook messages are saved with conversationId = senderId (PSID).
     // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
     // Accept both so we never miss webhook-saved messages when the user opens a conversation.
+    const safeConvId = sanitizeId(conversationId);
+    const safePartId = sanitizeId(participantId);
+    if (!safeConvId) {
+      return res.status(400).json({ message: "Invalid conversationId" });
+    }
     const convIdFilter =
-      participantId && participantId !== conversationId
-        ? { $in: [conversationId, participantId] }
-        : conversationId;
+      safePartId && safePartId !== safeConvId
+        ? { $in: [safeConvId, safePartId] }
+        : safeConvId;
     const query = { platform: "facebook", conversationId: convIdFilter };
     if (before) query.timestamp = { $lt: new Date(before) };
 
@@ -469,7 +475,10 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Conversation Lock Check ---
-    const lockConvId = conversationId || recipientId;
+    const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
+    if (!lockConvId) {
+      return res.status(400).json({ message: "Invalid conversationId or recipientId" });
+    }
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
       platform: "facebook",

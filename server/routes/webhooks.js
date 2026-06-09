@@ -8,6 +8,7 @@ const instagramRoute = require("./instagram");
 const facebookRoute = require("./facebook");
 const emailRoute = require("./email");
 const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
+const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -83,7 +84,8 @@ async function getSenderName(senderId, platform) {
     // For Facebook Messenger PSIDs, request only 'name' — the display name
     // field. first_name/last_name can be empty even when name is populated.
     const fields = platform === "instagram" ? "username,name" : "name";
-    const res = await axios.get(`${GRAPH_API}/${senderId}`, {
+    if (!isValidGraphId(senderId)) return null;
+    const res = await axios.get(`${GRAPH_API}/${encodeURIComponent(senderId)}`, {
       params: { fields, access_token: token },
       timeout: 5000, // 5s timeout so webhook doesn't hang
     });
@@ -207,8 +209,11 @@ router.post("/whatsapp", async (req, res) => {
                 senderName: waName,
               });
 
+              const safeMsgId = sanitizeId(msg.id);
+              const safeMsgFrom = sanitizeId(msg.from);
+              if (!safeMsgId || !safeMsgFrom) continue;
               const newMessage = await Message.findOneAndUpdate(
-                { externalId: msg.id },
+                { externalId: safeMsgId },
                 {
                   $setOnInsert: {
                     platform: "whatsapp",
@@ -251,9 +256,12 @@ router.post("/whatsapp", async (req, res) => {
             // Handle status updates
             const statuses = value.statuses || [];
             for (const status of statuses) {
+              const safeStatusId = sanitizeId(status.id);
+              const safeStatusVal = sanitizeId(status.status);
+              if (!safeStatusId || !safeStatusVal) continue;
               await Message.findOneAndUpdate(
-                { externalId: status.id },
-                { status: status.status },
+                { externalId: safeStatusId },
+                { status: safeStatusVal },
               );
 
               if (io) {
@@ -363,8 +371,9 @@ router.post("/instagram", async (req, res) => {
             });
 
             // Upsert to DB (avoids duplicate errors if webhook fires twice)
+            const safeMsgMid = sanitizeId(msgMid);
             const igSavedMsg = await Message.findOneAndUpdate(
-              { externalId: msgMid },
+              { externalId: safeMsgMid },
               {
                 $setOnInsert: {
                   platform: "instagram",
@@ -506,8 +515,9 @@ router.post("/facebook", async (req, res) => {
               senderName: fbSenderName,
             });
 
+            const safeFbMid = sanitizeId(message.mid);
             const fbSavedMsg = await Message.findOneAndUpdate(
-              { externalId: message.mid },
+              { externalId: safeFbMid },
               {
                 $setOnInsert: {
                   platform: detectedPlatform,

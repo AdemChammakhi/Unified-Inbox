@@ -4,11 +4,13 @@ const Message = require("../models/Message");
 const Classification = require("../models/Classification");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
+const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 
 // DELETE /api/conversations — delete a conversation and all its data
 router.delete("/", protect, async (req, res) => {
   try {
-    const { conversationId, platform } = req.body;
+    const conversationId = sanitizeId(req.body.conversationId);
+    const platform = sanitizePlatform(req.body.platform);
 
     if (!conversationId || !platform) {
       return res

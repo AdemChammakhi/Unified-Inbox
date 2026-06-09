@@ -1,6 +1,7 @@
 const express = require("express");
 const ConversationLock = require("../models/ConversationLock");
 const { protect, authorize } = require("../middleware/auth");
+const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 
 const router = express.Router();
 
@@ -8,7 +9,8 @@ const router = express.Router();
 router.get("/", protect, async (req, res) => {
   try {
     const { platform } = req.query;
-    const filter = platform ? { platform } : {};
+    const safePlatform = platform ? sanitizePlatform(platform) : null;
+    const filter = safePlatform ? { platform: safePlatform } : {};
     const locks = await ConversationLock.find(filter).populate(
       "lockedBy",
       "firstName lastName email role",
@@ -67,8 +69,11 @@ router.delete(
   authorize("admin", "manager"),
   async (req, res) => {
     try {
-      const { conversationId } = req.params;
-      const { platform } = req.query;
+      const conversationId = sanitizeId(req.params.conversationId);
+      const platform = req.query.platform ? sanitizePlatform(req.query.platform) : null;
+      if (!conversationId) {
+        return res.status(400).json({ message: "Invalid conversationId" });
+      }
       await ConversationLock.findOneAndDelete({
         conversationId,
         ...(platform ? { platform } : {}),

@@ -38,7 +38,7 @@ const DashboardLayout = ({ children, noPadding = false }) => {
         {/* Brand */}
         <div className="sidebar-brand">
           <div className="sidebar-brand-icon">
-            <MessageSquare size={20} />
+            <img src="/logo.png" alt="Unified Inbox" style={{ width: 44, height: 44, objectFit: 'contain' }} />
           </div>
           {!collapsed && (
             <span className="sidebar-brand-text">Unified Inbox</span>

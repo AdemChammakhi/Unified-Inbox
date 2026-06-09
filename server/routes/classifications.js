@@ -2,13 +2,15 @@ const express = require("express");
 const router = express.Router();
 const Classification = require("../models/Classification");
 const { protect } = require("../middleware/auth");
+const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 
 // GET /api/classifications?platform=instagram
 // Returns all classifications for a given platform
 router.get("/", protect, async (req, res) => {
   try {
     const { platform } = req.query;
-    const filter = platform ? { platform } : {};
+    const safePlatform = platform ? sanitizePlatform(platform) : null;
+    const filter = safePlatform ? { platform: safePlatform } : {};
     const classifications = await Classification.find(filter);
 
     // Return as a map: { conversationId: classification }
@@ -28,7 +30,9 @@ router.get("/", protect, async (req, res) => {
 // Set or update classification for a conversation
 router.put("/", protect, async (req, res) => {
   try {
-    const { conversationId, platform, classification } = req.body;
+    const conversationId = sanitizeId(req.body.conversationId);
+    const platform = sanitizePlatform(req.body.platform);
+    const { classification } = req.body;
 
     if (!conversationId || !platform || !classification) {
       return res.status(400).json({

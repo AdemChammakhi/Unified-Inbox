@@ -4,6 +4,7 @@ const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
+const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -242,7 +243,8 @@ async function fetchInstagramConversations(slim = false) {
     await Promise.all(
       idsToLookup.map(async (id) => {
         try {
-          const r = await axios.get(`${GRAPH_API}/${id}`, {
+          if (!isValidGraphId(id)) return;
+          const r = await axios.get(`${GRAPH_API}/${encodeURIComponent(id)}`, {
             params: { fields: "username,name", access_token: accessToken },
             timeout: 4000,
           });
@@ -591,8 +593,8 @@ router.get("/messages-paged", protect, async (req, res) => {
       try {
         const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
         const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
-        if (accessToken && accountId) {
-          const convRes = await axios.get(`${GRAPH_API}/${conversationId}`, {
+        if (accessToken && accountId && isValidGraphId(conversationId)) {
+          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
             params: {
               fields:
                 "messages.limit(30){message,from,to,created_time,attachments}",
@@ -635,10 +637,15 @@ router.get("/messages-paged", protect, async (req, res) => {
     // Webhook messages are saved with conversationId = senderId (the participant's IGSID).
     // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
     // Accept both so we never miss webhook-saved messages when the user opens a conversation.
+    const safeConvId = sanitizeId(conversationId);
+    const safePartId = sanitizeId(participantId);
+    if (!safeConvId) {
+      return res.status(400).json({ message: "Invalid conversationId" });
+    }
     const convIdFilter =
-      participantId && participantId !== conversationId
-        ? { $in: [conversationId, participantId] }
-        : conversationId;
+      safePartId && safePartId !== safeConvId
+        ? { $in: [safeConvId, safePartId] }
+        : safeConvId;
     const query = { platform: "instagram", conversationId: convIdFilter };
     if (before) query.timestamp = { $lt: new Date(before) };
 
@@ -685,7 +692,10 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Conversation Lock Check ---
-    const lockConvId = conversationId || recipientId;
+    const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
+    if (!lockConvId) {
+      return res.status(400).json({ message: "Invalid conversationId or recipientId" });
+    }
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
       platform: "instagram",
@@ -711,7 +721,7 @@ router.post("/send", protect, async (req, res) => {
       } catch (lockErr) {
         // Duplicate key: another agent locked between our check and create
         if (lockErr.code === 11000) {
-          const raceLock = await ConversationLock.findOne({
+           const raceLock = await ConversationLock.findOne({
             conversationId: lockConvId,
             platform: "instagram",
           });

@@ -7,6 +7,7 @@ const {
 } = require("../services/conversationService");
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
+const { sanitizeId } = require("../utils/sanitize");
 
 router.post("/send", protect, async (req, res) => {
   try {
@@ -23,7 +24,10 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Conversation Lock Check ---
-    const lockConvId = conversationId || recipientId;
+    const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
+    if (!lockConvId) {
+      return res.status(400).json({ message: "Invalid conversationId or recipientId" });
+    }
     console.log("[WA:Send] Step 1 - Lock check for:", lockConvId);
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
@@ -62,7 +66,7 @@ router.post("/send", protect, async (req, res) => {
     const apiUrl =
       (process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0").trim();
     const fullUrl = `${apiUrl}/${phoneNumberId}/messages`;
-    console.log("[WA:Send] Step 3 - Calling WhatsApp API:", fullUrl, "to:", recipientId);
+    console.log("[WA:Send] Step 3 - Calling WhatsApp API to:", recipientId);
     let sendRes;
     try {
       sendRes = await axios.post(
@@ -226,7 +230,12 @@ router.get("/messages-paged", protect, async (req, res) => {
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
 
-    const query = { platform: "whatsapp", conversationId };
+    const safeConvId = sanitizeId(conversationId);
+    if (!safeConvId) {
+      return res.status(400).json({ message: "Invalid conversationId" });
+    }
+
+    const query = { platform: "whatsapp", conversationId: safeConvId };
     if (before) query.timestamp = { $lt: new Date(before) };
 
     const messages = await Message.find(query)
