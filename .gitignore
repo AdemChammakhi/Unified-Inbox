@@ -36,3 +36,4 @@ docs/*
 .tmp/
 credentials.json
 token.json
+test-rate-limit.js

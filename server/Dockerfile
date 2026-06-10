@@ -9,8 +9,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 # ── Production stage ─────────────────────────────────────────────────────────
 FROM node:24-alpine
 
-# Security: add non-root user
-RUN addgroup -g 1001 appgroup && adduser -u 1001 -G appgroup -s /bin/sh -D appuser
+# Security: upgrade vulnerable packages and add non-root user
+RUN apk upgrade --no-cache libxml2 && \
+    addgroup -g 1001 appgroup && adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
 WORKDIR /app
 

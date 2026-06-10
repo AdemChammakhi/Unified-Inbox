@@ -13,8 +13,9 @@ RUN npm run build
 # Stage 2: Serve with nginx (non-root)
 FROM nginx:stable-alpine
 
-# Remove default config
-RUN rm -rf /etc/nginx/conf.d/default.conf
+# Upgrade vulnerable packages and remove default config
+RUN apk upgrade --no-cache libxml2 && \
+    rm -rf /etc/nginx/conf.d/default.conf
 
 # Copy built files to nginx
 COPY --from=build /app/build /usr/share/nginx/html
