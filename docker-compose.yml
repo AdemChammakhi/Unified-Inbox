@@ -3,7 +3,7 @@ networks:
     external: true
 
 services:
-  # Backend - Express API
+  # Backend - Express APII
   backend:
     build:
       context: .
