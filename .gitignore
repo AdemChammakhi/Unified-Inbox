@@ -7,7 +7,7 @@ client/node_modules/
 .env.*.local
 .env.production
 .env.staging
-
+.env.example
 # Build artifacts
 client/build/
 
@@ -38,3 +38,4 @@ docs/*
 .tmp/
 credentials.json
 token.json
+test-ig-token.js
