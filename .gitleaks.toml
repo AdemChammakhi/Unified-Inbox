@@ -25,4 +25,6 @@ paths = [
   '''(^|\/)\.gitleaks\.toml$''',
   '''(^|\/)node_modules\/''',
   '''(^|\/)client\/build\/''',
+  '''\.env\.example''',
+  '''test-ig-token\.js'''
 ]

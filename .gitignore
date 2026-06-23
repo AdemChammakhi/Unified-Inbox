@@ -7,7 +7,6 @@ client/node_modules/
 .env.*.local
 .env.production
 .env.staging
-.env.example
 # Build artifacts
 client/build/
 
