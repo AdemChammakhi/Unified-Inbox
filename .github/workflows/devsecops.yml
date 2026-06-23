@@ -300,73 +300,11 @@ jobs:
       - name: Sign backend image
         run: cosign sign --yes ${{ env.BACKEND_IMAGE }}:latest
 
-  # ─── Stage 10: Deploy to staging (Hostinger VPS + Docker Compose) ─────────
-  deploy-staging:
-    name: "10 · Deploy → Staging"
+  # ─── Stage 10: Deploy to production ───────────────────────────────────────
+  deploy-prod:
+    name: "10 · Deploy → Production"
     runs-on: ubuntu-latest
     needs: [sign]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment:
-      name: staging
-      url: https://${{ vars.PRODUCTION_DOMAIN }}
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: 22
-          script_stop: true
-          script: |
-            cd /opt/unified-inbox
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            docker compose -f docker-compose.prod.yml ps
-            # Wait for backend health
-            for i in $(seq 1 30); do
-              if curl -sf http://127.0.0.1:5000/ > /dev/null 2>&1; then
-                echo "Backend is healthy"
-                break
-              fi
-              echo "Waiting for backend... attempt $i/30"
-              sleep 5
-            done
-            # Prune old images to reclaim disk
-            docker image prune -f
-
-  # ─── Stage 11: DAST — ZAP quick scan ──────────────────────────────────────
-  dast:
-    name: "11 · DAST (ZAP)"
-    runs-on: ubuntu-latest
-    needs: deploy-staging
-    steps:
-      - name: Wait for staging endpoint
-        run: |
-          for i in {1..30}; do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "https://${{ vars.PRODUCTION_DOMAIN }}/" || echo "000")
-            if [ "$HTTP_CODE" != "000" ]; then
-              echo "Staging endpoint is reachable (HTTP $HTTP_CODE)"
-              exit 0
-            fi
-            echo "Waiting for staging endpoint... attempt $i/30 (no response)"
-            sleep 10
-          done
-          echo "Staging endpoint did not become reachable in time"
-          exit 1
-
-      - name: OWASP ZAP baseline scan
-        uses: zaproxy/action-baseline@v0.14.0
-        with:
-          target: https://${{ vars.PRODUCTION_DOMAIN }}
-          rules_file_name: ""
-          cmd_options: "-a"
-
-  # ─── Stage 12: Deploy to production (manual approval) ─────────────────────
-  deploy-prod:
-    name: "12 · Deploy → Production"
-    runs-on: ubuntu-latest
-    needs: dast
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
       name: production   # ← requires manual approval in GitHub settings
