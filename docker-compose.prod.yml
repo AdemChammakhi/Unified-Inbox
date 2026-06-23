@@ -1,0 +1,95 @@
+# =============================================================================
+# Unified Inbox — Production Docker Compose (Hostinger VPS)
+# =============================================================================
+# Usage:
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Requires: .env.production in the same directory (never committed to Git)
+# =============================================================================
+
+networks:
+  unified-inbox:
+    driver: bridge
+
+volumes:
+  uptime-kuma:
+
+services:
+  # ── Backend — Express API + Socket.IO ──────────────────────────────────────
+  backend:
+    image: ademxd/projetpfe-backend:latest
+    container_name: backend
+    env_file:
+      - .env.production
+    environment:
+      - PORT=5000
+      - NODE_ENV=production
+    ports:
+      - "127.0.0.1:5000:5000"   # Only localhost — host Nginx proxies external traffic
+    networks:
+      unified-inbox:
+        aliases:
+          - backend-service
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Frontend — React SPA served by Nginx ───────────────────────────────────
+  frontend:
+    image: ademxd/projetpfe-frontend:latest
+    container_name: frontend
+    ports:
+      - "127.0.0.1:3000:80"   # Only localhost — host Nginx proxies external traffic
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - unified-inbox
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+
+  # ── Uptime Kuma — Lightweight monitoring + alerts ──────────────────────────
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    ports:
+      - "127.0.0.1:3001:3001"   # Access via SSH tunnel or add Nginx proxy
+    volumes:
+      - uptime-kuma:/app/data
+    networks:
+      - unified-inbox
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 150M
+          cpus: "0.15"

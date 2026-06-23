@@ -5,6 +5,8 @@ client/node_modules/
 .env
 .env.local
 .env.*.local
+.env.production
+.env.staging
 
 # Build artifacts
 client/build/

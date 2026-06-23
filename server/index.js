@@ -19,7 +19,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: process.env.CORS_ORIGIN || "*",
     methods: ["GET", "POST"],
   },
 });
@@ -67,7 +67,14 @@ io.on("connection", (socket) => {
 });
 
 // Middleware
-app.use(cors());
+app.set("trust proxy", 1); // trust Nginx reverse proxy for real client IPs
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    credentials: true,
+  }),
+);
 app.use(express.json());
 
 const { apiLimiter, webhookLimiter } = require("./middleware/rateLimiter");
