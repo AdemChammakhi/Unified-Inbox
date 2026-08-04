@@ -1382,8 +1382,19 @@ const Inbox = () => {
                 <div className="inbox-msg-scroll" style={styles.messageList}>
                   {selectedConv.messages?.map((msg, idx) => {
                     const isEmail = activeTab === "email";
-                    const isOther =
-                      msg.direction === "incoming" || (msg.fromId && msg.fromId === selectedConv.participants?.[0]?.id) || msg.from === selectedConv.participants?.[0]?.name;
+                    const otherParticipant = selectedConv.participants?.[0];
+                    const isOutgoing =
+                      msg.direction === "outgoing" ||
+                      msg.direction === "outbound" ||
+                      msg.from === "You" ||
+                      msg.from === "Page" ||
+                      msg.from === "Agent" ||
+                      (msg.from && msg.from.toLowerCase() === "page") ||
+                      (otherParticipant?.id &&
+                        msg.fromId &&
+                        msg.fromId !== otherParticipant.id &&
+                        msg.direction !== "incoming");
+                    const isOther = !isOutgoing;
                     return (
                       <div
                         key={msg.id || idx}

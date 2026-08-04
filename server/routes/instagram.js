@@ -591,9 +591,18 @@ router.get("/messages-paged", protect, async (req, res) => {
     // --- NEW: Sync missing messages from Graph API on first page load ---
     if (!before && !/^\d+$/.test(conversationId)) {
       try {
-        const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
-        const accountId = process.env.INSTAGRAM_ACCOUNT_ID;
-        if (accessToken && accountId && isValidGraphId(conversationId)) {
+        const accessToken =
+          process.env.INSTAGRAM_ACCESS_TOKEN ||
+          process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+        const pageId = process.env.FACEBOOK_PAGE_ID;
+        let accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+        if (!accountId && accessToken && pageId) {
+          try {
+            accountId = await resolveIgAccountId(accessToken, pageId);
+          } catch {}
+        }
+
+        if (accessToken && (accountId || pageId) && isValidGraphId(conversationId)) {
           const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
             params: {
               fields:
@@ -606,8 +615,16 @@ router.get("/messages-paged", protect, async (req, res) => {
           // Wait for all DB insertions to finish so the following find() gets them
           await Promise.all(
             msgs.map(async (m) => {
-              const direction =
-                m.from?.id === accountId ? "outgoing" : "incoming";
+              const isOutgoing =
+                m.from?.id &&
+                (m.from.id === accountId ||
+                  m.from.id === pageId ||
+                  m.from.id === _resolvedIgAccountId);
+              const direction = isOutgoing ? "outgoing" : "incoming";
+              const senderName = isOutgoing
+                ? "Page"
+                : m.from?.username || m.from?.name || "Unknown";
+
               await Message.findOneAndUpdate(
                 { externalId: m.id },
                 {
@@ -615,8 +632,8 @@ router.get("/messages-paged", protect, async (req, res) => {
                     platform: "instagram",
                     conversationId: conversationId,
                     senderId: m.from?.id || "unknown",
-                    senderName: m.from?.name || "Unknown",
-                    recipientId: m.to?.data?.[0]?.id || accountId,
+                    senderName,
+                    recipientId: m.to?.data?.[0]?.id || accountId || pageId,
                     content: m.message || "",
                     messageType: m.attachments ? "attachment" : "text",
                     direction,
@@ -634,6 +651,27 @@ router.get("/messages-paged", protect, async (req, res) => {
         console.error("Optional IG conversation sync failed:", syncErr.message);
       }
     }
+
+    const pageId = process.env.FACEBOOK_PAGE_ID;
+    const accountId = process.env.INSTAGRAM_ACCOUNT_ID || _resolvedIgAccountId;
+
+    // Heal existing DB records where outgoing messages were saved as incoming
+    if (pageId || accountId) {
+      Message.updateMany(
+        {
+          platform: "instagram",
+          direction: "incoming",
+          $or: [
+            ...(pageId ? [{ senderId: pageId }] : []),
+            ...(accountId ? [{ senderId: accountId }] : []),
+            { senderName: "Page" },
+            { senderName: "You" },
+          ],
+        },
+        { $set: { direction: "outgoing" } }
+      ).catch(() => {});
+    }
+
     // Webhook messages are saved with conversationId = senderId (the participant's IGSID).
     // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
     // Accept both so we never miss webhook-saved messages when the user opens a conversation.
@@ -655,16 +693,24 @@ router.get("/messages-paged", protect, async (req, res) => {
       .lean();
 
     return res.json({
-      messages: messages.reverse().map((m) => ({
-        id: m.externalId || m._id.toString(),
-        text: m.content || "",
-        from: m.senderName || "Unknown",
-        fromId: m.senderId,
-        time: m.timestamp || m.createdAt,
-        direction: m.direction,
-        messageType: m.messageType,
-        attachmentUrl: m.attachmentUrl || null,
-      })),
+      messages: messages.reverse().map((m) => {
+        const isOutgoing =
+          m.direction === "outgoing" ||
+          (pageId && m.senderId === pageId) ||
+          (accountId && m.senderId === accountId) ||
+          m.senderName === "Page" ||
+          m.senderName === "You";
+        return {
+          id: m.externalId || m._id.toString(),
+          text: m.content || "",
+          from: isOutgoing ? "Page" : m.senderName || "Unknown",
+          fromId: m.senderId,
+          time: m.timestamp || m.createdAt,
+          direction: isOutgoing ? "outgoing" : "incoming",
+          messageType: m.messageType,
+          attachmentUrl: m.attachmentUrl || null,
+        };
+      }),
       hasMore: messages.length === pageLimit,
     });
   } catch (err) {
