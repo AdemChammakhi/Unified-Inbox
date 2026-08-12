@@ -166,8 +166,13 @@ async function subscribePageToMessaging() {
       null,
       {
         params: {
+          // messaging_referrals is REQUIRED for ad-referral data: Meta only
+          // delivers ads_context_data when the Page is subscribed to BOTH
+          // messages and messaging_referrals. Without it, a customer clicking
+          // a sponsored post into an existing thread produces no referral
+          // event at all, so the inbox cannot show which ad they came from.
           subscribed_fields:
-            "messages,messaging_postbacks,message_deliveries,message_reads",
+            "messages,messaging_postbacks,message_deliveries,message_reads,messaging_referrals,messaging_optins",
           access_token: token,
         },
       },
