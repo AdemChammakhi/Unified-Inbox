@@ -67,10 +67,11 @@ async function fetchFacebookConversations(slim = false) {
   };
   const maxPages = 1;
   for (let page = 0; page < maxPages; page++) {
+    // Hard timeout — a degraded Graph edge must never stall the inbox
     const convRes =
       page === 0
-        ? await axios.get(nextUrl, { params })
-        : await axios.get(nextUrl);
+        ? await axios.get(nextUrl, { params, timeout: 10000 })
+        : await axios.get(nextUrl, { timeout: 10000 });
     const pageData = convRes.data.data || [];
     conversations = conversations.concat(pageData);
     nextUrl = convRes.data.paging?.next;
@@ -416,18 +417,20 @@ router.get("/messages-paged", protect, async (req, res) => {
       return res.status(400).json({ message: "conversationId is required" });
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
-    // --- NEW: Sync missing messages from Graph API on first page load ---
-    if (!before && !/^\d+$/.test(conversationId)) {
-      try {
-        const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-        const pageId = process.env.FACEBOOK_PAGE_ID;
-        if (accessToken && pageId && isValidGraphId(conversationId)) {
+    // --- Sync missing messages from Graph API on first page load ---
+    // Only BLOCK when the thread has nothing local; otherwise respond now
+    // and top up in the background. 8 s hard timeout.
+    const syncThreadFromGraph = async () => {
+      const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+      const pageId = process.env.FACEBOOK_PAGE_ID;
+      if (accessToken && pageId && isValidGraphId(conversationId)) {
           const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
             params: {
               fields:
                 "messages.limit(30){message,from,to,created_time,attachments}",
               access_token: accessToken,
             },
+            timeout: 8000,
           });
           const msgs = convRes.data.messages?.data || [];
 
@@ -466,9 +469,28 @@ router.get("/messages-paged", protect, async (req, res) => {
           if (pageSyncOps.length > 0) {
             await Message.bulkWrite(pageSyncOps, { ordered: false });
           }
+      }
+    };
+
+    if (!before && !/^\d+$/.test(conversationId)) {
+      const hasLocal = await Message.exists({
+        platform: "facebook",
+        conversationId: sanitizeId(conversationId) || "-",
+      });
+      if (hasLocal) {
+        // Local history exists — respond now, top up in the background
+        syncThreadFromGraph().catch((e) =>
+          console.error("FB background thread sync failed:", e.message),
+        );
+      } else {
+        try {
+          await syncThreadFromGraph();
+        } catch (syncErr) {
+          console.error(
+            "Optional FB conversation sync failed:",
+            syncErr.message,
+          );
         }
-      } catch (syncErr) {
-        console.error("Optional FB conversation sync failed:", syncErr.message);
       }
     }
 

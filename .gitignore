@@ -41,3 +41,4 @@ server/uploads/
 credentials.json
 token.json
 test-ig-token.js
+.claude/

@@ -83,9 +83,12 @@ router.get("/debug", protect, async (req, res) => {
 });
 
 // Helper: look up a user's profile (name + picture) from the Graph API.
-// profile_pic requires User Profile access on some setups — if the combined
-// request errors, retry name-only so a missing permission never costs us
-// the display name.
+// profile_pic requires User Profile access on some setups — once the combined
+// request fails we remember that per platform and go straight to name-only,
+// so a missing permission costs at most ONE extra call per process lifetime
+// and never the display name.
+const _picSupported = { instagram: true, facebook: true };
+
 async function getSenderProfile(senderId, platform) {
   const empty = { name: null, avatar: null };
   const token =
@@ -117,9 +120,18 @@ async function getSenderProfile(senderId, platform) {
   };
 
   try {
+    if (!_picSupported[platform]) {
+      return await fetchProfile(nameFields);
+    }
     return await fetchProfile(`${nameFields},profile_pic`);
   } catch {
     try {
+      if (_picSupported[platform]) {
+        _picSupported[platform] = false;
+        console.warn(
+          `[Webhook] profile_pic unavailable for ${platform} — name-only lookups from now on`,
+        );
+      }
       return await fetchProfile(nameFields);
     } catch {
       // Fallback for Facebook: query page conversations for participant name

@@ -3,6 +3,7 @@ const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
+const { Contact } = require("../models");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 const {
@@ -78,6 +79,122 @@ let _igCacheSlimTime = 0;
 let _igFetch = null;
 let _igFetchSlim = null;
 
+// ── Circuit breaker for the IG conversations edge ───────────────────────────
+// On Pages with high DM volume Meta starts answering this edge with error
+// code 1 ("Please reduce the amount of data…") after 15-25 s — for EVERY
+// request, even id-only with limit 10. Without a breaker each inbox poll
+// stalls the full 20 s before falling back to the DB. When the edge fails we
+// serve the DB-built list (webhooks keep it current) and retry Meta later.
+let _igListBackoffUntil = 0;
+const IG_LIST_BACKOFF_MS = 10 * 60 * 1000; // 10 minutes
+const IG_LIST_TIMEOUT_MS = 8000; // hard cap — never let Meta stall the inbox
+
+// profile_pic on individual IGSID lookups needs User Profile access; once we
+// see it fail we stop asking so every later lookup is a single request.
+let _igPicSupported = true;
+
+/**
+ * Look up one IGSID's profile: { name, avatar } or null.
+ * Single request when profile_pic is known-unsupported; otherwise tries the
+ * combined fields once and downgrades permanently on failure.
+ */
+async function lookupIgProfile(id, accessToken) {
+  if (!isValidGraphId(id)) return null;
+  const get = (fields) =>
+    axios.get(`${GRAPH_API}/${encodeURIComponent(id)}`, {
+      params: { fields, access_token: accessToken },
+      timeout: 4000,
+    });
+  try {
+    let r;
+    if (_igPicSupported) {
+      try {
+        r = await get("username,name,profile_pic");
+      } catch {
+        _igPicSupported = false;
+        console.warn(
+          "[Instagram] profile_pic unavailable for this app — name-only lookups from now on",
+        );
+        r = await get("username,name");
+      }
+    } else {
+      r = await get("username,name");
+    }
+    const n = r.data?.username || r.data?.name;
+    if (!n || /^\d{6,}$/.test(n)) return null;
+    return { name: n, avatar: r.data?.profile_pic || null };
+  } catch {
+    return null;
+  }
+}
+
+// ── Background profile healer ────────────────────────────────────────────────
+// Messages stored while a webhook-time lookup failed carry placeholder names
+// ("User 1234", raw IDs, "Unknown"). This repairs them a few at a time and
+// stores names/avatars on the Contact so the list routes can reuse them.
+// Throttled: at most one run every 3 minutes, 10 sender lookups per run.
+let _igHealRunning = false;
+let _igLastHealAt = 0;
+const IG_HEAL_INTERVAL_MS = 3 * 60 * 1000;
+
+async function healInstagramProfiles() {
+  if (_igHealRunning || Date.now() - _igLastHealAt < IG_HEAL_INTERVAL_MS) {
+    return;
+  }
+  _igHealRunning = true;
+  _igLastHealAt = Date.now();
+  try {
+    const accessToken =
+      process.env.INSTAGRAM_ACCESS_TOKEN ||
+      process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+    if (!accessToken) return;
+
+    const badNameFilter = {
+      $or: [
+        { senderName: null },
+        { senderName: "Unknown" },
+        { senderName: /^User \d{4}$/ },
+        { senderName: /^\d{6,}$/ },
+      ],
+    };
+    const badMsgs = await Message.find({
+      platform: "instagram",
+      direction: "incoming",
+      ...badNameFilter,
+    })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .select("senderId")
+      .lean();
+    if (badMsgs.length === 0) return;
+
+    const senderIds = [...new Set(badMsgs.map((m) => m.senderId))].slice(0, 10);
+    let healed = 0;
+    for (const senderId of senderIds) {
+      const profile = await lookupIgProfile(senderId, accessToken);
+      if (!profile?.name) continue;
+      await Message.updateMany(
+        { platform: "instagram", senderId, ...badNameFilter },
+        { $set: { senderName: profile.name } },
+      );
+      // Persist on the Contact so avatar backfill picks it up everywhere
+      await Contact.findOrCreateByPlatformId("instagram", senderId, {
+        name: profile.name,
+        avatar: profile.avatar,
+      }).catch(() => {});
+      healed++;
+    }
+    if (healed > 0) {
+      clearIgCache(); // next poll reflects healed names/avatars
+      console.log(`[Instagram] profile heal: repaired ${healed} sender(s)`);
+    }
+  } catch (err) {
+    console.error("IG profile heal error (non-fatal):", err.message);
+  } finally {
+    _igHealRunning = false;
+  }
+}
+
 async function fetchInstagramConversations(slim = false) {
   const accessToken =
     process.env.INSTAGRAM_ACCESS_TOKEN ||
@@ -99,40 +216,60 @@ async function fetchInstagramConversations(slim = false) {
     : "participants{id,name,username,profile_pic},messages.limit(5){message,from,to,created_time,attachments}";
   let conversations = [];
   const seenConvIds = new Set();
-  const folders = ["inbox", "other"];
 
-  for (const folder of folders) {
-    let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
-    let params = {
-      platform: "instagram",
-      folder,
-      fields: conversationFields,
-      limit: 10,
-      access_token: accessToken,
-    };
-    const maxPages = 1;
-    for (let page = 0; page < maxPages; page++) {
-      try {
-        const convRes =
-          page === 0
-            ? await axios.get(nextUrl, { params })
-            : await axios.get(nextUrl);
-        const pageData = convRes.data.data || [];
-        for (const conv of pageData) {
-          if (!seenConvIds.has(conv.id)) {
-            seenConvIds.add(conv.id);
-            conversations.push(conv);
+  if (Date.now() < _igListBackoffUntil) {
+    console.log(
+      "[Instagram] conversations edge in backoff — serving DB-built list",
+    );
+  } else {
+    const folders = ["inbox", "other"];
+    let edgeFailed = false;
+    for (const folder of folders) {
+      let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
+      let params = {
+        platform: "instagram",
+        folder,
+        fields: conversationFields,
+        limit: 10,
+        access_token: accessToken,
+      };
+      const maxPages = 1;
+      for (let page = 0; page < maxPages; page++) {
+        try {
+          const convRes =
+            page === 0
+              ? await axios.get(nextUrl, {
+                  params,
+                  timeout: IG_LIST_TIMEOUT_MS,
+                })
+              : await axios.get(nextUrl, { timeout: IG_LIST_TIMEOUT_MS });
+          const pageData = convRes.data.data || [];
+          for (const conv of pageData) {
+            if (!seenConvIds.has(conv.id)) {
+              seenConvIds.add(conv.id);
+              conversations.push(conv);
+            }
           }
+          nextUrl = convRes.data.paging?.next;
+          if (!nextUrl || pageData.length === 0) break;
+        } catch (folderErr) {
+          edgeFailed = true;
+          console.error(
+            `Instagram folder=${folder} page=${page} error:`,
+            folderErr.response?.data?.error?.message || folderErr.message,
+          );
+          break;
         }
-        nextUrl = convRes.data.paging?.next;
-        if (!nextUrl || pageData.length === 0) break;
-      } catch (folderErr) {
-        console.error(
-          `Instagram folder=${folder} page=${page} error:`,
-          folderErr.response?.data?.error?.message || folderErr.message,
-        );
-        break;
       }
+      // A dead edge fails identically for every folder — don't pay the
+      // timeout twice
+      if (edgeFailed && conversations.length === 0) break;
+    }
+    if (edgeFailed && conversations.length === 0) {
+      _igListBackoffUntil = Date.now() + IG_LIST_BACKOFF_MS;
+      console.warn(
+        `[Instagram] conversations edge unusable — DB-only list for ${IG_LIST_BACKOFF_MS / 60000} min`,
+      );
     }
   }
 
@@ -262,26 +399,8 @@ async function fetchInstagramConversations(slim = false) {
     const idsToLookup = [...unknownIds].slice(0, 10);
     await Promise.all(
       idsToLookup.map(async (id) => {
-        if (!isValidGraphId(id)) return;
-        const fetchProfile = async (fields) =>
-          axios.get(`${GRAPH_API}/${encodeURIComponent(id)}`, {
-            params: { fields, access_token: accessToken },
-            timeout: 4000,
-          });
-        try {
-          let r;
-          try {
-            r = await fetchProfile("username,name,profile_pic");
-          } catch {
-            r = await fetchProfile("username,name");
-          }
-          const n = r.data?.username || r.data?.name;
-          if (n && !/^\d{6,}$/.test(n)) {
-            resolvedExtra[id] = { name: n, avatar: r.data?.profile_pic || null };
-          }
-        } catch {
-          // non-fatal — will fall back to senderId partial display
-        }
+        const profile = await lookupIgProfile(id, accessToken);
+        if (profile?.name) resolvedExtra[id] = profile;
       }),
     );
   }
@@ -436,6 +555,10 @@ async function fetchInstagramConversations(slim = false) {
     _igCache = result;
     _igCacheTime = Date.now();
   }
+
+  // Repair placeholder names / capture avatars in the background (throttled)
+  setImmediate(healInstagramProfiles);
+
   return result;
 }
 
@@ -515,59 +638,6 @@ router.get("/conversations", protect, async (req, res) => {
       });
     }
     const result = await _igFetch;
-
-    // Background: patch any DB messages that have null or "Unknown" senderName
-    // using the names we just resolved from the Graph API (non-blocking)
-    setImmediate(async () => {
-      try {
-        const badMsgs = await Message.find({
-          platform: "instagram",
-          direction: "incoming",
-          $or: [{ senderName: null }, { senderName: "Unknown" }],
-        })
-          .select("_id senderId")
-          .lean();
-        if (badMsgs.length === 0) return;
-        const accessToken =
-          process.env.INSTAGRAM_ACCESS_TOKEN ||
-          process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-        if (!accessToken) return;
-        const uniqueSenderIds = [...new Set(badMsgs.map((m) => m.senderId))];
-        const nameUpdates = {};
-        await Promise.all(
-          uniqueSenderIds.map(async (id) => {
-            try {
-              const r = await axios.get(`${GRAPH_API}/${id}`, {
-                params: { fields: "username,name", access_token: accessToken },
-                timeout: 4000,
-              });
-              const n = r.data?.username || r.data?.name;
-              if (n && !/^\d{6,}$/.test(n)) nameUpdates[id] = n;
-            } catch {}
-          }),
-        );
-        for (const [senderId, name] of Object.entries(nameUpdates)) {
-          await Message.updateMany(
-            {
-              platform: "instagram",
-              senderId,
-              $or: [{ senderName: null }, { senderName: "Unknown" }],
-            },
-            { $set: { senderName: name } },
-          );
-        }
-        if (Object.keys(nameUpdates).length > 0) {
-          // Bust cache so the next fetch reflects the healed names
-          _igCache = null;
-          console.log(
-            `IG name heal: patched ${Object.keys(nameUpdates).length} sender(s)`,
-          );
-        }
-      } catch (healErr) {
-        console.error("IG name heal error (non-fatal):", healErr.message);
-      }
-    });
-
     return res.json({ conversations: result });
   } catch (error) {
     if (error.status === 400) {
@@ -647,27 +717,31 @@ router.get("/messages-paged", protect, async (req, res) => {
       return res.status(400).json({ message: "conversationId is required" });
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
-    // --- NEW: Sync missing messages from Graph API on first page load ---
-    if (!before && !/^\d+$/.test(conversationId)) {
-      try {
-        const accessToken =
-          process.env.INSTAGRAM_ACCESS_TOKEN ||
-          process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-        const pageId = process.env.FACEBOOK_PAGE_ID;
-        let accountId = process.env.INSTAGRAM_ACCOUNT_ID;
-        if (!accountId && accessToken && pageId) {
-          try {
-            accountId = await resolveIgAccountId(accessToken, pageId);
-          } catch {}
-        }
+    // --- Sync missing messages from Graph API on first page load ---
+    // Only BLOCK on this when we have nothing local to show; if the thread
+    // already has messages in the DB, respond immediately and let the sync
+    // top up in the background. Hard 8 s timeout — Meta must never stall
+    // the inbox.
+    const syncThreadFromGraph = async () => {
+      const accessToken =
+        process.env.INSTAGRAM_ACCESS_TOKEN ||
+        process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+      const pageId = process.env.FACEBOOK_PAGE_ID;
+      let accountId = process.env.INSTAGRAM_ACCOUNT_ID;
+      if (!accountId && accessToken && pageId) {
+        try {
+          accountId = await resolveIgAccountId(accessToken, pageId);
+        } catch {}
+      }
 
-        if (accessToken && (accountId || pageId) && isValidGraphId(conversationId)) {
+      if (accessToken && (accountId || pageId) && isValidGraphId(conversationId)) {
           const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
             params: {
               fields:
                 "messages.limit(30){message,from,to,created_time,attachments}",
               access_token: accessToken,
             },
+            timeout: 8000,
           });
           const msgs = convRes.data.messages?.data || [];
 
@@ -712,9 +786,28 @@ router.get("/messages-paged", protect, async (req, res) => {
           if (pageSyncOps.length > 0) {
             await Message.bulkWrite(pageSyncOps, { ordered: false });
           }
+      }
+    };
+
+    if (!before && !/^\d+$/.test(conversationId)) {
+      const hasLocal = await Message.exists({
+        platform: "instagram",
+        conversationId: sanitizeId(conversationId) || "-",
+      });
+      if (hasLocal) {
+        // Local history exists — respond now, top up in the background
+        syncThreadFromGraph().catch((e) =>
+          console.error("IG background thread sync failed:", e.message),
+        );
+      } else {
+        try {
+          await syncThreadFromGraph();
+        } catch (syncErr) {
+          console.error(
+            "Optional IG conversation sync failed:",
+            syncErr.message,
+          );
         }
-      } catch (syncErr) {
-        console.error("Optional IG conversation sync failed:", syncErr.message);
       }
     }
 
