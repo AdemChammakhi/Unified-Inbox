@@ -8,6 +8,11 @@ COPY package.json package-lock.json ./
 RUN npm ci && npm cache clean --force
 
 COPY . .
+# INLINE_RUNTIME_CHUNK=false keeps the webpack runtime as a file instead of an
+# inline <script>, which lets the CSP use script-src 'self' with no
+# 'unsafe-inline'. GENERATE_SOURCEMAP=false keeps sources out of production.
+ENV INLINE_RUNTIME_CHUNK=false
+ENV GENERATE_SOURCEMAP=false
 RUN npm run build
 
 # Stage 2: Serve with nginx (non-root)

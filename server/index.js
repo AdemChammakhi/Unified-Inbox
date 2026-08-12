@@ -68,6 +68,32 @@ io.on("connection", (socket) => {
 
 // Middleware
 app.set("trust proxy", 1); // trust Nginx reverse proxy for real client IPs
+app.disable("x-powered-by"); // don't advertise Express (ZAP 10036)
+
+// Security headers for API and /uploads responses. The frontend container
+// sets its own (see client/nginx.conf) — these cover everything the backend
+// serves directly.
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader(
+    "Permissions-Policy",
+    "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=(), xr-spatial-tracking=()",
+  );
+  if (req.path.startsWith("/api/")) {
+    // API responses carry customer data — never store them
+    res.setHeader("Cache-Control", "no-store");
+    // JSON needs no scripts, styles or framing
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    );
+  }
+  next();
+});
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN || "*",
