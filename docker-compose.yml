@@ -2,6 +2,9 @@ networks:
   network1:
     external: true
 
+volumes:
+  uploads-data:
+
 services:
   # Backend - Express APII
   backend:
@@ -14,6 +17,8 @@ services:
       - .env
     ports:
       - "5000:5000"
+    volumes:
+      - uploads-data:/app/server/uploads
     environment:
       - PORT=5000
       # Real values come from .env — never commit secrets here

@@ -15,7 +15,7 @@ import { io } from "socket.io-client";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
-import { Search, RefreshCw, Send } from "lucide-react";
+import { Search, RefreshCw, Send, Paperclip } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
 
 const CLASSIFICATION_LABELS = {
@@ -34,6 +34,26 @@ const CLASSIFICATION_COLORS = {
   priorite: "#D4A24C",
 };
 
+// Labels for the "replying to…" context card (ads, posts, stories)
+const CONTEXT_KIND_LABELS = {
+  ad: "Replied to your ad",
+  post: "Replied to your post",
+  story_reply: "Replied to your story",
+  share: "Shared a post",
+  story_mention: "Mentioned you in a story",
+  referral: "Came from a link",
+};
+
+// WhatsApp media is served through our authenticated proxy; <img>/<video>
+// tags can't send headers, so the JWT rides along as a query param.
+const resolveAttachmentUrl = (rawUrl, token) => {
+  if (!rawUrl) return "";
+  if (rawUrl.startsWith("/api/")) {
+    return `${rawUrl}${rawUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(token || "")}`;
+  }
+  return rawUrl;
+};
+
 const Inbox = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -41,6 +61,10 @@ const Inbox = () => {
   const [selectedConv, setSelectedConv] = useState(null);
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [pendingAttachment, setPendingAttachment] = useState(null);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const fileInputRef = useRef(null);
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
@@ -57,6 +81,7 @@ const Inbox = () => {
   const [searchDebounced, setSearchDebounced] = useState("");
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const skipAutoScrollRef = useRef(false);
   const audioCtxRef = useRef(null);
   const activeTabRef = useRef(activeTab);
   const selectedConvRef = useRef(selectedConv);
@@ -271,6 +296,8 @@ const Inbox = () => {
                 from: data.senderName || message.from || "New User",
                 fromId: message.fromId || data.senderId,
                 time: message.time,
+                attachments: message.attachments || [],
+                context: message.context || null,
               },
             ],
             _fromSocket: true,
@@ -318,6 +345,8 @@ const Inbox = () => {
                 from: message.from,
                 fromId: message.fromId,
                 time: message.time,
+                attachments: message.attachments || [],
+                context: message.context || null,
               };
               const existingIdx = (prev.messages || []).findIndex(
                 (m) => m.id === message.id,
@@ -387,6 +416,8 @@ const Inbox = () => {
                     from: message.from,
                     fromId: message.fromId,
                     time: message.time,
+                    attachments: message.attachments || [],
+                    context: message.context || null,
                   },
                 ],
               };
@@ -501,8 +532,13 @@ const Inbox = () => {
     };
   }, [user?.token, user?._id]);
 
-  // Scroll to bottom when messages change
+  // Scroll to bottom when messages change — unless we just prepended older
+  // messages, in which case jumping to the bottom would lose the user's place.
   useEffect(() => {
+    if (skipAutoScrollRef.current) {
+      skipAutoScrollRef.current = false;
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [selectedConv?.messages?.length]);
 
@@ -709,6 +745,53 @@ const Inbox = () => {
     [user?.token],
   );
 
+  // Load a page of older messages via the `before` cursor on /messages-paged.
+  // The backend has always supported this cursor — the UI just never exposed it.
+  const loadOlderMessages = useCallback(async () => {
+    const conv = selectedConvRef.current;
+    const platform = activeTabRef.current;
+    if (!conv || loadingOlder) return;
+    let endpoint;
+    if (platform === "facebook") endpoint = "/api/facebook/messages-paged";
+    else if (platform === "instagram")
+      endpoint = "/api/instagram/messages-paged";
+    else if (platform === "whatsapp") endpoint = "/api/whatsapp/messages-paged";
+    else return; // email has no paged endpoint
+
+    const oldest = (conv.messages || [])[0];
+    if (!oldest?.time) return;
+
+    setLoadingOlder(true);
+    try {
+      const participantId = conv.participants?.[0]?.id;
+      const res = await axios.get(endpoint, {
+        params: {
+          conversationId: conv.id,
+          participantId,
+          limit: 30,
+          before: oldest.time,
+        },
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      const older = res.data.messages || [];
+      skipAutoScrollRef.current = true; // prepending — keep scroll position
+      setSelectedConv((prev) => {
+        if (!prev || prev.id !== conv.id) return prev;
+        const existingIds = new Set((prev.messages || []).map((m) => m.id));
+        const newOnes = older.filter((m) => !existingIds.has(m.id));
+        return {
+          ...prev,
+          messages: [...newOnes, ...(prev.messages || [])],
+          _hasMoreMessages: res.data.hasMore,
+        };
+      });
+    } catch (err) {
+      console.error("Failed to load older messages:", err.message);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [user?.token, loadingOlder]);
+
   // Inject custom CSS for animations, scrollbar, hover effects
   useEffect(() => {
     const styleId = "inbox-obsidian-styles";
@@ -758,6 +841,10 @@ const Inbox = () => {
       .inbox-email-render a { color: var(--accent) !important; }
       .inbox-email-render * { max-width: 100% !important; }
       .inbox-delete-btn:hover { background: var(--danger, #E06C6C) !important; color: #fff !important; border-color: var(--danger, #E06C6C) !important; }
+      .inbox-load-older:hover:not(:disabled) { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
+      .inbox-load-older:disabled { opacity: 0.5; cursor: wait; }
+      .inbox-attach-btn:hover:not(:disabled) { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
+      .inbox-attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
       @keyframes inboxNewMsgPulse {
         0%, 100% { background-color: rgba(110, 204, 139, 0.04); }
         50% { background-color: rgba(110, 204, 139, 0.14); }
@@ -771,11 +858,43 @@ const Inbox = () => {
     };
   }, []);
 
+  // Upload the picked file to /api/uploads; the returned public URL is what
+  // Meta fetches when the message is sent.
+  const handleFileSelected = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    if (
+      activeTab === "instagram" &&
+      !/^(image|video|audio)\//.test(file.type)
+    ) {
+      alert("Instagram only supports image, video, and audio attachments.");
+      return;
+    }
+    setUploadingFile(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await axios.post("/api/uploads", form, {
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      setPendingAttachment(res.data);
+    } catch (err) {
+      alert(
+        "Upload failed: " + (err.response?.data?.message || err.message),
+      );
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
   const sendReply = async () => {
-    if (!replyText.trim() || !selectedConv) return;
+    if ((!replyText.trim() && !pendingAttachment) || !selectedConv) return;
 
     const messageText = replyText.trim();
+    const attachmentToSend = pendingAttachment;
     setReplyText("");
+    setPendingAttachment(null);
     const tempId = "temp_" + Date.now();
     let sendRes;
 
@@ -787,6 +906,7 @@ const Inbox = () => {
       const recipient = selectedConv.participants?.[0];
 
       // Optimistic update — show the message immediately
+      const previewText = messageText || "📎 Attachment";
       const optimisticMsg = {
         id: tempId,
         text: messageText,
@@ -794,6 +914,16 @@ const Inbox = () => {
         fromId: "page",
         time: new Date().toISOString(),
         sending: true,
+        attachments: attachmentToSend
+          ? [
+              {
+                type: attachmentToSend.mediaType,
+                url: attachmentToSend.url,
+                name: attachmentToSend.name,
+                mimeType: attachmentToSend.mimeType,
+              },
+            ]
+          : [],
       };
 
       setSelectedConv((prev) => {
@@ -802,7 +932,7 @@ const Inbox = () => {
           ...prev,
           messages: [...(prev.messages || []), optimisticMsg],
           lastMessage: {
-            text: messageText,
+            text: previewText,
             from: "You",
             time: optimisticMsg.time,
           },
@@ -816,7 +946,7 @@ const Inbox = () => {
             return {
               ...c,
               lastMessage: {
-                text: messageText,
+                text: previewText,
                 from: "You",
                 time: optimisticMsg.time,
               },
@@ -833,6 +963,7 @@ const Inbox = () => {
             recipientId: recipient?.id || selectedConv.id,
             conversationId: selectedConv.id,
             message: messageText,
+            attachment: attachmentToSend || undefined,
           },
           { headers: { Authorization: `Bearer ${token}` } },
         );
@@ -843,6 +974,7 @@ const Inbox = () => {
             recipientId: recipient?.id || selectedConv.id,
             conversationId: selectedConv.id,
             message: messageText,
+            attachment: attachmentToSend || undefined,
           },
           { headers: { Authorization: `Bearer ${token}` } },
         );
@@ -853,6 +985,7 @@ const Inbox = () => {
             recipientId: recipient?.id || selectedConv.id,
             conversationId: selectedConv.id,
             message: messageText,
+            attachment: attachmentToSend || undefined,
           },
           { headers: { Authorization: `Bearer ${token}` } },
         );
@@ -864,6 +997,7 @@ const Inbox = () => {
             conversationId: selectedConv.id,
             subject: selectedConv.subject || "Re: Conversation",
             text: messageText,
+            attachment: attachmentToSend || undefined,
           },
           { headers: { Authorization: `Bearer ${token}` } },
         );
@@ -901,7 +1035,8 @@ const Inbox = () => {
             error.response?.data?.message ||
             error.message),
       );
-      // Revert optimistic update
+      // Revert optimistic update — restore the attachment so it isn't lost
+      setPendingAttachment(attachmentToSend);
       setSelectedConv((prev) => {
         if (!prev) return prev;
         return {
@@ -1129,7 +1264,7 @@ const Inbox = () => {
                         animation:
                           isUnread && !isSelected
                             ? "inboxNewMsgPulse 2.5s ease-in-out 3"
-                            : `inboxSlideIn 0.35s ease-out ${index * 0.04}s both`,
+                            : `inboxSlideIn 0.35s ease-out ${Math.min(index * 0.04, 0.4)}s both`,
                       }}
                       onClick={() => handleSelectConv(conv)}
                     >
@@ -1157,6 +1292,8 @@ const Inbox = () => {
                           <img
                             src={conv.participants[0].profilePicUrl}
                             alt={conv.participants[0].name}
+                            loading="lazy"
+                            decoding="async"
                             style={{
                               width: "100%",
                               height: "100%",
@@ -1380,6 +1517,16 @@ const Inbox = () => {
                 </div>
 
                 <div className="inbox-msg-scroll" style={styles.messageList}>
+                  {selectedConv._hasMoreMessages && activeTab !== "email" && (
+                    <button
+                      className="inbox-load-older"
+                      style={styles.loadOlderBtn}
+                      onClick={loadOlderMessages}
+                      disabled={loadingOlder}
+                    >
+                      {loadingOlder ? "Loading…" : "↑ Load older messages"}
+                    </button>
+                  )}
                   {selectedConv.messages?.map((msg, idx) => {
                     const isEmail = activeTab === "email";
                     const otherParticipant = selectedConv.participants?.[0];
@@ -1418,10 +1565,53 @@ const Inbox = () => {
                               ? "var(--msg-received-color)"
                               : "var(--bg-primary)",
                           opacity: msg.sending ? 0.5 : 1,
-                          animation: `inboxFadeUp 0.3s ease-out ${idx * 0.02}s both`,
+                          animation: `inboxFadeUp 0.3s ease-out ${Math.min(idx * 0.02, 0.3)}s both`,
                         }}
                       >
                         <small style={styles.msgFrom}>{msg.from}</small>
+                        {/* Ad / post / story the customer is replying to */}
+                        {msg.context && (
+                          <a
+                            href={msg.context.url || undefined}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              ...styles.contextCard,
+                              cursor: msg.context.url ? "pointer" : "default",
+                            }}
+                            onClick={(e) => {
+                              if (!msg.context.url) e.preventDefault();
+                            }}
+                          >
+                            {msg.context.photoUrl && (
+                              <img
+                                src={msg.context.photoUrl}
+                                alt=""
+                                loading="lazy"
+                                style={styles.contextThumb}
+                                onError={(e) => {
+                                  e.target.style.display = "none";
+                                }}
+                              />
+                            )}
+                            <div style={{ minWidth: 0 }}>
+                              <div style={styles.contextKind}>
+                                {CONTEXT_KIND_LABELS[msg.context.kind] ||
+                                  "In reply to"}
+                              </div>
+                              {msg.context.title && (
+                                <div style={styles.contextTitle}>
+                                  {msg.context.title}
+                                </div>
+                              )}
+                              {msg.context.body && (
+                                <div style={styles.contextBody}>
+                                  {msg.context.body}
+                                </div>
+                              )}
+                            </div>
+                          </a>
+                        )}
                         {/* Subject for emails */}
                         {isEmail && msg.subject && (
                           <p
@@ -1450,18 +1640,28 @@ const Inbox = () => {
                           <div style={{ marginTop: 8 }}>
                             {msg.attachments.map((att, attIdx) => {
                               const mimeType =
-                                att.mime_type || att.contentType || "";
-                              const imageUrl =
-                                att.image_data?.url ||
-                                att.url ||
-                                att.file_url ||
+                                att.mime_type ||
+                                att.contentType ||
+                                att.mimeType ||
                                 "";
-                              const videoUrl =
-                                att.video_data?.url || att.url || "";
+                              const attType = att.type || "";
+                              const imageUrl = resolveAttachmentUrl(
+                                att.image_data?.url ||
+                                  att.url ||
+                                  att.file_url ||
+                                  "",
+                                user?.token,
+                              );
+                              const videoUrl = resolveAttachmentUrl(
+                                att.video_data?.url || att.url || "",
+                                user?.token,
+                              );
                               const fileName =
                                 att.name || att.filename || "file";
 
                               if (
+                                attType === "image" ||
+                                attType === "sticker" ||
                                 mimeType.startsWith("image") ||
                                 att.image_data
                               ) {
@@ -1483,6 +1683,7 @@ const Inbox = () => {
                                   />
                                 );
                               } else if (
+                                attType === "video" ||
                                 mimeType.startsWith("video") ||
                                 att.video_data
                               ) {
@@ -1499,11 +1700,17 @@ const Inbox = () => {
                                     }}
                                   />
                                 );
-                              } else if (mimeType.startsWith("audio")) {
+                              } else if (
+                                attType === "audio" ||
+                                mimeType.startsWith("audio")
+                              ) {
                                 return (
                                   <audio
                                     key={attIdx}
-                                    src={att.url || att.file_url || ""}
+                                    src={resolveAttachmentUrl(
+                                      att.url || att.file_url || "",
+                                      user?.token,
+                                    )}
                                     controls
                                     style={{
                                       marginTop: 6,
@@ -1515,7 +1722,12 @@ const Inbox = () => {
                                 return (
                                   <a
                                     key={attIdx}
-                                    href={att.url || att.file_url || "#"}
+                                    href={
+                                      resolveAttachmentUrl(
+                                        att.url || att.file_url || "",
+                                        user?.token,
+                                      ) || "#"
+                                    }
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     style={{
@@ -1569,24 +1781,67 @@ const Inbox = () => {
                     );
                   }
                   return (
-                    <div style={styles.replyBox}>
-                      <input
-                        type="text"
-                        className="inbox-reply-field"
-                        value={replyText}
-                        onChange={(e) => setReplyText(e.target.value)}
-                        placeholder="Type a message…"
-                        style={styles.replyInput}
-                        onKeyPress={(e) => e.key === "Enter" && sendReply()}
-                      />
-                      <button
-                        className="inbox-send-action"
-                        onClick={sendReply}
-                        disabled={sending || !replyText.trim()}
-                        style={styles.sendBtn}
-                      >
-                        {sending ? "···" : "➤"}
-                      </button>
+                    <div>
+                      {pendingAttachment && (
+                        <div style={styles.attachChipRow}>
+                          <span style={styles.attachChip}>
+                            📎{" "}
+                            <span style={styles.attachChipName}>
+                              {pendingAttachment.name}
+                            </span>
+                            <button
+                              style={styles.attachChipRemove}
+                              onClick={() => setPendingAttachment(null)}
+                              title="Remove attachment"
+                            >
+                              ✕
+                            </button>
+                          </span>
+                        </div>
+                      )}
+                      <div style={styles.replyBox}>
+                        <input
+                          type="file"
+                          ref={fileInputRef}
+                          style={{ display: "none" }}
+                          onChange={handleFileSelected}
+                          accept={
+                            activeTab === "instagram"
+                              ? "image/*,video/*,audio/*"
+                              : undefined
+                          }
+                        />
+                        <button
+                          className="inbox-attach-btn"
+                          style={styles.attachBtn}
+                          title="Attach a file"
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={uploadingFile || !!pendingAttachment}
+                        >
+                          {uploadingFile ? "…" : <Paperclip size={16} />}
+                        </button>
+                        <input
+                          type="text"
+                          className="inbox-reply-field"
+                          value={replyText}
+                          onChange={(e) => setReplyText(e.target.value)}
+                          placeholder="Type a message…"
+                          style={styles.replyInput}
+                          onKeyPress={(e) => e.key === "Enter" && sendReply()}
+                        />
+                        <button
+                          className="inbox-send-action"
+                          onClick={sendReply}
+                          disabled={
+                            sending ||
+                            uploadingFile ||
+                            (!replyText.trim() && !pendingAttachment)
+                          }
+                          style={styles.sendBtn}
+                        >
+                          {sending ? "···" : "➤"}
+                        </button>
+                      </div>
                     </div>
                   );
                 })()}
@@ -2046,6 +2301,110 @@ const styles = {
     fontWeight: 700,
     marginLeft: "5px",
     padding: "0 4px",
+  },
+  contextCard: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    padding: "8px 10px",
+    margin: "4px 0 8px",
+    borderRadius: "10px",
+    backgroundColor: "rgba(0,0,0,0.12)",
+    border: "1px solid rgba(127,127,127,0.3)",
+    textDecoration: "none",
+    color: "inherit",
+    maxWidth: "100%",
+  },
+  contextThumb: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    objectFit: "cover",
+    flexShrink: 0,
+  },
+  contextKind: {
+    fontSize: 9,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: "0.8px",
+    opacity: 0.7,
+    marginBottom: 2,
+  },
+  contextTitle: {
+    fontSize: 12,
+    fontWeight: 700,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  contextBody: {
+    fontSize: 11,
+    opacity: 0.8,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  attachBtn: {
+    width: "40px",
+    height: "40px",
+    borderRadius: "10px",
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-card)",
+    color: "var(--text-faint)",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    transition: "all 0.2s ease",
+    flexShrink: 0,
+  },
+  attachChipRow: {
+    padding: "8px 20px 0",
+    backgroundColor: "var(--bg-secondary)",
+    borderTop: "1px solid var(--border-primary)",
+  },
+  attachChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "4px 10px",
+    borderRadius: "8px",
+    backgroundColor: "var(--accent-bg)",
+    border: "1px solid var(--accent-border)",
+    color: "var(--accent)",
+    fontSize: "12px",
+    fontWeight: 600,
+    maxWidth: "100%",
+  },
+  attachChipName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    maxWidth: "280px",
+  },
+  attachChipRemove: {
+    border: "none",
+    background: "transparent",
+    color: "inherit",
+    cursor: "pointer",
+    fontSize: "12px",
+    padding: 0,
+    lineHeight: 1,
+  },
+  loadOlderBtn: {
+    alignSelf: "center",
+    padding: "6px 16px",
+    borderRadius: "8px",
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-card)",
+    color: "var(--text-faint)",
+    cursor: "pointer",
+    fontSize: "11px",
+    fontWeight: 600,
+    fontFamily: "'Hanken Grotesk', sans-serif",
+    transition: "all 0.2s ease",
+    flexShrink: 0,
+    marginBottom: "4px",
   },
   lockBadge: {
     display: "inline-flex",

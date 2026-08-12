@@ -5,13 +5,19 @@ const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
+const {
+  parseGraphAttachments,
+  messageTypeFor,
+} = require("../utils/metaPayload");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
-// In-memory cache — avoids slow Graph API calls on every request
+// In-memory cache — avoids slow Graph API calls on every request.
+// 15 s is safe: webhooks and /send bust the cache via clearFbCache(), so
+// real-time updates still surface immediately; this only throttles polling.
 let _fbCache = null;
 let _fbCacheTime = 0;
-const FB_CACHE_TTL = 5000; // 5 seconds
+const FB_CACHE_TTL = 15000; // 15 seconds
 // Separate slim-mode cache (conversation list without embedded messages)
 let _fbCacheSlim = null;
 let _fbCacheSlimTime = 0;
@@ -72,6 +78,9 @@ async function fetchFacebookConversations(slim = false) {
   console.log(`Facebook API returned ${conversations.length} conversations`);
 
   // Format conversations
+  // Collected across all conversations and flushed as ONE bulkWrite below
+  // instead of firing an individual findOneAndUpdate per message.
+  const syncOps = [];
   const formatted = conversations.map((conv) => {
     const participants = conv.participants?.data || [];
     const messages = conv.messages?.data || [];
@@ -83,28 +92,31 @@ async function fetchFacebookConversations(slim = false) {
     // Skip DB sync in slim mode — we only need the lastMessage preview
     if (!slim) {
       for (const m of messages) {
+        if (!m.id) continue;
         const direction = m.from?.id === pageId ? "outgoing" : "incoming";
-        Message.findOneAndUpdate(
-          { externalId: m.id },
-          {
-            $setOnInsert: {
-              platform: "facebook",
-              conversationId: conv.id,
-              senderId: m.from?.id || "unknown",
-              senderName: m.from?.name || "Unknown",
-              recipientId: m.to?.data?.[0]?.id || pageId,
-              content: m.message || "",
-              messageType: m.attachments ? "attachment" : "text",
-              direction,
-              status: direction === "outgoing" ? "sent" : "delivered",
-              externalId: m.id,
-              timestamp: m.created_time,
+        const graphAtts = parseGraphAttachments(m.attachments);
+        syncOps.push({
+          updateOne: {
+            filter: { externalId: m.id },
+            update: {
+              $setOnInsert: {
+                platform: "facebook",
+                conversationId: conv.id,
+                senderId: m.from?.id || "unknown",
+                senderName: m.from?.name || "Unknown",
+                recipientId: m.to?.data?.[0]?.id || pageId,
+                content: m.message || "",
+                messageType: messageTypeFor(graphAtts),
+                attachments: graphAtts,
+                direction,
+                status: direction === "outgoing" ? "sent" : "delivered",
+                externalId: m.id,
+                timestamp: m.created_time,
+              },
             },
+            upsert: true,
           },
-          { upsert: true },
-        ).catch((err) =>
-          console.error("FB message sync error (non-fatal):", err.message),
-        );
+        });
       }
     }
 
@@ -154,6 +166,13 @@ async function fetchFacebookConversations(slim = false) {
     };
   });
 
+  // Flush the DB sync as a single unordered bulk upsert (non-blocking)
+  if (syncOps.length > 0) {
+    Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
+      console.error("FB message sync error (non-fatal):", err.message),
+    );
+  }
+
   // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
   try {
     const knownIds = new Set();
@@ -166,7 +185,8 @@ async function fetchFacebookConversations(slim = false) {
       platform: "facebook",
     })
       .sort({ timestamp: -1 })
-      .limit(200);
+      .limit(200)
+      .lean();
 
     // Build a map of key (conversationId/senderId) -> latest message in DB
     const dbLatestMap = {};
@@ -319,7 +339,8 @@ router.get("/conversations", protect, async (req, res) => {
     try {
       const dbMessages = await Message.find({ platform: "facebook" })
         .sort({ timestamp: -1 })
-        .limit(500);
+        .limit(500)
+        .lean();
 
       const convMap = {};
       for (const m of dbMessages) {
@@ -391,33 +412,41 @@ router.get("/messages-paged", protect, async (req, res) => {
           });
           const msgs = convRes.data.messages?.data || [];
 
-          // Wait for all DB insertions to finish so the following find() gets them
-          await Promise.all(
-            msgs.map(async (m) => {
+          // One awaited bulk upsert so the following find() sees the rows,
+          // without 30 parallel round-trips to MongoDB.
+          const pageSyncOps = msgs
+            .filter((m) => m.id)
+            .map((m) => {
               const isOutgoing = m.from?.id && m.from.id === pageId;
               const direction = isOutgoing ? "outgoing" : "incoming";
               const senderName = isOutgoing ? "Page" : m.from?.name || "Unknown";
-              await Message.findOneAndUpdate(
-                { externalId: m.id },
-                {
-                  $setOnInsert: {
-                    platform: "facebook",
-                    conversationId: conversationId,
-                    senderId: m.from?.id || "unknown",
-                    senderName,
-                    recipientId: m.to?.data?.[0]?.id || pageId,
-                    content: m.message || "",
-                    messageType: m.attachments ? "attachment" : "text",
-                    direction,
-                    status: direction === "outgoing" ? "sent" : "delivered",
-                    externalId: m.id,
-                    timestamp: m.created_time,
+              const graphAtts = parseGraphAttachments(m.attachments);
+              return {
+                updateOne: {
+                  filter: { externalId: m.id },
+                  update: {
+                    $setOnInsert: {
+                      platform: "facebook",
+                      conversationId: conversationId,
+                      senderId: m.from?.id || "unknown",
+                      senderName,
+                      recipientId: m.to?.data?.[0]?.id || pageId,
+                      content: m.message || "",
+                      messageType: messageTypeFor(graphAtts),
+                      attachments: graphAtts,
+                      direction,
+                      status: direction === "outgoing" ? "sent" : "delivered",
+                      externalId: m.id,
+                      timestamp: m.created_time,
+                    },
                   },
+                  upsert: true,
                 },
-                { upsert: true },
-              );
-            }),
-          );
+              };
+            });
+          if (pageSyncOps.length > 0) {
+            await Message.bulkWrite(pageSyncOps, { ordered: false });
+          }
         }
       } catch (syncErr) {
         console.error("Optional FB conversation sync failed:", syncErr.message);
@@ -478,6 +507,8 @@ router.get("/messages-paged", protect, async (req, res) => {
           direction: isOutgoing ? "outgoing" : "incoming",
           messageType: m.messageType,
           attachmentUrl: m.attachmentUrl || null,
+          attachments: m.attachments || [],
+          context: m.context || null,
         };
       }),
       hasMore: messages.length === pageLimit,
@@ -489,9 +520,11 @@ router.get("/messages-paged", protect, async (req, res) => {
 });
 
 // POST /api/facebook/send - Send a Facebook Messenger message
+// Body: { recipientId, message?, conversationId, attachment? }
+// attachment = { url, name, mimeType, mediaType } from POST /api/uploads.
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message, conversationId } = req.body;
+    const { recipientId, message, conversationId, attachment } = req.body;
     const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
@@ -500,6 +533,11 @@ router.post("/send", protect, async (req, res) => {
         message:
           "FACEBOOK_PAGE_ACCESS_TOKEN or FACEBOOK_PAGE_ID missing in .env",
       });
+    }
+    if (!message?.trim() && !attachment?.url) {
+      return res
+        .status(400)
+        .json({ message: "message or attachment is required" });
     }
 
     // --- Conversation Lock Check ---
@@ -550,49 +588,78 @@ router.post("/send", protect, async (req, res) => {
       }
     }
 
-    // Send message via Messenger Send API
+    // Build the Send API message objects: optional text, then optional media.
+    // Messenger requires text and attachments to be separate messages.
+    const messagePayloads = [];
+    if (message?.trim()) messagePayloads.push({ text: message });
+    if (attachment?.url) {
+      const fbType = ["image", "video", "audio"].includes(attachment.mediaType)
+        ? attachment.mediaType
+        : "file";
+      messagePayloads.push({
+        attachment: {
+          type: fbType,
+          payload: { url: attachment.url, is_reusable: true },
+        },
+      });
+    }
+
+    // Send via Messenger Send API
     // First try RESPONSE (within 24h window), then fall back to HUMAN_AGENT tag (7-day window)
     console.log(
-      `Facebook send — pageId=${pageId} recipientId=${recipientId} msgLen=${message?.length}`,
+      `Facebook send — pageId=${pageId} recipientId=${recipientId} msgLen=${message?.length} attachment=${attachment?.mediaType || "none"}`,
     );
-    let sendRes;
-    try {
-      sendRes = await axios.post(
-        `${GRAPH_API}/${pageId}/messages`,
-        {
-          recipient: { id: recipientId },
-          message: { text: message },
-          messaging_type: "RESPONSE",
-        },
-        {
-          params: { access_token: accessToken },
-        },
-      );
-    } catch (sendErr) {
-      const errData = sendErr.response?.data?.error;
-      // Error code 10 / subcode 2018278 = outside the 24h allowed window
-      if (errData?.code === 10 || errData?.error_subcode === 2018278) {
-        console.log(
-          "24h window expired, retrying with HUMAN_AGENT message tag...",
-        );
-        sendRes = await axios.post(
+    let lastData = null;
+    for (const payload of messagePayloads) {
+      try {
+        const r = await axios.post(
           `${GRAPH_API}/${pageId}/messages`,
           {
             recipient: { id: recipientId },
-            message: { text: message },
-            messaging_type: "MESSAGE_TAG",
-            tag: "HUMAN_AGENT",
+            message: payload,
+            messaging_type: "RESPONSE",
           },
-          {
-            params: { access_token: accessToken },
-          },
+          { params: { access_token: accessToken } },
         );
-      } else {
-        throw sendErr;
+        lastData = r.data;
+      } catch (sendErr) {
+        const errData = sendErr.response?.data?.error;
+        // Error code 10 / subcode 2018278 = outside the 24h allowed window
+        if (errData?.code === 10 || errData?.error_subcode === 2018278) {
+          console.log(
+            "24h window expired, retrying with HUMAN_AGENT message tag...",
+          );
+          const r = await axios.post(
+            `${GRAPH_API}/${pageId}/messages`,
+            {
+              recipient: { id: recipientId },
+              message: payload,
+              messaging_type: "MESSAGE_TAG",
+              tag: "HUMAN_AGENT",
+            },
+            { params: { access_token: accessToken } },
+          );
+          lastData = r.data;
+        } else {
+          throw sendErr;
+        }
       }
     }
 
-    const messageId = sendRes.data.message_id || sendRes.data.id || null;
+    const messageId = lastData?.message_id || lastData?.id || null;
+
+    const storedAttachments = attachment?.url
+      ? [
+          {
+            type: ["image", "video", "audio"].includes(attachment.mediaType)
+              ? attachment.mediaType
+              : "file",
+            url: attachment.url,
+            name: attachment.name || null,
+            mimeType: attachment.mimeType || null,
+          },
+        ]
+      : [];
 
     // Save to database (non-blocking — don't let DB errors fail the response)
     try {
@@ -602,8 +669,9 @@ router.post("/send", protect, async (req, res) => {
         senderId: pageId,
         senderName: "Page",
         recipientId: recipientId,
-        content: message,
-        messageType: "text",
+        content: message || "",
+        messageType: messageTypeFor(storedAttachments),
+        attachments: storedAttachments,
         direction: "outgoing",
         status: "sent",
         externalId: messageId,
@@ -622,10 +690,11 @@ router.post("/send", protect, async (req, res) => {
         platform: "facebook",
         message: {
           id: messageId,
-          text: message,
+          text: message || "",
           from: "You",
           fromId: pageId,
           time: new Date().toISOString(),
+          attachments: storedAttachments,
         },
         conversationId: recipientId,
         recipientId: recipientId,
@@ -654,7 +723,8 @@ router.get("/messages", protect, async (req, res) => {
   try {
     const messages = await Message.find({ platform: "facebook" })
       .sort({ timestamp: -1 })
-      .limit(100);
+      .limit(100)
+      .lean();
     return res.json({ messages });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch messages" });

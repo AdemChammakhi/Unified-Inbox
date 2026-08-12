@@ -1,4 +1,5 @@
 const express = require("express");
+const path = require("path");
 const Imap = require("imap");
 const { simpleParser } = require("mailparser");
 const nodemailer = require("nodemailer");
@@ -7,6 +8,8 @@ const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 const { sanitizeId } = require("../utils/sanitize");
+const { messageTypeFor } = require("../utils/metaPayload");
+const { UPLOAD_DIR } = require("./uploads");
 
 // In-memory cache for email conversations
 let _emailCache = null;
@@ -174,6 +177,8 @@ router.get("/conversations", protect, async (req, res) => {
     });
 
     // Sort messages within each conversation and set lastMessage
+    // DB sync ops collected across all conversations, flushed as one bulkWrite
+    const syncOps = [];
     const conversations = Object.values(convMap).map((conv) => {
       conv.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
       conv.lastMessage = conv.messages[conv.messages.length - 1]
@@ -187,34 +192,40 @@ router.get("/conversations", protect, async (req, res) => {
           }
         : null;
 
-      // Sync messages to DB (non-blocking)
+      // Sync messages to DB (batched below, non-blocking)
       for (const m of conv.messages) {
-        Message.findOneAndUpdate(
-          { externalId: m.id },
-          {
-            $setOnInsert: {
-              platform: "email",
-              conversationId: conv.id,
-              senderId: m.fromId || "unknown",
-              senderName: m.from || "Unknown",
-              recipientId: process.env.EMAIL_USER,
-              content: m.text || "",
-              messageType: "text",
-              direction:
-                m.fromId === process.env.EMAIL_USER ? "outgoing" : "incoming",
-              status: "delivered",
-              externalId: m.id,
-              timestamp: m.time,
+        syncOps.push({
+          updateOne: {
+            filter: { externalId: m.id },
+            update: {
+              $setOnInsert: {
+                platform: "email",
+                conversationId: conv.id,
+                senderId: m.fromId || "unknown",
+                senderName: m.from || "Unknown",
+                recipientId: process.env.EMAIL_USER,
+                content: m.text || "",
+                messageType: "text",
+                direction:
+                  m.fromId === process.env.EMAIL_USER ? "outgoing" : "incoming",
+                status: "delivered",
+                externalId: m.id,
+                timestamp: m.time,
+              },
             },
+            upsert: true,
           },
-          { upsert: true },
-        ).catch((err) =>
-          console.error("Email message sync error (non-fatal):", err.message),
-        );
+        });
       }
 
       return conv;
     });
+
+    if (syncOps.length > 0) {
+      Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
+        console.error("Email message sync error (non-fatal):", err.message),
+      );
+    }
 
     // Sort conversations by latest message
     conversations.sort((a, b) => {
@@ -235,12 +246,16 @@ router.get("/conversations", protect, async (req, res) => {
 });
 
 // POST /api/email/send — Send an email reply
+// Body: { to, subject?, text?, conversationId, attachment? }
+// attachment = { url, path, name, mimeType, mediaType } from POST /api/uploads.
 router.post("/send", protect, async (req, res) => {
   try {
-    const { to, subject, text, conversationId } = req.body;
+    const { to, subject, text, conversationId, attachment } = req.body;
 
-    if (!to || !text) {
-      return res.status(400).json({ message: "to and text are required" });
+    if (!to || (!text?.trim() && !attachment?.path)) {
+      return res
+        .status(400)
+        .json({ message: "to and (text or attachment) are required" });
     }
 
     // --- Conversation Lock Check ---
@@ -308,11 +323,32 @@ router.post("/send", protect, async (req, res) => {
       },
     });
 
+    // Attach the uploaded file directly from disk — no public URL needed
+    // for email. Basename-only join prevents path traversal.
+    const mailAttachments = [];
+    const storedAttachments = [];
+    if (attachment?.path) {
+      const safeName = path.basename(attachment.path);
+      mailAttachments.push({
+        filename: attachment.name || safeName,
+        path: path.join(UPLOAD_DIR, safeName),
+      });
+      storedAttachments.push({
+        type: ["image", "video", "audio"].includes(attachment.mediaType)
+          ? attachment.mediaType
+          : "file",
+        url: attachment.url || null,
+        name: attachment.name || safeName,
+        mimeType: attachment.mimeType || null,
+      });
+    }
+
     const info = await transporter.sendMail({
       from: `"${process.env.EMAIL_FROM_NAME || "Unified Inbox"}" <${process.env.EMAIL_USER}>`,
       to,
       subject: subject || "Message from Unified Inbox",
-      text,
+      text: text || "",
+      attachments: mailAttachments,
     });
 
     // Sync sent email to DB
@@ -322,8 +358,9 @@ router.post("/send", protect, async (req, res) => {
       senderId: process.env.EMAIL_USER,
       senderName: process.env.EMAIL_FROM_NAME || "Unified Inbox",
       recipientId: to,
-      content: text,
-      messageType: "text",
+      content: text || "",
+      messageType: messageTypeFor(storedAttachments),
+      attachments: storedAttachments,
       direction: "outgoing",
       status: "sent",
       externalId: info.messageId,
@@ -338,10 +375,11 @@ router.post("/send", protect, async (req, res) => {
         recipientId: to,
         message: {
           id: info.messageId,
-          text,
+          text: text || "",
           from: process.env.EMAIL_FROM_NAME || "Unified Inbox",
           fromId: process.env.EMAIL_USER,
           time: new Date().toISOString(),
+          attachments: storedAttachments,
         },
       });
     }

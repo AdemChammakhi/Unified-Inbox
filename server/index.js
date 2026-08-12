@@ -75,12 +75,33 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json());
+app.use(
+  express.json({
+    // Keep the raw body so webhook routes can verify Meta's
+    // X-Hub-Signature-256 HMAC against the exact bytes received.
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  }),
+);
 
 const { apiLimiter, webhookLimiter } = require("./middleware/rateLimiter");
 
+// Uploaded media for outbound messages — must be publicly reachable because
+// Meta fetches media by URL (filenames are 128-bit random, so unguessable).
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "uploads"), {
+    maxAge: "7d",
+    immutable: true,
+    index: false,
+    dotfiles: "deny",
+  }),
+);
+
 // Routes with specific rate limiters
 app.use("/api/webhooks", webhookLimiter, require("./routes/webhooks"));
+app.use("/api/uploads", apiLimiter, require("./routes/uploads"));
 
 // Routes with general API rate limiter
 app.use("/api/auth", apiLimiter, require("./routes/auth"));

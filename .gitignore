@@ -33,6 +33,9 @@ dev-server.err.log
 dev-server.out.log
 docs/*
 
+# Uploaded media (outbound message attachments)
+server/uploads/
+
 # Agent architecture
 .tmp/
 credentials.json

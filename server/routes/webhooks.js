@@ -9,6 +9,15 @@ const facebookRoute = require("./facebook");
 const emailRoute = require("./email");
 const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
+const {
+  parseMetaReferral,
+  parseWhatsAppReferral,
+  parseMessageContext,
+  parseMetaAttachments,
+  parseWhatsAppAttachments,
+  whatsAppMessageText,
+  messageTypeFor,
+} = require("../utils/metaPayload");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -128,6 +137,38 @@ async function getSenderName(senderId, platform) {
   }
 }
 
+// ─── Ad-referral buffer ──────────────────────────────────────────────────────
+// Messenger delivers ad referrals for EXISTING threads as a standalone
+// messaging_referrals event, separate from the message the user then types.
+// We cache the parsed context briefly and attach it to the sender's next
+// message so the inbox can show "replied to this ad" on the right bubble.
+const _pendingReferrals = new Map(); // "<platform>:<senderId>" -> { context, at }
+const REFERRAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const REFERRAL_MAX_ENTRIES = 500;
+
+function rememberReferral(platform, senderId, context) {
+  if (!senderId || !context) return;
+  // Bounded: evict the oldest entry when full (Map preserves insertion order)
+  if (_pendingReferrals.size >= REFERRAL_MAX_ENTRIES) {
+    const oldest = _pendingReferrals.keys().next().value;
+    _pendingReferrals.delete(oldest);
+  }
+  _pendingReferrals.set(`${platform}:${senderId}`, {
+    context,
+    at: Date.now(),
+  });
+}
+
+function takeReferral(platform, senderId) {
+  if (!senderId) return null;
+  const key = `${platform}:${senderId}`;
+  const hit = _pendingReferrals.get(key);
+  if (!hit) return null;
+  _pendingReferrals.delete(key);
+  if (Date.now() - hit.at > REFERRAL_TTL_MS) return null;
+  return hit.context;
+}
+
 // Helper: extract messaging events from an Instagram webhook entry.
 // Instagram can deliver events in TWO formats:
 //   1) entry.messaging  — array of {sender, recipient, message, ...}
@@ -150,21 +191,37 @@ function extractInstagramEvents(entry) {
   return events;
 }
 
-// Verify webhook signature from Meta
-const verifySignature = (req, res, buf) => {
+// Verify Meta's X-Hub-Signature-256 HMAC on webhook POSTs.
+// Requires req.rawBody captured by express.json({ verify }) in server/index.js.
+// Enforced only when FACEBOOK_APP_SECRET is configured, so local setups
+// without a secret keep working.
+const verifyMetaSignature = (req, res, next) => {
+  const secret = process.env.FACEBOOK_APP_SECRET;
+  if (!secret) return next();
+
   const signature = req.headers["x-hub-signature-256"];
-  if (!signature || !process.env.FACEBOOK_APP_SECRET) return;
-
-  const expectedSignature =
-    "sha256=" +
-    crypto
-      .createHmac("sha256", process.env.FACEBOOK_APP_SECRET)
-      .update(buf)
-      .digest("hex");
-
-  if (signature !== expectedSignature) {
-    throw new Error("Invalid webhook signature");
+  if (!signature || !req.rawBody) {
+    console.warn(
+      `[Webhook] Rejected ${req.path}: missing signature header or raw body`,
+    );
+    return res.sendStatus(401);
   }
+
+  const expected =
+    "sha256=" +
+    crypto.createHmac("sha256", secret).update(req.rawBody).digest("hex");
+
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (
+    sigBuf.length !== expBuf.length ||
+    !crypto.timingSafeEqual(sigBuf, expBuf)
+  ) {
+    console.warn(`[Webhook] Rejected ${req.path}: invalid signature`);
+    return res.sendStatus(401);
+  }
+
+  return next();
 };
 
 // ============ WHATSAPP WEBHOOKS ============
@@ -183,7 +240,7 @@ router.get("/whatsapp", (req, res) => {
 });
 
 // POST - Receive WhatsApp messages
-router.post("/whatsapp", async (req, res) => {
+router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
   logWebhook("whatsapp", "POST", `object=${req.body?.object}`);
   res.sendStatus(200); // Acknowledge immediately — prevents Meta retries on slow processing
   const body = req.body;
@@ -202,7 +259,6 @@ router.post("/whatsapp", async (req, res) => {
               const waName =
                 contact?.profile?.name || contact?.wa_id || msg.from;
 
-              const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
               const { conversation } = await getOrCreateConversation({
                 platform: "whatsapp",
                 externalSenderId: msg.from,
@@ -212,6 +268,12 @@ router.post("/whatsapp", async (req, res) => {
               const safeMsgId = sanitizeId(msg.id);
               const safeMsgFrom = sanitizeId(msg.from);
               if (!safeMsgId || !safeMsgFrom) continue;
+
+              // Media (image/video/audio/document/sticker) + CTWA ad referral
+              const waAttachments = parseWhatsAppAttachments(msg);
+              const waContext = parseWhatsAppReferral(msg.referral);
+              const waText = whatsAppMessageText(msg);
+
               const newMessage = await Message.findOneAndUpdate(
                 { externalId: safeMsgId },
                 {
@@ -221,8 +283,10 @@ router.post("/whatsapp", async (req, res) => {
                     senderId: msg.from,
                     senderName: waName,
                     recipientId: value.metadata.phone_number_id,
-                    content: msg.text?.body || "",
-                    messageType: msg.type || "text",
+                    content: waText,
+                    messageType: messageTypeFor(waAttachments),
+                    attachments: waAttachments,
+                    context: waContext,
                     direction: "incoming",
                     status: "delivered",
                     externalId: msg.id,
@@ -242,13 +306,16 @@ router.post("/whatsapp", async (req, res) => {
                   platform: "whatsapp",
                   message: {
                     id: msg.id,
-                    text: msg.text?.body || "",
-                    from: msg.from,
+                    text: waText,
+                    from: waName,
                     fromId: msg.from,
                     time: new Date().toISOString(),
+                    attachments: waAttachments,
+                    context: waContext,
                   },
                   conversationId: msg.from,
                   senderId: msg.from,
+                  senderName: waName,
                 });
               }
             }
@@ -296,7 +363,7 @@ router.get("/instagram", (req, res) => {
 });
 
 // POST - Receive Instagram messages
-router.post("/instagram", async (req, res) => {
+router.post("/instagram", verifyMetaSignature, async (req, res) => {
   const body = req.body;
   logWebhook(
     "instagram",
@@ -329,10 +396,28 @@ router.post("/instagram", async (req, res) => {
             continue;
           }
 
+          // Standalone ad referral (arrives before/without a message when a
+          // user taps a Click-to-Instagram ad). Cached so the next message in
+          // this thread can be attributed to the ad.
+          if (event.referral && !event.message) {
+            const standalone = parseMetaReferral(event.referral);
+            if (standalone && senderId) {
+              rememberReferral("instagram", senderId, standalone);
+              console.log(
+                `[Webhook:IG] Ad referral cached for ${senderId}:`,
+                standalone.title || standalone.adId,
+              );
+            }
+          }
+
           if (event.message) {
             const msgText = event.message.text || "";
             const msgMid = event.message.mid;
             const msgTime = new Date().toISOString();
+            const igAttachments = parseMetaAttachments(event.message);
+            const igContext =
+              parseMessageContext(event.message) ||
+              takeReferral("instagram", senderId);
 
             console.log(
               `Instagram incoming msg from ${senderId}: "${msgText.slice(0, 80)}" mid=${msgMid}`,
@@ -351,6 +436,8 @@ router.post("/instagram", async (req, res) => {
                   from: placeholderName,
                   fromId: senderId,
                   time: msgTime,
+                  attachments: igAttachments,
+                  context: igContext,
                 },
                 conversationId: senderId,
                 senderId: senderId,
@@ -372,6 +459,10 @@ router.post("/instagram", async (req, res) => {
 
             // Upsert to DB (avoids duplicate errors if webhook fires twice)
             const safeMsgMid = sanitizeId(msgMid);
+            if (!safeMsgMid) {
+              console.warn("[Webhook:IG] Skipping message with invalid mid");
+              continue;
+            }
             const igSavedMsg = await Message.findOneAndUpdate(
               { externalId: safeMsgMid },
               {
@@ -382,9 +473,9 @@ router.post("/instagram", async (req, res) => {
                   senderName: igDisplayName,
                   recipientId: recipientId,
                   content: msgText,
-                  messageType: event.message.attachments
-                    ? "attachment"
-                    : "text",
+                  messageType: messageTypeFor(igAttachments),
+                  attachments: igAttachments,
+                  context: igContext,
                   direction: "incoming",
                   status: "delivered",
                   externalId: msgMid,
@@ -414,6 +505,8 @@ router.post("/instagram", async (req, res) => {
                     from: igDisplayName,
                     fromId: senderId,
                     time: msgTime,
+                    attachments: igAttachments,
+                    context: igContext,
                   },
                   conversationId: senderId,
                   senderId: senderId,
@@ -460,7 +553,7 @@ router.get("/facebook", (req, res) => {
 });
 
 // POST - Receive Facebook Messenger messages
-router.post("/facebook", async (req, res) => {
+router.post("/facebook", verifyMetaSignature, async (req, res) => {
   logWebhook(
     "facebook",
     "POST",
@@ -493,9 +586,32 @@ router.post("/facebook", async (req, res) => {
           }
           const detectedPlatform = "facebook";
 
+          // Standalone messaging_referrals event: user tapped a
+          // Click-to-Messenger ad on an existing thread. Cache it so the
+          // message that follows gets attributed to the ad.
+          if (event.referral && !event.message) {
+            const standalone = parseMetaReferral(event.referral);
+            if (standalone && senderId) {
+              rememberReferral("facebook", senderId, standalone);
+              console.log(
+                `[Webhook:FB] Ad referral cached for ${senderId}:`,
+                standalone.title || standalone.adId,
+              );
+            }
+          }
+          // Get-Started postbacks from ads carry the referral inside postback
+          if (event.postback?.referral && senderId) {
+            const pbReferral = parseMetaReferral(event.postback.referral);
+            if (pbReferral) rememberReferral("facebook", senderId, pbReferral);
+          }
+
           // Handle incoming messages
           if (event.message) {
             const message = event.message;
+            const fbAttachments = parseMetaAttachments(message);
+            const fbContext =
+              parseMessageContext(message) ||
+              takeReferral("facebook", senderId);
             console.log(
               `New ${detectedPlatform} message from ${senderId}: ${message.text}`,
             );
@@ -526,7 +642,9 @@ router.post("/facebook", async (req, res) => {
                   senderName: fbSenderName,
                   recipientId: recipientId,
                   content: message.text || "",
-                  messageType: message.attachments ? "attachment" : "text",
+                  messageType: messageTypeFor(fbAttachments),
+                  attachments: fbAttachments,
+                  context: fbContext,
                   direction: "incoming",
                   status: "delivered",
                   externalId: message.mid,
@@ -556,6 +674,8 @@ router.post("/facebook", async (req, res) => {
                     from: fbSenderName,
                     fromId: senderId,
                     time: new Date().toISOString(),
+                    attachments: fbAttachments,
+                    context: fbContext,
                   },
                   conversationId: senderId,
                   senderId: senderId,

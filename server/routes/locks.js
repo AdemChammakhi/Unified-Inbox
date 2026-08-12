@@ -11,10 +11,9 @@ router.get("/", protect, async (req, res) => {
     const { platform } = req.query;
     const safePlatform = platform ? sanitizePlatform(platform) : null;
     const filter = safePlatform ? { platform: safePlatform } : {};
-    const locks = await ConversationLock.find(filter).populate(
-      "lockedBy",
-      "firstName lastName email role",
-    );
+    const locks = await ConversationLock.find(filter)
+      .populate("lockedBy", "firstName lastName email role")
+      .lean();
 
     // Build a map: { conversationId: { agentId, agentName, lockedAt } }
     const lockMap = {};
@@ -39,10 +38,9 @@ router.get("/", protect, async (req, res) => {
 // GET /api/locks/all — Admin/Manager: get all locks across all platforms with agent info
 router.get("/all", protect, authorize("admin", "manager"), async (req, res) => {
   try {
-    const locks = await ConversationLock.find({}).populate(
-      "lockedBy",
-      "firstName lastName email role",
-    );
+    const locks = await ConversationLock.find({})
+      .populate("lockedBy", "firstName lastName email role")
+      .lean();
 
     const result = locks.map((lock) => ({
       conversationId: lock.conversationId,

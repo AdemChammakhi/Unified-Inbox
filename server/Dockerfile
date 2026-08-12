@@ -20,8 +20,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY server/ ./server/
 
-# Own everything by non-root user
-RUN chown -R appuser:appgroup /app
+# Create the uploads mount point BEFORE chown so a fresh named volume
+# inherits appuser ownership (otherwise Docker creates it root-owned and
+# every upload fails with EACCES under the non-root user).
+RUN mkdir -p server/uploads && chown -R appuser:appgroup /app
 
 USER appuser
 

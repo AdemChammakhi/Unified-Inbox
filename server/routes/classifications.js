@@ -11,7 +11,9 @@ router.get("/", protect, async (req, res) => {
     const { platform } = req.query;
     const safePlatform = platform ? sanitizePlatform(platform) : null;
     const filter = safePlatform ? { platform: safePlatform } : {};
-    const classifications = await Classification.find(filter);
+    const classifications = await Classification.find(filter)
+      .select("conversationId classification")
+      .lean();
 
     // Return as a map: { conversationId: classification }
     const map = {};

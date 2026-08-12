@@ -34,7 +34,10 @@ USER nginx
 
 EXPOSE 80
 
+# Use 127.0.0.1, not localhost: nginx listens on IPv4 only, while "localhost"
+# can resolve to ::1 first — which makes the check fail with "connection
+# refused" even though the site is serving normally.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget -qO- http://localhost:80/ || exit 1
+  CMD wget -qO- http://127.0.0.1:80/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

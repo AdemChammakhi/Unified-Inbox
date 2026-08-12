@@ -4,3 +4,4 @@ npm-debug.log
 .gitignore
 .env
 client
+server/uploads

@@ -60,6 +60,26 @@ const CLASSIFICATION_COLORS = {
 
 const CHART_COLORS = ["#C8956A", "#6ECC8B", "#7BA3CC", "#E06C6C", "#D4A24C"];
 
+// Labels for the "replying to…" context card (ads, posts, stories)
+const CONTEXT_KIND_LABELS = {
+  ad: "Replied to your ad",
+  post: "Replied to your post",
+  story_reply: "Replied to your story",
+  share: "Shared a post",
+  story_mention: "Mentioned you in a story",
+  referral: "Came from a link",
+};
+
+// WhatsApp media is served through our authenticated proxy; <img>/<video>
+// tags can't send headers, so the JWT rides along as a query param.
+const resolveAttachmentUrl = (rawUrl, token) => {
+  if (!rawUrl) return "";
+  if (rawUrl.startsWith("/api/")) {
+    return `${rawUrl}${rawUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(token || "")}`;
+  }
+  return rawUrl;
+};
+
 const TABS = [
   { key: "chats", label: "Chats", icon: MessageSquare },
   { key: "analytics", label: "Analytics", icon: BarChart3 },
@@ -102,8 +122,10 @@ const ManagerDashboard = () => {
   const [unreadConvIds, setUnreadConvIds] = useState(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [searchDebounced, setSearchDebounced] = useState("");
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const skipAutoScrollRef = useRef(false);
   const audioCtxRef = useRef(null);
   const activeTabRef = useRef(activeTab);
   const selectedConvRef = useRef(selectedConv);
@@ -303,6 +325,8 @@ const ManagerDashboard = () => {
                 from: data.senderName || message.from || "New User",
                 fromId: message.fromId || data.senderId,
                 time: message.time,
+                attachments: message.attachments || [],
+                context: message.context || null,
               },
             ],
             _fromSocket: true,
@@ -343,6 +367,8 @@ const ManagerDashboard = () => {
                 from: message.from,
                 fromId: message.fromId,
                 time: message.time,
+                attachments: message.attachments || [],
+                context: message.context || null,
               };
               const existingIdx = (prev.messages || []).findIndex(
                 (m) => m.id === message.id,
@@ -411,6 +437,8 @@ const ManagerDashboard = () => {
                       from: message.from,
                       fromId: message.fromId,
                       time: message.time,
+                      attachments: message.attachments || [],
+                      context: message.context || null,
                     },
                   ],
                 };
@@ -522,8 +550,13 @@ const ManagerDashboard = () => {
     return () => socket.disconnect();
   }, [user?.token, user?._id]); // eslint-disable-line
 
-  // Scroll to bottom
+  // Scroll to bottom — unless we just prepended older messages, in which
+  // case jumping to the bottom would lose the user's place.
   useEffect(() => {
+    if (skipAutoScrollRef.current) {
+      skipAutoScrollRef.current = false;
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [selectedConv?.messages?.length]);
 
@@ -711,136 +744,53 @@ const ManagerDashboard = () => {
     [user?.token, queryClient],
   );
 
-  // Send reply
-  const sendReply = async () => {
-    if (!replyText.trim() || !selectedConv) return;
-    const messageText = replyText.trim();
-    setReplyText("");
-    const tempId = "temp_" + Date.now();
-    let sendRes;
+  // Load a page of older messages via the `before` cursor on /messages-paged.
+  // (This dashboard is read-only — the old dead sendReply was removed; it
+  // referenced reply state that never existed in this component.)
+  const loadOlderMessages = useCallback(async () => {
+    const conv = selectedConvRef.current;
+    const platform = activeTabRef.current;
+    if (!conv || loadingOlder) return;
+    let endpoint;
+    if (platform === "facebook") endpoint = "/api/facebook/messages-paged";
+    else if (platform === "instagram")
+      endpoint = "/api/instagram/messages-paged";
+    else if (platform === "whatsapp") endpoint = "/api/whatsapp/messages-paged";
+    else return; // email has no paged endpoint
 
+    const oldest = (conv.messages || [])[0];
+    if (!oldest?.time) return;
+
+    setLoadingOlder(true);
     try {
-      setSending(true);
-      const token = user?.token;
-      const recipient = selectedConv.participants?.[0];
-
-      const optimisticMsg = {
-        id: tempId,
-        text: messageText,
-        from: "You",
-        fromId: "page",
-        time: new Date().toISOString(),
-        sending: true,
-      };
-
+      const participantId = conv.participants?.[0]?.id;
+      const res = await axios.get(endpoint, {
+        params: {
+          conversationId: conv.id,
+          participantId,
+          limit: 30,
+          before: oldest.time,
+        },
+        headers: { Authorization: `Bearer ${user?.token}` },
+      });
+      const older = res.data.messages || [];
+      skipAutoScrollRef.current = true; // prepending — keep scroll position
       setSelectedConv((prev) => {
-        if (!prev) return prev;
+        if (!prev || prev.id !== conv.id) return prev;
+        const existingIds = new Set((prev.messages || []).map((m) => m.id));
+        const newOnes = older.filter((m) => !existingIds.has(m.id));
         return {
           ...prev,
-          messages: [...(prev.messages || []), optimisticMsg],
-          lastMessage: {
-            text: messageText,
-            from: "You",
-            time: optimisticMsg.time,
-          },
+          messages: [...newOnes, ...(prev.messages || [])],
+          _hasMoreMessages: res.data.hasMore,
         };
       });
-
-      queryClient.setQueryData(["conversations", activeTab], (prev = []) =>
-        (prev || []).map((c) => {
-          if (c.id === selectedConv.id) {
-            return {
-              ...c,
-              lastMessage: {
-                text: messageText,
-                from: "You",
-                time: optimisticMsg.time,
-              },
-            };
-          }
-          return c;
-        }),
-      );
-
-      if (activeTab === "instagram") {
-        sendRes = await axios.post(
-          "/api/instagram/send",
-          {
-            recipientId: recipient?.id || selectedConv.id,
-            conversationId: selectedConv.id,
-            message: messageText,
-          },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-      } else if (activeTab === "facebook") {
-        sendRes = await axios.post(
-          "/api/facebook/send",
-          {
-            recipientId: recipient?.id || selectedConv.id,
-            conversationId: selectedConv.id,
-            message: messageText,
-          },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-      } else if (activeTab === "whatsapp") {
-        sendRes = await axios.post(
-          "/api/whatsapp/send",
-          {
-            recipientId: recipient?.id || selectedConv.id,
-            conversationId: selectedConv.id,
-            message: messageText,
-          },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-      } else if (activeTab === "email") {
-        sendRes = await axios.post(
-          "/api/email/send",
-          {
-            to: recipient?.email || selectedConv.email,
-            conversationId: selectedConv.id,
-            subject: selectedConv.subject || "Re: Conversation",
-            text: messageText,
-          },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-      }
-
-      fetchChatLocks();
-
-      const confirmedId = sendRes?.data?.messageId || tempId;
-      setSelectedConv((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          messages: (prev.messages || []).map((m) =>
-            m.id === tempId ? { ...m, id: confirmedId, sending: false } : m,
-          ),
-        };
-      });
-
-      setTimeout(() => {
-        queryClient.invalidateQueries({
-          queryKey: ["conversations", activeTab],
-        });
-      }, 8000);
-    } catch (error) {
-      alert(
-        "Failed to send message: " +
-          (error.response?.data?.error ||
-            error.response?.data?.message ||
-            error.message),
-      );
-      setSelectedConv((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          messages: (prev.messages || []).filter((m) => m.id !== tempId),
-        };
-      });
+    } catch (err) {
+      console.error("Failed to load older messages:", err.message);
     } finally {
-      setSending(false);
+      setLoadingOlder(false);
     }
-  };
+  }, [user?.token, loadingOlder]);
 
   /* ════════════════════════════════════════════════════════════════════
      ANALYTICS LOGIC
@@ -984,6 +934,8 @@ const ManagerDashboard = () => {
       .mgr-main-tab:hover { background: var(--bg-hover) !important; }
       .mgr-delete-btn:hover { background: var(--danger, #E06C6C) !important; color: #fff !important; border-color: var(--danger, #E06C6C) !important; }
       .mgr-unlock-btn:hover { background: var(--accent-hover) !important; transform: translateY(-1px); }
+      .mgr-load-older:hover:not(:disabled) { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
+      .mgr-load-older:disabled { opacity: 0.5; cursor: wait; }
     `;
     document.head.appendChild(style);
     return () => {
@@ -1484,7 +1436,7 @@ const ManagerDashboard = () => {
                             }`,
                             animation: isUnread && !isSelected
                               ? "mgrNewMsgPulse 2.5s ease-in-out 3"
-                              : `mgrSlideIn 0.35s ease-out ${index * 0.04}s both`,
+                              : `mgrSlideIn 0.35s ease-out ${Math.min(index * 0.04, 0.4)}s both`,
                           }}
                           onClick={() => handleSelectConv(conv)}
                         >
@@ -1515,6 +1467,8 @@ const ManagerDashboard = () => {
                               <img
                                 src={conv.participants[0].profilePicUrl}
                                 alt={conv.participants[0].name}
+                                loading="lazy"
+                                decoding="async"
                                 style={{
                                   width: "100%",
                                   height: "100%",
@@ -1857,6 +1811,33 @@ const ManagerDashboard = () => {
                         gap: "8px",
                       }}
                     >
+                      {selectedConv._hasMoreMessages &&
+                        activeTab !== "email" && (
+                          <button
+                            className="mgr-load-older"
+                            style={{
+                              alignSelf: "center",
+                              padding: "6px 16px",
+                              borderRadius: "8px",
+                              border: "1px solid var(--border-primary)",
+                              backgroundColor: "var(--bg-card)",
+                              color: "var(--text-faint)",
+                              cursor: "pointer",
+                              fontSize: "11px",
+                              fontWeight: 600,
+                              fontFamily: "'Hanken Grotesk', sans-serif",
+                              transition: "all 0.2s ease",
+                              flexShrink: 0,
+                              marginBottom: "4px",
+                            }}
+                            onClick={loadOlderMessages}
+                            disabled={loadingOlder}
+                          >
+                            {loadingOlder
+                              ? "Loading…"
+                              : "↑ Load older messages"}
+                          </button>
+                        )}
                       {selectedConv.messages?.map((msg, idx) => {
                         const isEmail = activeTab === "email";
                         const otherParticipant = selectedConv.participants?.[0];
@@ -1911,7 +1892,7 @@ const ManagerDashboard = () => {
                                   ? "var(--msg-received-color)"
                                   : "var(--bg-primary)",
                               opacity: msg.sending ? 0.5 : 1,
-                              animation: `mgrFadeUp 0.3s ease-out ${idx * 0.02}s both`,
+                              animation: `mgrFadeUp 0.3s ease-out ${Math.min(idx * 0.02, 0.3)}s both`,
                             }}
                           >
                             <small
@@ -1927,6 +1908,94 @@ const ManagerDashboard = () => {
                             >
                               {msg.from}
                             </small>
+                            {/* Ad / post / story the customer is replying to */}
+                            {msg.context && (
+                              <a
+                                href={msg.context.url || undefined}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "10px",
+                                  padding: "8px 10px",
+                                  margin: "4px 0 8px",
+                                  borderRadius: "10px",
+                                  backgroundColor: "rgba(0,0,0,0.12)",
+                                  border:
+                                    "1px solid rgba(127,127,127,0.3)",
+                                  textDecoration: "none",
+                                  color: "inherit",
+                                  maxWidth: "100%",
+                                  cursor: msg.context.url
+                                    ? "pointer"
+                                    : "default",
+                                }}
+                                onClick={(e) => {
+                                  if (!msg.context.url) e.preventDefault();
+                                }}
+                              >
+                                {msg.context.photoUrl && (
+                                  <img
+                                    src={msg.context.photoUrl}
+                                    alt=""
+                                    loading="lazy"
+                                    style={{
+                                      width: 44,
+                                      height: 44,
+                                      borderRadius: 8,
+                                      objectFit: "cover",
+                                      flexShrink: 0,
+                                    }}
+                                    onError={(e) => {
+                                      e.target.style.display = "none";
+                                    }}
+                                  />
+                                )}
+                                <div style={{ minWidth: 0 }}>
+                                  <div
+                                    style={{
+                                      fontSize: 9,
+                                      fontWeight: 700,
+                                      textTransform: "uppercase",
+                                      letterSpacing: "0.8px",
+                                      opacity: 0.7,
+                                      marginBottom: 2,
+                                    }}
+                                  >
+                                    {CONTEXT_KIND_LABELS[
+                                      msg.context.kind
+                                    ] || "In reply to"}
+                                  </div>
+                                  {msg.context.title && (
+                                    <div
+                                      style={{
+                                        fontSize: 12,
+                                        fontWeight: 700,
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      {msg.context.title}
+                                    </div>
+                                  )}
+                                  {msg.context.body && (
+                                    <div
+                                      style={{
+                                        fontSize: 11,
+                                        opacity: 0.8,
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      {msg.context.body}
+                                    </div>
+                                  )}
+                                </div>
+                              </a>
+                            )}
                             {isEmail && msg.subject && (
                               <p
                                 style={{
@@ -1972,13 +2041,20 @@ const ManagerDashboard = () => {
                                       const mimeType =
                                         att.mime_type ||
                                         att.contentType ||
+                                        att.mimeType ||
                                         "";
+                                      const attType = att.type || "";
                                       const imageUrl =
-                                        att.image_data?.url ||
-                                        att.url ||
-                                        att.file_url ||
-                                        "";
+                                        resolveAttachmentUrl(
+                                          att.image_data?.url ||
+                                            att.url ||
+                                            att.file_url ||
+                                            "",
+                                          user?.token,
+                                        );
                                       if (
+                                        attType === "image" ||
+                                        attType === "sticker" ||
                                         mimeType.startsWith(
                                           "image",
                                         ) ||
@@ -2006,6 +2082,7 @@ const ManagerDashboard = () => {
                                         );
                                       }
                                       if (
+                                        attType === "video" ||
                                         mimeType.startsWith(
                                           "video",
                                         ) ||
@@ -2014,12 +2091,13 @@ const ManagerDashboard = () => {
                                         return (
                                           <video
                                             key={attIdx}
-                                            src={
+                                            src={resolveAttachmentUrl(
                                               att.video_data
                                                 ?.url ||
-                                              att.url ||
-                                              ""
-                                            }
+                                                att.url ||
+                                                "",
+                                              user?.token,
+                                            )}
                                             controls
                                             style={{
                                               maxWidth: "100%",
@@ -2031,6 +2109,7 @@ const ManagerDashboard = () => {
                                         );
                                       }
                                       if (
+                                        attType === "audio" ||
                                         mimeType.startsWith(
                                           "audio",
                                         )
@@ -2038,11 +2117,12 @@ const ManagerDashboard = () => {
                                         return (
                                           <audio
                                             key={attIdx}
-                                            src={
+                                            src={resolveAttachmentUrl(
                                               att.url ||
-                                              att.file_url ||
-                                              ""
-                                            }
+                                                att.file_url ||
+                                                "",
+                                              user?.token,
+                                            )}
                                             controls
                                             style={{
                                               marginTop: 6,
@@ -2055,9 +2135,12 @@ const ManagerDashboard = () => {
                                         <a
                                           key={attIdx}
                                           href={
-                                            att.url ||
-                                            att.file_url ||
-                                            "#"
+                                            resolveAttachmentUrl(
+                                              att.url ||
+                                                att.file_url ||
+                                                "",
+                                              user?.token,
+                                            ) || "#"
                                           }
                                           target="_blank"
                                           rel="noopener noreferrer"

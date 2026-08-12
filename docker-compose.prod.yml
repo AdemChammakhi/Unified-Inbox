@@ -14,6 +14,9 @@ networks:
 
 volumes:
   uptime-kuma:
+  # Outbound message media (server/uploads) — must survive container
+  # recreation on deploy, or attachment URLs in old messages break.
+  uploads-data:
 
 services:
   # ── Backend — Express API + Socket.IO ──────────────────────────────────────
@@ -27,6 +30,8 @@ services:
       - NODE_ENV=production
     ports:
       - "127.0.0.1:5000:5000"   # Only localhost — host Nginx proxies external traffic
+    volumes:
+      - uploads-data:/app/server/uploads
     networks:
       unified-inbox:
         aliases:

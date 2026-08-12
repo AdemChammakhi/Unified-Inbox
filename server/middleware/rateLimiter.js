@@ -2,11 +2,14 @@ const rateLimit = require("express-rate-limit");
 
 /**
  * General API rate limiter
- * Limits each IP to 500 requests per 15 minutes.
+ * Limits each IP to 1000 requests per 15 minutes.
+ * Sized for multiple agents sharing one office/NAT IP: each open inbox tab
+ * polls conversations + classifications + locks (~6 req/min), so 500 was
+ * tight for 3+ concurrent agents.
  */
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500,
+  max: 1000,
   message: { message: "Too many requests from this IP, please try again after 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,

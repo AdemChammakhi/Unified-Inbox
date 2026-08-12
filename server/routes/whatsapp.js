@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
+const jwt = require("jsonwebtoken");
 const { protect } = require("../middleware/auth");
 const {
   updateConversationAfterMessage,
@@ -8,11 +9,14 @@ const {
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { sanitizeId } = require("../utils/sanitize");
+const { messageTypeFor } = require("../utils/metaPayload");
 
+// Body: { recipientId, message?, conversationId, attachment? }
+// attachment = { url, name, mimeType, mediaType } from POST /api/uploads.
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message, conversationId } = req.body;
-    console.log("[WA:Send] START", { recipientId, conversationId, messageLen: message?.length });
+    const { recipientId, message, conversationId, attachment } = req.body;
+    console.log("[WA:Send] START", { recipientId, conversationId, messageLen: message?.length, attachment: attachment?.mediaType || "none" });
     const accessToken = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
     const phoneNumberId = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
 
@@ -21,6 +25,11 @@ router.post("/send", protect, async (req, res) => {
         message:
           "WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID missing in .env",
       });
+    }
+    if (!message?.trim() && !attachment?.url) {
+      return res
+        .status(400)
+        .json({ message: "message or attachment is required" });
     }
 
     // --- Conversation Lock Check ---
@@ -46,6 +55,19 @@ router.post("/send", protect, async (req, res) => {
       });
     }
 
+    const storedAttachments = attachment?.url
+      ? [
+          {
+            type: ["image", "video", "audio"].includes(attachment.mediaType)
+              ? attachment.mediaType
+              : "file",
+            url: attachment.url,
+            name: attachment.name || null,
+            mimeType: attachment.mimeType || null,
+          },
+        ]
+      : [];
+
     // --- Save the outgoing message to DB ---
     console.log("[WA:Send] Step 2 - Saving message to DB");
     const newMessage = await Message.create({
@@ -55,8 +77,9 @@ router.post("/send", protect, async (req, res) => {
       recipientId: recipientId,
       conversationId: lockConvId,
       direction: "outgoing",
-      messageType: "text",
-      content: message,
+      messageType: messageTypeFor(storedAttachments),
+      attachments: storedAttachments,
+      content: message || "",
       sentBy: req.user._id,
       status: "sent",
     });
@@ -67,27 +90,57 @@ router.post("/send", protect, async (req, res) => {
       (process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0").trim();
     const fullUrl = `${apiUrl}/${phoneNumberId}/messages`;
     console.log("[WA:Send] Step 3 - Calling WhatsApp API to:", recipientId);
-    let sendRes;
-    try {
-      sendRes = await axios.post(
-        fullUrl,
-        {
+
+    // Build payloads: media (link-based) carries the text as caption where
+    // supported; audio has no caption, so text goes as a separate message.
+    const payloads = [];
+    if (attachment?.url) {
+      const waType =
+        attachment.mediaType === "file"
+          ? "document"
+          : attachment.mediaType || "document";
+      const media = { link: attachment.url };
+      if (waType === "document" && attachment.name) {
+        media.filename = attachment.name;
+      }
+      if (message?.trim() && waType !== "audio") {
+        media.caption = message;
+      } else if (message?.trim() && waType === "audio") {
+        payloads.push({
           messaging_product: "whatsapp",
           recipient_type: "individual",
           to: recipientId,
           type: "text",
-          text: {
-            preview_url: false,
-            body: message,
-          },
-        },
-        {
+          text: { preview_url: false, body: message },
+        });
+      }
+      payloads.push({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: recipientId,
+        type: waType,
+        [waType]: media,
+      });
+    } else {
+      payloads.push({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: recipientId,
+        type: "text",
+        text: { preview_url: false, body: message },
+      });
+    }
+
+    let sendRes;
+    try {
+      for (const payload of payloads) {
+        sendRes = await axios.post(fullUrl, payload, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
           },
-        },
-      );
+        });
+      }
       console.log("[WA:Send] Step 3 - API success:", sendRes.data);
     } catch (apiErr) {
       console.error(
@@ -121,6 +174,7 @@ router.post("/send", protect, async (req, res) => {
           fromId: newMessage.senderId,
           time: newMessage.timestamp || newMessage.createdAt,
           direction: newMessage.direction,
+          attachments: storedAttachments,
         },
       });
     }
@@ -166,11 +220,15 @@ router.post("/send", protect, async (req, res) => {
 });
 
 // GET /api/whatsapp/conversations - Fetch WhatsApp conversations from database
+// Supports ?slim=1: returns the conversation list without embedded messages —
+// the frontend lazy-loads them from /messages-paged on selection anyway.
 router.get("/conversations", protect, async (req, res) => {
   try {
+    const slim = req.query.slim === "1" || req.query.slim === "true";
     const dbMessages = await Message.find({ platform: "whatsapp" })
       .sort({ timestamp: -1 })
-      .limit(500);
+      .limit(500)
+      .lean();
 
     const convMap = {};
     for (const m of dbMessages) {
@@ -196,7 +254,7 @@ router.get("/conversations", protect, async (req, res) => {
         time: m.timestamp || m.createdAt,
         direction: m.direction,
       };
-      conv.messages.unshift(msg);
+      if (!slim) conv.messages.unshift(msg);
       if (
         !conv.lastMessage ||
         new Date(msg.time) > new Date(conv.lastMessage.time)
@@ -216,6 +274,69 @@ router.get("/conversations", protect, async (req, res) => {
   } catch (error) {
     console.error("Failed to fetch WhatsApp conversations:", error);
     return res.status(500).json({ message: "Failed to fetch WhatsApp conversations", error: error.message });
+  }
+});
+
+// GET /api/whatsapp/media/:mediaId — stream WhatsApp media to the browser.
+// Meta's media URLs require the access token and expire after ~5 minutes, so
+// we fetch a fresh URL per request and pipe the binary through.
+// Auth: standard Bearer header OR ?token= query param — <img>/<video> tags
+// cannot send Authorization headers.
+router.get("/media/:mediaId", async (req, res) => {
+  try {
+    let token = null;
+    const header = req.headers.authorization;
+    if (header && header.startsWith("Bearer ")) token = header.split(" ")[1];
+    if (!token && typeof req.query.token === "string") token = req.query.token;
+    if (!token || !process.env.JWT_SECRET) return res.sendStatus(401);
+    try {
+      jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
+      return res.sendStatus(401);
+    }
+
+    const mediaId = sanitizeId(req.params.mediaId);
+    if (!mediaId || !/^[\w.-]+$/.test(mediaId)) {
+      return res.status(400).json({ message: "Invalid media id" });
+    }
+
+    const accessToken = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+    if (!accessToken) {
+      return res.status(400).json({ message: "WHATSAPP_ACCESS_TOKEN missing" });
+    }
+
+    const apiUrl = (
+      process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0"
+    ).trim();
+
+    // Step 1: resolve the media ID to a short-lived CDN URL
+    const metaRes = await axios.get(
+      `${apiUrl}/${encodeURIComponent(mediaId)}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 8000,
+      },
+    );
+    const mediaUrl = metaRes.data?.url;
+    if (!mediaUrl) return res.status(404).json({ message: "Media not found" });
+
+    // Step 2: stream the binary (also requires the token)
+    const upstream = await axios.get(mediaUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      responseType: "stream",
+      timeout: 30000,
+    });
+    if (metaRes.data?.mime_type) {
+      res.setHeader("Content-Type", metaRes.data.mime_type);
+    }
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    upstream.data.pipe(res);
+  } catch (err) {
+    console.error(
+      "WA media proxy error:",
+      err.response?.status || err.message,
+    );
+    return res.status(502).json({ message: "Failed to fetch media" });
   }
 });
 
@@ -253,6 +374,8 @@ router.get("/messages-paged", protect, async (req, res) => {
         direction: m.direction,
         messageType: m.messageType,
         attachmentUrl: m.attachmentUrl || null,
+        attachments: m.attachments || [],
+        context: m.context || null,
       })),
       hasMore: messages.length === pageLimit,
     });

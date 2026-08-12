@@ -5,6 +5,10 @@ const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
+const {
+  parseGraphAttachments,
+  messageTypeFor,
+} = require("../utils/metaPayload");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -59,10 +63,12 @@ async function resolveIgAccountId(accessToken, pageId) {
   return _resolvedIgAccountId;
 }
 
-// In-memory cache — avoids hitting the slow Graph API on every poll
+// In-memory cache — avoids hitting the slow Graph API on every poll.
+// 15 s is safe: webhooks and /send bust the cache via clearIgCache(), so
+// real-time updates still surface immediately; this only throttles polling.
 let _igCache = null;
 let _igCacheTime = 0;
-const IG_CACHE_TTL = 5000; // 5 seconds
+const IG_CACHE_TTL = 15000; // 15 seconds
 // Separate slim-mode cache (conversation list without embedded messages)
 let _igCacheSlim = null;
 let _igCacheSlimTime = 0;
@@ -146,6 +152,9 @@ async function fetchInstagramConversations(slim = false) {
   }
 
   // --- Pass 1: build formatted list from Graph API response ---
+  // Collected across all conversations and flushed as ONE bulkWrite below
+  // instead of firing an individual findOneAndUpdate per message.
+  const syncOps = [];
   const formatted = conversations.map((conv) => {
     const participants = conv.participants?.data || [];
     const messages = conv.messages?.data || [];
@@ -168,31 +177,34 @@ async function fetchInstagramConversations(slim = false) {
     // Skip DB sync in slim mode — we only need the lastMessage preview
     if (!slim) {
       for (const m of messages) {
+        if (!m.id) continue;
         const direction =
           m.from?.id === igAccountId || m.from?.id === pageId
             ? "outgoing"
             : "incoming";
-        Message.findOneAndUpdate(
-          { externalId: m.id },
-          {
-            $setOnInsert: {
-              platform: "instagram",
-              conversationId: conv.id,
-              senderId: m.from?.id || "unknown",
-              senderName: resolveFromName(m.from) || "Unknown",
-              recipientId: m.to?.data?.[0]?.id || igAccountId,
-              content: m.message || "",
-              messageType: m.attachments ? "attachment" : "text",
-              direction,
-              status: direction === "outgoing" ? "sent" : "delivered",
-              externalId: m.id,
-              timestamp: m.created_time,
+        const graphAtts = parseGraphAttachments(m.attachments);
+        syncOps.push({
+          updateOne: {
+            filter: { externalId: m.id },
+            update: {
+              $setOnInsert: {
+                platform: "instagram",
+                conversationId: conv.id,
+                senderId: m.from?.id || "unknown",
+                senderName: resolveFromName(m.from) || "Unknown",
+                recipientId: m.to?.data?.[0]?.id || igAccountId,
+                content: m.message || "",
+                messageType: messageTypeFor(graphAtts),
+                attachments: graphAtts,
+                direction,
+                status: direction === "outgoing" ? "sent" : "delivered",
+                externalId: m.id,
+                timestamp: m.created_time,
+              },
             },
+            upsert: true,
           },
-          { upsert: true },
-        ).catch((err) =>
-          console.error("IG message sync error (non-fatal):", err.message),
-        );
+        });
       }
     }
 
@@ -225,6 +237,13 @@ async function fetchInstagramConversations(slim = false) {
       _nameMap: nameMap, // carry forward for resolution pass
     };
   });
+
+  // Flush the DB sync as a single unordered bulk upsert (non-blocking)
+  if (syncOps.length > 0) {
+    Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
+      console.error("IG message sync error (non-fatal):", err.message),
+    );
+  }
 
   // --- Pass 2: supplementary lookup for participants still without a name ---
   // The Graph API sometimes omits username/name in the participants sub-fields.
@@ -284,7 +303,8 @@ async function fetchInstagramConversations(slim = false) {
 
     const recentDbMsgs = await Message.find({ platform: "instagram" })
       .sort({ createdAt: -1 })
-      .limit(500);
+      .limit(500)
+      .lean();
 
     // Build a map of key (conversationId/senderId) -> latest message in DB
     const dbLatestMap = {};
@@ -468,7 +488,9 @@ router.get("/conversations", protect, async (req, res) => {
           platform: "instagram",
           direction: "incoming",
           $or: [{ senderName: null }, { senderName: "Unknown" }],
-        }).select("_id senderId");
+        })
+          .select("_id senderId")
+          .lean();
         if (badMsgs.length === 0) return;
         const accessToken =
           process.env.INSTAGRAM_ACCESS_TOKEN ||
@@ -524,7 +546,8 @@ router.get("/conversations", protect, async (req, res) => {
     try {
       const dbMessages = await Message.find({ platform: "instagram" })
         .sort({ timestamp: -1 })
-        .limit(500);
+        .limit(500)
+        .lean();
 
       const convMap = {};
       for (const m of dbMessages) {
@@ -612,9 +635,11 @@ router.get("/messages-paged", protect, async (req, res) => {
           });
           const msgs = convRes.data.messages?.data || [];
 
-          // Wait for all DB insertions to finish so the following find() gets them
-          await Promise.all(
-            msgs.map(async (m) => {
+          // One awaited bulk upsert so the following find() sees the rows,
+          // without 30 parallel round-trips to MongoDB.
+          const pageSyncOps = msgs
+            .filter((m) => m.id)
+            .map((m) => {
               const isOutgoing =
                 m.from?.id &&
                 (m.from.id === accountId ||
@@ -624,28 +649,33 @@ router.get("/messages-paged", protect, async (req, res) => {
               const senderName = isOutgoing
                 ? "Page"
                 : m.from?.username || m.from?.name || "Unknown";
-
-              await Message.findOneAndUpdate(
-                { externalId: m.id },
-                {
-                  $setOnInsert: {
-                    platform: "instagram",
-                    conversationId: conversationId,
-                    senderId: m.from?.id || "unknown",
-                    senderName,
-                    recipientId: m.to?.data?.[0]?.id || accountId || pageId,
-                    content: m.message || "",
-                    messageType: m.attachments ? "attachment" : "text",
-                    direction,
-                    status: direction === "outgoing" ? "sent" : "delivered",
-                    externalId: m.id,
-                    timestamp: m.created_time,
+              const graphAtts = parseGraphAttachments(m.attachments);
+              return {
+                updateOne: {
+                  filter: { externalId: m.id },
+                  update: {
+                    $setOnInsert: {
+                      platform: "instagram",
+                      conversationId: conversationId,
+                      senderId: m.from?.id || "unknown",
+                      senderName,
+                      recipientId: m.to?.data?.[0]?.id || accountId || pageId,
+                      content: m.message || "",
+                      messageType: messageTypeFor(graphAtts),
+                      attachments: graphAtts,
+                      direction,
+                      status: direction === "outgoing" ? "sent" : "delivered",
+                      externalId: m.id,
+                      timestamp: m.created_time,
+                    },
                   },
+                  upsert: true,
                 },
-                { upsert: true },
-              );
-            }),
-          );
+              };
+            });
+          if (pageSyncOps.length > 0) {
+            await Message.bulkWrite(pageSyncOps, { ordered: false });
+          }
         }
       } catch (syncErr) {
         console.error("Optional IG conversation sync failed:", syncErr.message);
@@ -709,6 +739,8 @@ router.get("/messages-paged", protect, async (req, res) => {
           direction: isOutgoing ? "outgoing" : "incoming",
           messageType: m.messageType,
           attachmentUrl: m.attachmentUrl || null,
+          attachments: m.attachments || [],
+          context: m.context || null,
         };
       }),
       hasMore: messages.length === pageLimit,
@@ -720,9 +752,27 @@ router.get("/messages-paged", protect, async (req, res) => {
 });
 
 // POST /api/instagram/send - Send an Instagram message
+// Body: { recipientId, message?, conversationId, attachment? }
+// attachment = { url, name, mimeType, mediaType } from POST /api/uploads.
+// Instagram only supports image / audio / video media (8MB img, 25MB a/v).
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message, conversationId } = req.body;
+    const { recipientId, message, conversationId, attachment } = req.body;
+
+    if (!message?.trim() && !attachment?.url) {
+      return res
+        .status(400)
+        .json({ message: "message or attachment is required" });
+    }
+    if (
+      attachment?.url &&
+      !["image", "audio", "video"].includes(attachment.mediaType)
+    ) {
+      return res.status(400).json({
+        message:
+          "Instagram only supports image, audio, and video attachments — send documents via another channel.",
+      });
+    }
     // Fall back to the Facebook Page Access Token — it works for Instagram messaging
     // when the Instagram Business account is linked to the Facebook Page
     const accessToken =
@@ -796,41 +846,65 @@ router.post("/send", protect, async (req, res) => {
       pageId,
     );
 
-    // Send message via Page messages endpoint
-    // Try RESPONSE first (within 24h window), fall back to HUMAN_AGENT tag (7-day window)
-    let sendRes;
-    try {
-      sendRes = await axios.post(
-        `${GRAPH_API}/${pageId}/messages`,
-        {
-          recipient: { id: recipientId },
-          message: { text: message },
-          messaging_type: "RESPONSE",
+    // Build message objects: optional text, then optional media.
+    // Text and attachments must be separate messages on the Send API.
+    const messagePayloads = [];
+    if (message?.trim()) messagePayloads.push({ text: message });
+    if (attachment?.url) {
+      messagePayloads.push({
+        attachment: {
+          type: attachment.mediaType,
+          payload: { url: attachment.url },
         },
-        {
-          params: { access_token: accessToken },
-        },
-      );
-    } catch (firstErr) {
-      console.log(
-        "Instagram RESPONSE send failed, trying HUMAN_AGENT:",
-        firstErr.response?.data?.error?.message || firstErr.message,
-      );
-      sendRes = await axios.post(
-        `${GRAPH_API}/${pageId}/messages`,
-        {
-          recipient: { id: recipientId },
-          message: { text: message },
-          tag: "HUMAN_AGENT",
-          messaging_type: "MESSAGE_TAG",
-        },
-        {
-          params: { access_token: accessToken },
-        },
-      );
+      });
     }
 
-    const messageId = sendRes.data.message_id || sendRes.data.id || null;
+    // Send via Page messages endpoint
+    // Try RESPONSE first (within 24h window), fall back to HUMAN_AGENT tag (7-day window)
+    let lastData = null;
+    for (const payload of messagePayloads) {
+      try {
+        const r = await axios.post(
+          `${GRAPH_API}/${pageId}/messages`,
+          {
+            recipient: { id: recipientId },
+            message: payload,
+            messaging_type: "RESPONSE",
+          },
+          { params: { access_token: accessToken } },
+        );
+        lastData = r.data;
+      } catch (firstErr) {
+        console.log(
+          "Instagram RESPONSE send failed, trying HUMAN_AGENT:",
+          firstErr.response?.data?.error?.message || firstErr.message,
+        );
+        const r = await axios.post(
+          `${GRAPH_API}/${pageId}/messages`,
+          {
+            recipient: { id: recipientId },
+            message: payload,
+            tag: "HUMAN_AGENT",
+            messaging_type: "MESSAGE_TAG",
+          },
+          { params: { access_token: accessToken } },
+        );
+        lastData = r.data;
+      }
+    }
+
+    const messageId = lastData?.message_id || lastData?.id || null;
+
+    const storedAttachments = attachment?.url
+      ? [
+          {
+            type: attachment.mediaType,
+            url: attachment.url,
+            name: attachment.name || null,
+            mimeType: attachment.mimeType || null,
+          },
+        ]
+      : [];
 
     // Save to database (non-blocking — don't let DB errors fail the response)
     try {
@@ -840,8 +914,9 @@ router.post("/send", protect, async (req, res) => {
         senderId: pageId,
         senderName: "Page",
         recipientId: recipientId,
-        content: message,
-        messageType: "text",
+        content: message || "",
+        messageType: messageTypeFor(storedAttachments),
+        attachments: storedAttachments,
         direction: "outgoing",
         status: "sent",
         externalId: messageId,
@@ -860,10 +935,11 @@ router.post("/send", protect, async (req, res) => {
         platform: "instagram",
         message: {
           id: messageId,
-          text: message,
+          text: message || "",
           from: "You",
           fromId: pageId,
           time: new Date().toISOString(),
+          attachments: storedAttachments,
         },
         conversationId: recipientId,
         recipientId: recipientId,
@@ -906,10 +982,12 @@ router.post("/send", protect, async (req, res) => {
       typeof apiError?.message === "string" &&
       apiError.message.includes("does not exist")
     ) {
+      const usedAccountId =
+        process.env.INSTAGRAM_ACCOUNT_ID || _resolvedIgAccountId || "(unknown)";
       _resolvedIgAccountId = null;
       return res.status(400).json({
         message:
-          `Instagram Business Account ID may be misconfigured (used: ${igAccountId}). ` +
+          `Instagram Business Account ID may be misconfigured (used: ${usedAccountId}). ` +
           "The cached ID has been cleared and will be re-discovered on next send. " +
           "Verify INSTAGRAM_ACCOUNT_ID in .env matches the IG Professional Account linked to your Facebook Page.",
         error: apiError?.message,
@@ -973,7 +1051,8 @@ router.get("/messages", protect, async (req, res) => {
   try {
     const messages = await Message.find({ platform: "instagram" })
       .sort({ timestamp: -1 })
-      .limit(100);
+      .limit(100)
+      .lean();
     return res.json({ messages });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch messages" });

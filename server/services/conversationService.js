@@ -10,7 +10,22 @@
 
 "use strict";
 
+const mongoose = require("mongoose");
 const { Channel, Contact, Conversation } = require("../models");
+
+/**
+ * Map a Message.messageType value onto the lastMessage.type enum
+ * (which has no "attachment"/"other" members).
+ */
+const LAST_MESSAGE_TYPE_MAP = {
+  attachment: "document",
+  other: "unsupported",
+};
+
+function toLastMessageType(type) {
+  const t = type || "text";
+  return LAST_MESSAGE_TYPE_MAP[t] || t;
+}
 
 /**
  * Map from platform name to the env var holding the platform account ID.
@@ -131,7 +146,6 @@ async function updateConversationAfterMessage(conversationId, message) {
   const normalizedDirection = isInbound ? "inbound" : "outbound";
 
   const query = {};
-  const mongoose = require("mongoose");
   if (mongoose.Types.ObjectId.isValid(conversationId)) {
     query._id = conversationId;
   } else {
@@ -146,7 +160,7 @@ async function updateConversationAfterMessage(conversationId, message) {
         lastMessage: {
           messageId: message._id,
           content: (message.content || message.text || "").substring(0, 200),
-          type: message.messageType || message.type || "text",
+          type: toLastMessageType(message.messageType || message.type),
           direction: normalizedDirection,
           senderName: message.senderName || message.sender?.name || "",
           sentAt: message.timestamp || message.createdAt || new Date(),

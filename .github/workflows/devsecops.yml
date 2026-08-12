@@ -310,6 +310,12 @@ jobs:
       name: production   # ← requires manual approval in GitHub settings
       url: https://${{ vars.PRODUCTION_DOMAIN }}
     steps:
+      # NOTE: the compose file on the VPS is intentionally NOT synced from this
+      # repo. /opt/unified-inbox/docker-compose.prod.yml is the source of truth
+      # there — it additionally runs mongodb + mongo-express and reads .env
+      # (not .env.production). Copying this repo's version over it would make
+      # `up -d --remove-orphans` delete the production database container.
+      # Compose changes must be applied manually on the VPS.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:

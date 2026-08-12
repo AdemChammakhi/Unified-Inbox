@@ -8,7 +8,7 @@ const conversationLockSchema = new mongoose.Schema(
     },
     platform: {
       type: String,
-      enum: ["instagram", "facebook", "whatsapp", "messenger", "email"],
+      enum: ["instagram", "facebook", "whatsapp", "messenger", "email", "tiktok"],
       required: true,
     },
     lockedBy: {
