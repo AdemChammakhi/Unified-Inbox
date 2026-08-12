@@ -27,11 +27,11 @@ const CLASSIFICATION_LABELS = {
 };
 
 const CLASSIFICATION_COLORS = {
-  non_classifie: "#6B6780",
-  cible: "#6ECC8B",
-  hors_cible: "#E06C6C",
-  suivi: "#7BA3CC",
-  priorite: "#D4A24C",
+  non_classifie: "#6E7A96",
+  cible: "#5FBF8A",
+  hors_cible: "#E2685F",
+  suivi: "#5B9BD9",
+  priorite: "#E3A63C",
 };
 
 // Labels for the "replying to…" context card (ads, posts, stories)
@@ -282,6 +282,7 @@ const Inbox = () => {
               {
                 id: data.senderId,
                 name: data.senderName || message.from || "New User",
+                profilePicUrl: data.senderAvatar || null,
               },
             ],
             lastMessage: {
@@ -840,14 +841,14 @@ const Inbox = () => {
       .inbox-email-render img { max-width: 100% !important; height: auto !important; }
       .inbox-email-render a { color: var(--accent) !important; }
       .inbox-email-render * { max-width: 100% !important; }
-      .inbox-delete-btn:hover { background: var(--danger, #E06C6C) !important; color: #fff !important; border-color: var(--danger, #E06C6C) !important; }
+      .inbox-delete-btn:hover { background: var(--danger, #E2685F) !important; color: #fff !important; border-color: var(--danger, #E2685F) !important; }
       .inbox-load-older:hover:not(:disabled) { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
       .inbox-load-older:disabled { opacity: 0.5; cursor: wait; }
       .inbox-attach-btn:hover:not(:disabled) { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
       .inbox-attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
       @keyframes inboxNewMsgPulse {
-        0%, 100% { background-color: rgba(110, 204, 139, 0.04); }
-        50% { background-color: rgba(110, 204, 139, 0.14); }
+        0%, 100% { background-color: rgba(95, 191, 138, 0.04); }
+        50% { background-color: rgba(95, 191, 138, 0.14); }
       }
       .inbox-conv-unread .inbox-unread-dot { display: inline-block !important; }
     `;
@@ -1064,11 +1065,11 @@ const Inbox = () => {
                 style={{
                   ...styles.statusDot,
                   backgroundColor:
-                    connectionStatus === "connected" ? "#6ECC8B" : "#E06C6C",
+                    connectionStatus === "connected" ? "#5FBF8A" : "#E2685F",
                   boxShadow:
                     connectionStatus === "connected"
-                      ? "0 0 8px rgba(110,204,139,0.6)"
-                      : "0 0 8px rgba(224,108,108,0.6)",
+                      ? "0 0 8px rgba(95,191,138,0.6)"
+                      : "0 0 8px rgba(226,104,95,0.6)",
                 }}
               />
               {connectionStatus === "connected" ? "LIVE" : "OFFLINE"}
@@ -1228,7 +1229,7 @@ const Inbox = () => {
                   {fetchError ? (
                     <span
                       style={{
-                        color: "#E06C6C",
+                        color: "#E2685F",
                         fontSize: 12,
                         textAlign: "center",
                         padding: "0 8px",
@@ -1254,11 +1255,11 @@ const Inbox = () => {
                         backgroundColor: isSelected
                           ? "var(--bg-hover)"
                           : isUnread
-                            ? "rgba(110, 204, 139, 0.07)"
+                            ? "rgba(95, 191, 138, 0.07)"
                             : "transparent",
                         borderLeft: `3px solid ${
                           isUnread && !isSelected
-                            ? "#6ECC8B"
+                            ? "#5FBF8A"
                             : CLASSIFICATION_COLORS[cls]
                         }`,
                         animation:
@@ -1274,15 +1275,15 @@ const Inbox = () => {
                           background: conv.participants?.[0]?.profilePicUrl
                             ? "transparent"
                             : isUnread && !isSelected
-                              ? "linear-gradient(135deg, #6ECC8B33, #6ECC8B11)"
+                              ? "linear-gradient(135deg, #5FBF8A33, #5FBF8A11)"
                               : `linear-gradient(135deg, ${CLASSIFICATION_COLORS[cls]}33, ${CLASSIFICATION_COLORS[cls]}11)`,
                           border:
                             isUnread && !isSelected
-                              ? "2px solid #6ECC8Baa"
+                              ? "2px solid #5FBF8Aaa"
                               : `2px solid ${CLASSIFICATION_COLORS[cls]}77`,
                           color:
                             isUnread && !isSelected
-                              ? "#6ECC8B"
+                              ? "#5FBF8A"
                               : CLASSIFICATION_COLORS[cls],
                           overflow: "hidden",
                           padding: 0,
@@ -1903,7 +1904,7 @@ const styles = {
   },
   title: {
     margin: 0,
-    fontFamily: "'Young Serif', Georgia, serif",
+    fontFamily: "'Fraunces', Georgia, serif",
     fontSize: "22px",
     fontWeight: 400,
     color: "var(--text-primary)",
@@ -2111,6 +2112,7 @@ const styles = {
     display: "block",
     marginTop: "2px",
     fontVariantNumeric: "tabular-nums",
+    fontFamily: "'Space Grotesk', sans-serif",
   },
   messageView: {
     flex: 1,
@@ -2190,12 +2192,16 @@ const styles = {
   },
   msgFrom: {
     fontSize: "10px",
-    color: "var(--text-muted)",
-    fontWeight: 600,
+    // inherit + opacity stays readable on BOTH bubble colors — the old
+    // fixed muted grey vanished against the orange outgoing bubble
+    color: "inherit",
+    opacity: 0.65,
+    fontWeight: 700,
     textTransform: "uppercase",
     letterSpacing: "0.6px",
     display: "block",
     marginBottom: "2px",
+    fontFamily: "'Space Grotesk', sans-serif",
   },
   msgText: {
     margin: "4px 0",
@@ -2206,10 +2212,12 @@ const styles = {
   },
   msgTime: {
     fontSize: "9px",
-    color: "var(--text-dim)",
+    color: "inherit",
+    opacity: 0.55,
     fontVariantNumeric: "tabular-nums",
     marginTop: "5px",
     display: "block",
+    fontFamily: "'Space Grotesk', sans-serif",
   },
   replyBox: {
     display: "flex",
@@ -2302,15 +2310,17 @@ const styles = {
     marginLeft: "5px",
     padding: "0 4px",
   },
+  // Provenance stamp — dashed border like a passport stamp: it certifies
+  // which ad/post/story this customer arrived from.
   contextCard: {
     display: "flex",
     alignItems: "center",
     gap: "10px",
     padding: "8px 10px",
     margin: "4px 0 8px",
-    borderRadius: "10px",
-    backgroundColor: "rgba(0,0,0,0.12)",
-    border: "1px solid rgba(127,127,127,0.3)",
+    borderRadius: "8px",
+    backgroundColor: "rgba(0,0,0,0.14)",
+    border: "1.5px dashed rgba(140,140,150,0.5)",
     textDecoration: "none",
     color: "inherit",
     maxWidth: "100%",
@@ -2326,9 +2336,10 @@ const styles = {
     fontSize: 9,
     fontWeight: 700,
     textTransform: "uppercase",
-    letterSpacing: "0.8px",
-    opacity: 0.7,
+    letterSpacing: "1.2px",
+    opacity: 0.75,
     marginBottom: 2,
+    fontFamily: "'Space Grotesk', sans-serif",
   },
   contextTitle: {
     fontSize: 12,

@@ -82,58 +82,75 @@ router.get("/debug", protect, async (req, res) => {
   }
 });
 
-// Helper: look up a user's name/username from the Graph API (with timeout)
-async function getSenderName(senderId, platform) {
-  try {
-    const token =
-      platform === "facebook"
-        ? process.env.FACEBOOK_PAGE_ACCESS_TOKEN
-        : process.env.INSTAGRAM_ACCESS_TOKEN;
-    if (!token) return null;
-    // For Facebook Messenger PSIDs, request only 'name' — the display name
-    // field. first_name/last_name can be empty even when name is populated.
-    const fields = platform === "instagram" ? "username,name" : "name";
-    if (!isValidGraphId(senderId)) return null;
-    const res = await axios.get(`${GRAPH_API}/${encodeURIComponent(senderId)}`, {
-      params: { fields, access_token: token },
-      timeout: 5000, // 5s timeout so webhook doesn't hang
-    });
+// Helper: look up a user's profile (name + picture) from the Graph API.
+// profile_pic requires User Profile access on some setups — if the combined
+// request errors, retry name-only so a missing permission never costs us
+// the display name.
+async function getSenderProfile(senderId, platform) {
+  const empty = { name: null, avatar: null };
+  const token =
+    platform === "facebook"
+      ? process.env.FACEBOOK_PAGE_ACCESS_TOKEN
+      : process.env.INSTAGRAM_ACCESS_TOKEN;
+  if (!token || !isValidGraphId(senderId)) return empty;
+
+  // For Facebook Messenger PSIDs, request 'name' — first_name/last_name can
+  // be empty even when name is populated.
+  const nameFields = platform === "instagram" ? "username,name" : "name";
+
+  const fetchProfile = async (fields) => {
+    const res = await axios.get(
+      `${GRAPH_API}/${encodeURIComponent(senderId)}`,
+      {
+        params: { fields, access_token: token },
+        timeout: 5000, // 5s timeout so webhook doesn't hang
+      },
+    );
     const resolvedName =
       res.data.username ||
       res.data.name ||
       [res.data.first_name, res.data.last_name].filter(Boolean).join(" ");
-    if (!resolvedName || isLikelyRawId(resolvedName)) return null;
-    return resolvedName;
+    return {
+      name: !resolvedName || isLikelyRawId(resolvedName) ? null : resolvedName,
+      avatar: res.data.profile_pic || null,
+    };
+  };
+
+  try {
+    return await fetchProfile(`${nameFields},profile_pic`);
   } catch {
-    // Fallback for Facebook: query page conversations to get participant name
-    if (platform === "facebook") {
-      try {
-        const pageToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-        const pageId = process.env.FACEBOOK_PAGE_ID;
-        if (!pageToken || !pageId) return null;
-        const convRes = await axios.get(
-          `${GRAPH_API}/${pageId}/conversations`,
-          {
-            params: {
-              fields: "participants",
-              user_id: senderId,
-              access_token: pageToken,
+    try {
+      return await fetchProfile(nameFields);
+    } catch {
+      // Fallback for Facebook: query page conversations for participant name
+      if (platform === "facebook") {
+        try {
+          const pageId = process.env.FACEBOOK_PAGE_ID;
+          if (!pageId) return empty;
+          const convRes = await axios.get(
+            `${GRAPH_API}/${pageId}/conversations`,
+            {
+              params: {
+                fields: "participants",
+                user_id: senderId,
+                access_token: token,
+              },
+              timeout: 5000,
             },
-            timeout: 5000,
-          },
-        );
-        const conv = convRes.data.data?.[0];
-        const participant = conv?.participants?.data?.find(
-          (p) => p.id === senderId,
-        );
-        if (participant?.name && !isLikelyRawId(participant.name)) {
-          return participant.name;
+          );
+          const conv = convRes.data.data?.[0];
+          const participant = conv?.participants?.data?.find(
+            (p) => p.id === senderId,
+          );
+          if (participant?.name && !isLikelyRawId(participant.name)) {
+            return { name: participant.name, avatar: null };
+          }
+        } catch {
+          // all lookups failed
         }
-      } catch {
-        // both lookups failed
       }
+      return empty;
     }
-    return null;
   }
 }
 
@@ -446,15 +463,16 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
               console.log("[Socket] IG newMessage emitted immediately (placeholder):", msgMid);
             }
 
-            // --- Now do the slow work: name resolution, DB upsert, conversation sync ---
-            let igSenderName = await getSenderName(senderId, "instagram");
-            const igDisplayName = igSenderName || placeholderName;
+            // --- Now do the slow work: profile resolution, DB upsert, conversation sync ---
+            const igProfile = await getSenderProfile(senderId, "instagram");
+            const igDisplayName = igProfile.name || placeholderName;
 
             // Resolve Conversation document (creates Channel + Contact if needed)
             const { conversation: igConv } = await getOrCreateConversation({
               platform: "instagram",
               externalSenderId: senderId,
               senderName: igDisplayName,
+              senderAvatar: igProfile.avatar,
             });
 
             // Upsert to DB (avoids duplicate errors if webhook fires twice)
@@ -511,6 +529,7 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
                   conversationId: senderId,
                   senderId: senderId,
                   senderName: igDisplayName,
+                  senderAvatar: igProfile.avatar,
                 });
                 console.log("[Socket] IG newMessage name-update emitted:", msgMid, igDisplayName);
               }
@@ -616,19 +635,20 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
               `New ${detectedPlatform} message from ${senderId}: ${message.text}`,
             );
 
-            // Look up sender name
-            const resolvedSenderName = await getSenderName(
+            // Look up sender profile (name + picture)
+            const fbProfile = await getSenderProfile(
               senderId,
               detectedPlatform,
             );
             const fbSenderName =
-              resolvedSenderName || `User ${senderId.slice(-4)}`;
+              fbProfile.name || `User ${senderId.slice(-4)}`;
 
             // Resolve Conversation document (creates Channel + Contact if needed)
             const { conversation: fbConv } = await getOrCreateConversation({
               platform: detectedPlatform,
               externalSenderId: senderId,
               senderName: fbSenderName,
+              senderAvatar: fbProfile.avatar,
             });
 
             const safeFbMid = sanitizeId(message.mid);
@@ -680,6 +700,7 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
                   conversationId: senderId,
                   senderId: senderId,
                   senderName: fbSenderName,
+                  senderAvatar: fbProfile.avatar,
                 });
                 console.log(`[Socket] ${detectedPlatform} newMessage emitted:`, message.mid);
               }

@@ -9,6 +9,7 @@ const {
   parseGraphAttachments,
   messageTypeFor,
 } = require("../utils/metaPayload");
+const { getContactAvatarMap } = require("../services/conversationService");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -263,6 +264,24 @@ async function fetchFacebookConversations(slim = false) {
     }
   } catch (mergeErr) {
     console.error("DB merge non-fatal error:", mergeErr.message);
+  }
+
+  // Fill remaining missing avatars from stored Contacts (populated at
+  // webhook time) — no extra Graph API calls.
+  const missingAvatars = new Set();
+  formatted.forEach((c) => {
+    (c.participants || []).forEach((p) => {
+      if (!p.profilePicUrl && p.id) missingAvatars.add(p.id);
+    });
+  });
+  if (missingAvatars.size > 0) {
+    const avatarMap = await getContactAvatarMap("facebook", missingAvatars);
+    formatted.forEach((c) => {
+      c.participants = (c.participants || []).map((p) => ({
+        ...p,
+        profilePicUrl: p.profilePicUrl || avatarMap[p.id] || null,
+      }));
+    });
   }
 
   formatted.sort(

@@ -156,19 +156,33 @@ contactSchema.statics.findOrCreateByPlatformId = async function (
   });
 
   if (existing) {
-    // Refresh the identity snapshot without changing the top-level document
+    // Refresh the identity snapshot field-by-field: only overwrite values we
+    // actually resolved this time, so one failed profile lookup never wipes
+    // a previously stored name or avatar.
+    const set = {
+      "platformIdentities.$.lastSeenAt": identityPatch.lastSeenAt,
+      lastContactAt: new Date(),
+    };
+    if (profileData.name || profileData.username) {
+      set["platformIdentities.$.name"] = identityPatch.name;
+    }
+    if (profileData.username) {
+      set["platformIdentities.$.username"] = profileData.username;
+    }
+    if (profileData.avatar) {
+      set["platformIdentities.$.avatar"] = profileData.avatar;
+      set.avatar = profileData.avatar;
+    }
+    if (profileData.profileUrl) {
+      set["platformIdentities.$.profileUrl"] = profileData.profileUrl;
+    }
     await this.findOneAndUpdate(
       {
         _id: existing._id,
         "platformIdentities.platform": platform,
         "platformIdentities.externalId": externalId,
       },
-      {
-        $set: {
-          "platformIdentities.$": identityPatch,
-          lastContactAt: new Date(),
-        },
-      },
+      { $set: set },
     );
     return existing;
   }

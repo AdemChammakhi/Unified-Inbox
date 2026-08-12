@@ -9,6 +9,7 @@ const {
   parseGraphAttachments,
   messageTypeFor,
 } = require("../utils/metaPayload");
+const { getContactAvatarMap } = require("../services/conversationService");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -255,20 +256,29 @@ async function fetchInstagramConversations(slim = false) {
     });
   });
 
-  const resolvedExtra = {};
+  const resolvedExtra = {}; // id -> { name, avatar }
   if (unknownIds.size > 0) {
     // Cap at 10 lookups to prevent 50+ sequential Graph API calls from stalling the response
     const idsToLookup = [...unknownIds].slice(0, 10);
     await Promise.all(
       idsToLookup.map(async (id) => {
-        try {
-          if (!isValidGraphId(id)) return;
-          const r = await axios.get(`${GRAPH_API}/${encodeURIComponent(id)}`, {
-            params: { fields: "username,name", access_token: accessToken },
+        if (!isValidGraphId(id)) return;
+        const fetchProfile = async (fields) =>
+          axios.get(`${GRAPH_API}/${encodeURIComponent(id)}`, {
+            params: { fields, access_token: accessToken },
             timeout: 4000,
           });
+        try {
+          let r;
+          try {
+            r = await fetchProfile("username,name,profile_pic");
+          } catch {
+            r = await fetchProfile("username,name");
+          }
           const n = r.data?.username || r.data?.name;
-          if (n && !/^\d{6,}$/.test(n)) resolvedExtra[id] = n;
+          if (n && !/^\d{6,}$/.test(n)) {
+            resolvedExtra[id] = { name: n, avatar: r.data?.profile_pic || null };
+          }
         } catch {
           // non-fatal — will fall back to senderId partial display
         }
@@ -276,12 +286,13 @@ async function fetchInstagramConversations(slim = false) {
     );
   }
 
-  // Apply resolved names and clean up the temporary _nameMap
+  // Apply resolved names/avatars and clean up the temporary _nameMap
   formatted.forEach((conv) => {
     delete conv._nameMap;
     conv.participants = conv.participants.map((p) => ({
       ...p,
-      name: p.name || resolvedExtra[p.id] || `User ${p.id.slice(-4)}`,
+      name: p.name || resolvedExtra[p.id]?.name || `User ${p.id.slice(-4)}`,
+      profilePicUrl: p.profilePicUrl || resolvedExtra[p.id]?.avatar || null,
     }));
     // Patch lastMessage.from and each message.from with resolved names
     if (conv.lastMessage && !conv.lastMessage.from) {
@@ -289,7 +300,7 @@ async function fetchInstagramConversations(slim = false) {
     }
     conv.messages = conv.messages.map((m) => ({
       ...m,
-      from: m.from || resolvedExtra[m.fromId] || "Unknown",
+      from: m.from || resolvedExtra[m.fromId]?.name || "Unknown",
     }));
   });
 
@@ -351,12 +362,18 @@ async function fetchInstagramConversations(slim = false) {
         m.senderName === "Unknown" ||
         /^\d{6,}$/.test(m.senderName);
       const resolvedName = isUnknown
-        ? resolvedExtra[m.senderId] || `User ${m.senderId.slice(-4)}`
+        ? resolvedExtra[m.senderId]?.name || `User ${m.senderId.slice(-4)}`
         : m.senderName;
       if (!newConvMap[key]) {
         newConvMap[key] = {
           id: key,
-          participants: [{ id: m.senderId, name: resolvedName }],
+          participants: [
+            {
+              id: m.senderId,
+              name: resolvedName,
+              profilePicUrl: resolvedExtra[m.senderId]?.avatar || null,
+            },
+          ],
           lastMessage: null,
           messages: [],
           _fromDb: true,
@@ -386,6 +403,25 @@ async function fetchInstagramConversations(slim = false) {
     }
   } catch (mergeErr) {
     console.error("DB merge non-fatal error:", mergeErr.message);
+  }
+
+  // --- Pass 3: fill remaining missing avatars from stored Contacts ---
+  // Webhook-time profile lookups persist avatars on Contact; this reuses them
+  // for DB-only conversations without any extra Graph API calls.
+  const missingAvatars = new Set();
+  formatted.forEach((c) => {
+    (c.participants || []).forEach((p) => {
+      if (!p.profilePicUrl && p.id) missingAvatars.add(p.id);
+    });
+  });
+  if (missingAvatars.size > 0) {
+    const avatarMap = await getContactAvatarMap("instagram", missingAvatars);
+    formatted.forEach((c) => {
+      c.participants = (c.participants || []).map((p) => ({
+        ...p,
+        profilePicUrl: p.profilePicUrl || avatarMap[p.id] || null,
+      }));
+    });
   }
 
   formatted.sort(

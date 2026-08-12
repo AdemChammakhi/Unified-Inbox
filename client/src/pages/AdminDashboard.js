@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
 import PlatformIcon from "../components/PlatformIcon";
+import AdAttribution from "../components/AdAttribution";
 import {
   BarChart,
   Bar,
@@ -31,7 +32,7 @@ const ROLES = [
   { key: "marketing", icon: "📢", label: "Marketing" },
 ];
 
-const CHART_COLORS = ["#C8956A", "#6ECC8B", "#7BA3CC", "#E06C6C", "#D4A24C"];
+const CHART_COLORS = ["#E8833A", "#5FBF8A", "#5B9BD9", "#E2685F", "#E3A63C"];
 
 const AdminDashboard = () => {
   const { user, logout } = useAuth();
@@ -39,6 +40,7 @@ const AdminDashboard = () => {
   const [analyticsRange, setAnalyticsRange] = useState(7);
   const [analytics, setAnalytics] = useState(null);
   const [agentStats, setAgentStats] = useState([]);
+  const [adAttribution, setAdAttribution] = useState([]);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
   const fetchAnalytics = useCallback(
@@ -47,16 +49,20 @@ const AdminDashboard = () => {
       if (!token) return;
       setAnalyticsLoading(true);
       try {
-        const [summaryRes, agentsRes] = await Promise.all([
+        const [summaryRes, agentsRes, attributionRes] = await Promise.all([
           axios.get(`/api/analytics/summary?range=${range}`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
           axios.get("/api/analytics/agents", {
             headers: { Authorization: `Bearer ${token}` },
           }),
+          axios.get(`/api/analytics/ad-attribution?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
         ]);
         setAnalytics(summaryRes.data);
         setAgentStats(agentsRes.data?.agents || []);
+        setAdAttribution(attributionRes.data?.ads || []);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
       } finally {
@@ -219,7 +225,7 @@ const AdminDashboard = () => {
                   </div>
                   <div
                     className="analytics-card-value"
-                    style={{ color: "#C8956A" }}
+                    style={{ color: "#E8833A" }}
                   >
                     {analytics?.totalInRange ?? "—"}
                   </div>
@@ -229,7 +235,7 @@ const AdminDashboard = () => {
                   <div className="analytics-card-label">Today</div>
                   <div
                     className="analytics-card-value"
-                    style={{ color: "#6ECC8B" }}
+                    style={{ color: "#5FBF8A" }}
                   >
                     {analytics?.todayCount ?? "—"}
                   </div>
@@ -239,7 +245,7 @@ const AdminDashboard = () => {
                   <div className="analytics-card-label">This Week</div>
                   <div
                     className="analytics-card-value"
-                    style={{ color: "#7BA3CC" }}
+                    style={{ color: "#5B9BD9" }}
                   >
                     {analytics?.weekCount ?? "—"}
                   </div>
@@ -249,7 +255,7 @@ const AdminDashboard = () => {
                   <div className="analytics-card-label">Active Agents</div>
                   <div
                     className="analytics-card-value"
-                    style={{ color: "#D4A24C" }}
+                    style={{ color: "#E3A63C" }}
                   >
                     {analytics?.activeAgentCount ?? "—"}
                   </div>
@@ -285,7 +291,7 @@ const AdminDashboard = () => {
                       />
                       <Bar
                         dataKey="total"
-                        fill="#C8956A"
+                        fill="#E8833A"
                         radius={[4, 4, 0, 0]}
                       />
                     </BarChart>
@@ -484,6 +490,12 @@ const AdminDashboard = () => {
                   </div>
                 )}
               </div>
+
+              {/* Ad / post attribution */}
+              <AdAttribution
+                ads={adAttribution}
+                rangeLabel={` in the last ${analyticsRange} day${analyticsRange > 1 ? "s" : ""}`}
+              />
             </>
           )}
         </div>
@@ -694,7 +706,7 @@ const styles = {
     fontSize: "26px",
     fontWeight: 700,
     color: "var(--text-primary)",
-    fontFamily: "'Young Serif', serif",
+    fontFamily: "'Fraunces', Georgia, serif",
     margin: "0 0 6px",
   },
   subtitle: {
@@ -719,7 +731,7 @@ const styles = {
     fontSize: "28px",
     fontWeight: 700,
     color: "var(--accent)",
-    fontFamily: "'Young Serif', serif",
+    fontFamily: "'Fraunces', Georgia, serif",
   },
   statLabel: {
     fontSize: "12px",
@@ -740,7 +752,7 @@ const styles = {
     fontWeight: 700,
     color: "var(--text-primary)",
     margin: "0 0 16px",
-    fontFamily: "'Young Serif', serif",
+    fontFamily: "'Fraunces', Georgia, serif",
   },
   empty: {
     padding: "32px",

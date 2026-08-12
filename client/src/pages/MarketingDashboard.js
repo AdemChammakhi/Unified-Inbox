@@ -69,7 +69,7 @@ const MarketingDashboard = () => {
           <div>
             <h1
               style={{
-                fontFamily: "'Young Serif', serif",
+                fontFamily: "'Fraunces', Georgia, serif",
                 fontSize: 26,
                 fontWeight: 400,
                 color: "var(--text-primary)",
@@ -119,7 +119,7 @@ const MarketingDashboard = () => {
               </div>
               <div
                 className="analytics-card-value"
-                style={{ color: "#C8956A" }}
+                style={{ color: "#E8833A" }}
               >
                 {summary?.rangeCount ?? "—"}
               </div>
@@ -133,7 +133,7 @@ const MarketingDashboard = () => {
               <div className="analytics-card-label">Today</div>
               <div
                 className="analytics-card-value"
-                style={{ color: "#6ECC8B" }}
+                style={{ color: "#5FBF8A" }}
               >
                 {summary?.todayCount ?? "—"}
               </div>
@@ -143,7 +143,7 @@ const MarketingDashboard = () => {
               <div className="analytics-card-label">This Week</div>
               <div
                 className="analytics-card-value"
-                style={{ color: "#7BA3CC" }}
+                style={{ color: "#5B9BD9" }}
               >
                 {summary?.weekCount ?? "—"}
               </div>
@@ -153,7 +153,7 @@ const MarketingDashboard = () => {
               <div className="analytics-card-label">Channels</div>
               <div
                 className="analytics-card-value"
-                style={{ color: "#D4A24C" }}
+                style={{ color: "#E3A63C" }}
               >
                 {platformData.length}
               </div>
@@ -201,7 +201,7 @@ const MarketingDashboard = () => {
                     }}
                     cursor={{ fill: "var(--bg-hover)" }}
                   />
-                  <Bar dataKey="count" fill="#C8956A" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="count" fill="#E8833A" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}

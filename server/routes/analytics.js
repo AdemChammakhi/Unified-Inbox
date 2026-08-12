@@ -154,6 +154,96 @@ router.get(
   },
 );
 
+// GET /api/analytics/ad-attribution?range=30
+// Which sponsored posts / ads conversations come from.
+// Groups inbound messages that carry ad/post context (captured from Meta
+// referral webhooks) and, per ad: how many distinct conversations it opened
+// and how many total inbound messages those conversations produced.
+router.get("/ad-attribution", protect, async (req, res) => {
+  try {
+    const range = parseInt(req.query.range) || 30;
+    const since = new Date(Date.now() - range * 24 * 60 * 60 * 1000);
+
+    // Pass 1: group context-carrying messages by ad/post identity
+    const ads = await Message.aggregate([
+      {
+        $match: {
+          direction: "incoming",
+          context: { $ne: null },
+          createdAt: { $gte: since },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $ifNull: [
+              "$context.adId",
+              {
+                $ifNull: [
+                  "$context.postId",
+                  { $ifNull: ["$context.url", "$context.title"] },
+                ],
+              },
+            ],
+          },
+          title: { $first: "$context.title" },
+          kind: { $first: "$context.kind" },
+          photoUrl: { $first: "$context.photoUrl" },
+          url: { $first: "$context.url" },
+          platforms: { $addToSet: "$platform" },
+          attributedMessages: { $sum: 1 },
+          senders: { $addToSet: "$senderId" },
+          lastAt: { $max: "$createdAt" },
+        },
+      },
+      { $match: { _id: { $ne: null } } },
+      { $sort: { lastAt: -1 } },
+      { $limit: 50 },
+    ]);
+
+    // Pass 2: total inbound messages sent by those senders in range,
+    // so each ad shows full conversation volume, not just the first message
+    const allSenders = [...new Set(ads.flatMap((a) => a.senders))];
+    const senderCounts = {};
+    if (allSenders.length > 0) {
+      const counts = await Message.aggregate([
+        {
+          $match: {
+            direction: "incoming",
+            senderId: { $in: allSenders },
+            createdAt: { $gte: since },
+          },
+        },
+        { $group: { _id: "$senderId", count: { $sum: 1 } } },
+      ]);
+      for (const c of counts) senderCounts[c._id] = c.count;
+    }
+
+    const result = ads
+      .map((a) => ({
+        key: a._id,
+        title: a.title || "(untitled ad)",
+        kind: a.kind,
+        photoUrl: a.photoUrl,
+        url: a.url,
+        platforms: a.platforms,
+        conversations: a.senders.length,
+        attributedMessages: a.attributedMessages,
+        totalMessages: a.senders.reduce(
+          (sum, s) => sum + (senderCounts[s] || 0),
+          0,
+        ),
+        lastAt: a.lastAt,
+      }))
+      .sort((x, y) => y.conversations - x.conversations || y.totalMessages - x.totalMessages);
+
+    return res.json({ range, ads: result });
+  } catch (err) {
+    console.error("Ad attribution error:", err.message);
+    return res.status(500).json({ message: "Ad attribution failed" });
+  }
+});
+
 // GET /api/analytics/marketing-summary — for marketing agents
 router.get("/marketing-summary", protect, async (req, res) => {
   try {

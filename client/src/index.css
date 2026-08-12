@@ -1,79 +1,92 @@
-/* ===== CSS CUSTOM PROPERTIES (THEME VARIABLES) ===== */
+/* ===== CSS CUSTOM PROPERTIES (THEME VARIABLES) =====
+   Mediterranean night — MedTours is a Tunisian travel agency, so the ground
+   is deep gulf-blue (not neutral black) and the accent is the brand's own
+   sun-orange. Light mode is sun-bleached stone with the same accent deepened
+   for contrast. Type: Fraunces (display) / Hanken Grotesk (body) /
+   Space Grotesk (timestamps, counts, IDs). */
 :root,
 [data-theme="dark"] {
-  --bg-primary: #0f0e13;
-  --bg-secondary: #13121a;
-  --bg-card: #16141d;
-  --bg-nav: #111015;
-  --bg-elevated: #1a1822;
-  --bg-hover: #23212d;
-  --border-primary: #1e1c27;
-  --border-secondary: #2a2838;
-  --text-primary: #e8e2d6;
-  --text-secondary: #918b9e;
-  --text-muted: #6b6780;
-  --text-faint: #5d586c;
-  --text-dim: #3d3a4a;
-  --accent: #c8956a;
-  --accent-alt: #d4a24c;
-  --accent-hover: #d4a070;
-  --accent-bg: rgba(200, 149, 106, 0.08);
-  --accent-border: rgba(200, 149, 106, 0.15);
-  --accent-glow: rgba(200, 149, 106, 0.2);
-  --accent-glow-strong: rgba(200, 149, 106, 0.4);
-  --success: #6ecc8b;
-  --danger: #e06c6c;
-  --info: #7ba3cc;
-  --warning: #d4a24c;
-  --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 8px 25px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.3);
-  --gradient-bg: radial-gradient(ellipse at 30% 0%, #1a1822 0%, #0f0e13 65%);
-  --gradient-msg: radial-gradient(ellipse at 70% 20%, #16141d 0%, #0f0e13 80%);
-  --msg-sent-bg: #1e3a2a;
-  --msg-sent-color: #b8d8c8;
-  --msg-received-bg: #1a1822;
-  --msg-received-color: #b8b2a6;
-  --scrollbar-thumb: #2a2838;
-  --scrollbar-thumb-hover: #3a3848;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-data: "Space Grotesk", "Hanken Grotesk", monospace, sans-serif;
+
+  --bg-primary: #0b111e;
+  --bg-secondary: #101726;
+  --bg-card: #131b2c;
+  --bg-nav: #0e1522;
+  --bg-elevated: #172136;
+  --bg-hover: #1e2a42;
+  --border-primary: #1c2740;
+  --border-secondary: #263352;
+  --text-primary: #e9edf4;
+  --text-secondary: #97a3bc;
+  --text-muted: #6e7a96;
+  --text-faint: #5a6580;
+  --text-dim: #3b455f;
+  --accent: #e8833a;
+  --accent-alt: #f2a65a;
+  --accent-hover: #f09048;
+  --accent-bg: rgba(232, 131, 58, 0.09);
+  --accent-border: rgba(232, 131, 58, 0.22);
+  --accent-glow: rgba(232, 131, 58, 0.2);
+  --accent-glow-strong: rgba(232, 131, 58, 0.4);
+  --success: #5fbf8a;
+  --danger: #e2685f;
+  --info: #5b9bd9;
+  --warning: #e3a63c;
+  --shadow-sm: 0 2px 10px rgba(4, 8, 16, 0.35);
+  --shadow-md: 0 8px 25px rgba(4, 8, 16, 0.45);
+  --shadow-lg: 0 20px 60px rgba(4, 8, 16, 0.5);
+  --gradient-bg: radial-gradient(ellipse at 30% 0%, #14203a 0%, #0b111e 65%);
+  --gradient-msg: radial-gradient(ellipse at 70% 20%, #121c30 0%, #0b111e 80%);
+  --msg-sent-bg: #1d3a2e;
+  --msg-sent-color: #b9dcc9;
+  --msg-received-bg: #182238;
+  --msg-received-color: #c6cee0;
+  --scrollbar-thumb: #263352;
+  --scrollbar-thumb-hover: #33436b;
 }
 
 [data-theme="light"] {
-  --bg-primary: #faf8f5;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-data: "Space Grotesk", "Hanken Grotesk", monospace, sans-serif;
+
+  --bg-primary: #f7f5f0;
   --bg-secondary: #ffffff;
   --bg-card: #ffffff;
-  --bg-nav: #ffffff;
-  --bg-elevated: #f5f0eb;
-  --bg-hover: #fef3e8;
-  --border-primary: #f0e6da;
-  --border-secondary: #e8ddd0;
-  --text-primary: #2d2a24;
-  --text-secondary: #6b6560;
-  --text-muted: #9a9490;
-  --text-faint: #b0a8a0;
-  --text-dim: #ccc5bc;
-  --accent: #e07b30;
-  --accent-alt: #d06820;
-  --accent-hover: #c46a22;
-  --accent-bg: rgba(224, 123, 48, 0.06);
-  --accent-border: rgba(224, 123, 48, 0.18);
-  --accent-glow: rgba(224, 123, 48, 0.15);
-  --accent-glow-strong: rgba(224, 123, 48, 0.3);
-  --success: #2d9254;
-  --danger: #d04545;
-  --info: #3a7bb5;
-  --warning: #c88a2a;
-  --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 8px 25px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.1);
-  --gradient-bg: linear-gradient(135deg, #faf8f5 0%, #fef6ee 100%);
-  --gradient-msg: linear-gradient(135deg, #fefcfa 0%, #faf8f5 100%);
-  --msg-sent-bg: #fff3e6;
-  --msg-sent-color: #5a3e1a;
-  --msg-received-bg: #f5f0eb;
-  --msg-received-color: #4a4540;
-  --scrollbar-thumb: #e0d5c8;
-  --scrollbar-thumb-hover: #d0c5b8;
+  --bg-nav: #fdfbf7;
+  --bg-elevated: #f1ede4;
+  --bg-hover: #f8efe4;
+  --border-primary: #e9e2d4;
+  --border-secondary: #dcd2be;
+  --text-primary: #232a38;
+  --text-secondary: #5a6272;
+  --text-muted: #8a91a0;
+  --text-faint: #a6acb8;
+  --text-dim: #c8ccd6;
+  --accent: #c05a21;
+  --accent-alt: #a84d1c;
+  --accent-hover: #ad5220;
+  --accent-bg: rgba(192, 90, 33, 0.07);
+  --accent-border: rgba(192, 90, 33, 0.22);
+  --accent-glow: rgba(192, 90, 33, 0.15);
+  --accent-glow-strong: rgba(192, 90, 33, 0.3);
+  --success: #2f8f5b;
+  --danger: #cc4a40;
+  --info: #2f6fa8;
+  --warning: #b07e1f;
+  --shadow-sm: 0 2px 10px rgba(35, 42, 56, 0.06);
+  --shadow-md: 0 8px 25px rgba(35, 42, 56, 0.09);
+  --shadow-lg: 0 20px 60px rgba(35, 42, 56, 0.12);
+  --gradient-bg: linear-gradient(135deg, #f7f5f0 0%, #f3ede2 100%);
+  --gradient-msg: linear-gradient(135deg, #fdfcf9 0%, #f7f5f0 100%);
+  --msg-sent-bg: #fdf0e3;
+  --msg-sent-color: #5a3a1a;
+  --msg-received-bg: #efeae0;
+  --msg-received-color: #3a4150;
+  --scrollbar-thumb: #ddd3c2;
+  --scrollbar-thumb-hover: #ccc0aa;
 }
 
 * {
@@ -199,7 +212,7 @@ body {
 }
 
 .auth-visual h2 {
-  font-family: "Young Serif", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 30px;
   font-weight: 400;
   line-height: 1.1;
@@ -238,7 +251,7 @@ body {
   text-align: center;
   margin-bottom: 8px;
   color: var(--text-primary);
-  font-family: "Young Serif", Georgia, serif;
+  font-family: var(--font-display);
 }
 
 .auth-card .subtitle {
@@ -255,7 +268,7 @@ body {
 
 .auth-card .brand span {
   font-size: 34px;
-  font-family: "Young Serif", Georgia, serif;
+  font-family: var(--font-display);
   font-weight: 400;
   background: linear-gradient(135deg, var(--accent), var(--accent-alt));
   -webkit-background-clip: text;
@@ -579,7 +592,7 @@ body {
 }
 
 .sidebar-brand-text {
-  font-family: "Young Serif", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 18px;
   font-weight: 400;
   background: linear-gradient(135deg, var(--accent), var(--accent-alt));
@@ -831,11 +844,12 @@ body {
 }
 
 .analytics-card-label {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.8px;
+  font-family: var(--font-data);
 }
 
 .analytics-card-value {
@@ -843,6 +857,8 @@ body {
   font-weight: 700;
   color: var(--text-primary);
   line-height: 1;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
 }
 
 .analytics-card-sub {
@@ -869,10 +885,11 @@ body {
 }
 
 .chart-card-title {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 500;
   color: var(--text-primary);
   margin-bottom: 16px;
+  font-family: var(--font-display);
 }
 
 .charts-grid {
@@ -1021,7 +1038,7 @@ body {
 }
 
 .dashboard-nav .nav-brand .brand-text {
-  font-family: "Young Serif", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 20px;
   font-weight: 400;
   background: linear-gradient(135deg, var(--accent), var(--accent-alt));
@@ -1139,7 +1156,7 @@ body {
   font-weight: 700;
   margin-bottom: 8px;
   color: var(--text-primary);
-  font-family: "Young Serif", Georgia, serif;
+  font-family: var(--font-display);
 }
 
 .dashboard-header p {

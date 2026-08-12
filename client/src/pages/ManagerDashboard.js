@@ -28,6 +28,7 @@ import {
   Unlock,
 } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
+import AdAttribution from "../components/AdAttribution";
 import {
   BarChart,
   Bar,
@@ -51,14 +52,14 @@ const CLASSIFICATION_LABELS = {
 };
 
 const CLASSIFICATION_COLORS = {
-  non_classifie: "#6B6780",
-  cible: "#6ECC8B",
-  hors_cible: "#E06C6C",
-  suivi: "#7BA3CC",
-  priorite: "#D4A24C",
+  non_classifie: "#6E7A96",
+  cible: "#5FBF8A",
+  hors_cible: "#E2685F",
+  suivi: "#5B9BD9",
+  priorite: "#E3A63C",
 };
 
-const CHART_COLORS = ["#C8956A", "#6ECC8B", "#7BA3CC", "#E06C6C", "#D4A24C"];
+const CHART_COLORS = ["#E8833A", "#5FBF8A", "#5B9BD9", "#E2685F", "#E3A63C"];
 
 // Labels for the "replying to…" context card (ads, posts, stories)
 const CONTEXT_KIND_LABELS = {
@@ -137,6 +138,7 @@ const ManagerDashboard = () => {
   const [analyticsRange, setAnalyticsRange] = useState(7);
   const [analytics, setAnalytics] = useState(null);
   const [agentStats, setAgentStats] = useState([]);
+  const [adAttribution, setAdAttribution] = useState([]);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
   /* ════════════════════════════════════════
@@ -311,6 +313,7 @@ const ManagerDashboard = () => {
               {
                 id: data.senderId,
                 name: data.senderName || message.from || "New User",
+                profilePicUrl: data.senderAvatar || null,
               },
             ],
             lastMessage: {
@@ -802,16 +805,20 @@ const ManagerDashboard = () => {
       if (!token) return;
       setAnalyticsLoading(true);
       try {
-        const [summaryRes, agentsRes] = await Promise.all([
+        const [summaryRes, agentsRes, attributionRes] = await Promise.all([
           axios.get(`/api/analytics/summary?range=${range}`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
           axios.get("/api/analytics/agents", {
             headers: { Authorization: `Bearer ${token}` },
           }),
+          axios.get(`/api/analytics/ad-attribution?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
         ]);
         setAnalytics(summaryRes.data);
         setAgentStats(agentsRes.data?.agents || []);
+        setAdAttribution(attributionRes.data?.ads || []);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
       } finally {
@@ -910,8 +917,8 @@ const ManagerDashboard = () => {
         100% { background-position: 200% center; }
       }
       @keyframes mgrNewMsgPulse {
-        0%, 100% { background-color: rgba(110, 204, 139, 0.04); }
-        50% { background-color: rgba(110, 204, 139, 0.14); }
+        0%, 100% { background-color: rgba(95, 191, 138, 0.04); }
+        50% { background-color: rgba(95, 191, 138, 0.14); }
       }
       .mgr-conv-scroll::-webkit-scrollbar { width: 5px; }
       .mgr-conv-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -932,7 +939,7 @@ const ManagerDashboard = () => {
       .mgr-email-render img { max-width: 100% !important; height: auto !important; }
       .mgr-email-render a { color: var(--accent) !important; }
       .mgr-main-tab:hover { background: var(--bg-hover) !important; }
-      .mgr-delete-btn:hover { background: var(--danger, #E06C6C) !important; color: #fff !important; border-color: var(--danger, #E06C6C) !important; }
+      .mgr-delete-btn:hover { background: var(--danger, #E2685F) !important; color: #fff !important; border-color: var(--danger, #E2685F) !important; }
       .mgr-unlock-btn:hover { background: var(--accent-hover) !important; transform: translateY(-1px); }
       .mgr-load-older:hover:not(:disabled) { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
       .mgr-load-older:disabled { opacity: 0.5; cursor: wait; }
@@ -1004,7 +1011,7 @@ const ManagerDashboard = () => {
             <h2
               style={{
                 margin: 0,
-                fontFamily: "'Young Serif', Georgia, serif",
+                fontFamily: "'Fraunces', Georgia, serif",
                 fontSize: "20px",
                 fontWeight: 400,
                 color: "var(--text-primary)",
@@ -1035,11 +1042,11 @@ const ManagerDashboard = () => {
                   height: "6px",
                   borderRadius: "50%",
                   backgroundColor:
-                    connectionStatus === "connected" ? "#6ECC8B" : "#E06C6C",
+                    connectionStatus === "connected" ? "#5FBF8A" : "#E2685F",
                   boxShadow:
                     connectionStatus === "connected"
-                      ? "0 0 8px rgba(110,204,139,0.6)"
-                      : "0 0 8px rgba(224,108,108,0.6)",
+                      ? "0 0 8px rgba(95,191,138,0.6)"
+                      : "0 0 8px rgba(226,104,95,0.6)",
                 }}
               />
               {connectionStatus === "connected" ? "LIVE" : "OFFLINE"}
@@ -1398,7 +1405,7 @@ const ManagerDashboard = () => {
                         ◇
                       </div>
                       {fetchError ? (
-                        <span style={{ color: "#E06C6C", fontSize: 12 }}>
+                        <span style={{ color: "#E2685F", fontSize: 12 }}>
                           Error: {fetchError}
                         </span>
                       ) : (
@@ -1427,11 +1434,11 @@ const ManagerDashboard = () => {
                             backgroundColor: isSelected
                               ? "var(--bg-hover)"
                               : isUnread
-                                ? "rgba(110, 204, 139, 0.07)"
+                                ? "rgba(95, 191, 138, 0.07)"
                                 : "transparent",
                             borderLeft: `3px solid ${
                               isUnread && !isSelected
-                                ? "#6ECC8B"
+                                ? "#5FBF8A"
                                 : CLASSIFICATION_COLORS[cls]
                             }`,
                             animation: isUnread && !isSelected
@@ -1898,12 +1905,14 @@ const ManagerDashboard = () => {
                             <small
                               style={{
                                 fontSize: "10px",
-                                color: "var(--text-muted)",
-                                fontWeight: 600,
+                                color: "inherit",
+                                opacity: 0.65,
+                                fontWeight: 700,
                                 textTransform: "uppercase",
                                 letterSpacing: "0.6px",
                                 display: "block",
                                 marginBottom: "2px",
+                                fontFamily: "'Space Grotesk', sans-serif",
                               }}
                             >
                               {msg.from}
@@ -1920,10 +1929,10 @@ const ManagerDashboard = () => {
                                   gap: "10px",
                                   padding: "8px 10px",
                                   margin: "4px 0 8px",
-                                  borderRadius: "10px",
-                                  backgroundColor: "rgba(0,0,0,0.12)",
+                                  borderRadius: "8px",
+                                  backgroundColor: "rgba(0,0,0,0.14)",
                                   border:
-                                    "1px solid rgba(127,127,127,0.3)",
+                                    "1.5px dashed rgba(140,140,150,0.5)",
                                   textDecoration: "none",
                                   color: "inherit",
                                   maxWidth: "100%",
@@ -1958,9 +1967,11 @@ const ManagerDashboard = () => {
                                       fontSize: 9,
                                       fontWeight: 700,
                                       textTransform: "uppercase",
-                                      letterSpacing: "0.8px",
-                                      opacity: 0.7,
+                                      letterSpacing: "1.2px",
+                                      opacity: 0.75,
                                       marginBottom: 2,
+                                      fontFamily:
+                                        "'Space Grotesk', sans-serif",
                                     }}
                                   >
                                     {CONTEXT_KIND_LABELS[
@@ -2188,9 +2199,12 @@ const ManagerDashboard = () => {
                             <small
                               style={{
                                 fontSize: "9px",
-                                color: "var(--text-dim)",
+                                color: "inherit",
+                                opacity: 0.55,
                                 marginTop: "5px",
                                 display: "block",
+                                fontFamily: "'Space Grotesk', sans-serif",
+                                fontVariantNumeric: "tabular-nums",
                               }}
                             >
                               {new Date(msg.time).toLocaleString()}
@@ -2311,7 +2325,7 @@ const ManagerDashboard = () => {
               <h2
                 style={{
                   margin: 0,
-                  fontFamily: "'Young Serif', serif",
+                  fontFamily: "'Fraunces', Georgia, serif",
                   fontSize: "18px",
                   fontWeight: 700,
                   color: "var(--text-primary)",
@@ -2365,7 +2379,7 @@ const ManagerDashboard = () => {
                     >
                       <TrendingUp
                         size={16}
-                        style={{ color: "#C8956A" }}
+                        style={{ color: "#E8833A" }}
                       />
                       <div className="analytics-card-label">
                         Total ({analyticsRange}d)
@@ -2373,7 +2387,7 @@ const ManagerDashboard = () => {
                     </div>
                     <div
                       className="analytics-card-value"
-                      style={{ color: "#C8956A" }}
+                      style={{ color: "#E8833A" }}
                     >
                       {analytics?.totalInRange ?? "—"}
                     </div>
@@ -2391,7 +2405,7 @@ const ManagerDashboard = () => {
                     >
                       <Clock
                         size={16}
-                        style={{ color: "#6ECC8B" }}
+                        style={{ color: "#5FBF8A" }}
                       />
                       <div className="analytics-card-label">
                         Today
@@ -2399,7 +2413,7 @@ const ManagerDashboard = () => {
                     </div>
                     <div
                       className="analytics-card-value"
-                      style={{ color: "#6ECC8B" }}
+                      style={{ color: "#5FBF8A" }}
                     >
                       {analytics?.todayCount ?? "—"}
                     </div>
@@ -2417,7 +2431,7 @@ const ManagerDashboard = () => {
                     >
                       <CheckCircle2
                         size={16}
-                        style={{ color: "#7BA3CC" }}
+                        style={{ color: "#5B9BD9" }}
                       />
                       <div className="analytics-card-label">
                         This Week
@@ -2425,7 +2439,7 @@ const ManagerDashboard = () => {
                     </div>
                     <div
                       className="analytics-card-value"
-                      style={{ color: "#7BA3CC" }}
+                      style={{ color: "#5B9BD9" }}
                     >
                       {analytics?.weekCount ?? "—"}
                     </div>
@@ -2443,7 +2457,7 @@ const ManagerDashboard = () => {
                     >
                       <Activity
                         size={16}
-                        style={{ color: "#D4A24C" }}
+                        style={{ color: "#E3A63C" }}
                       />
                       <div className="analytics-card-label">
                         Active Agents
@@ -2451,7 +2465,7 @@ const ManagerDashboard = () => {
                     </div>
                     <div
                       className="analytics-card-value"
-                      style={{ color: "#D4A24C" }}
+                      style={{ color: "#E3A63C" }}
                     >
                       {analytics?.activeAgentCount ?? "—"}
                     </div>
@@ -2504,7 +2518,7 @@ const ManagerDashboard = () => {
                         />
                         <Bar
                           dataKey="total"
-                          fill="#C8956A"
+                          fill="#E8833A"
                           radius={[4, 4, 0, 0]}
                         />
                       </BarChart>
@@ -2749,6 +2763,12 @@ const ManagerDashboard = () => {
                     </div>
                   )}
                 </div>
+
+                {/* Ad / post attribution */}
+                <AdAttribution
+                  ads={adAttribution}
+                  rangeLabel={` in the last ${analyticsRange} day${analyticsRange > 1 ? "s" : ""}`}
+                />
               </>
             )}
           </div>
@@ -2776,7 +2796,7 @@ const ManagerDashboard = () => {
               <h2
                 style={{
                   margin: 0,
-                  fontFamily: "'Young Serif', serif",
+                  fontFamily: "'Fraunces', Georgia, serif",
                   fontSize: "18px",
                   fontWeight: 700,
                   color: "var(--text-primary)",

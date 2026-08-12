@@ -115,19 +115,26 @@ async function getOrCreateConversation({
 
   const resolvedName = senderName || senderUsername || externalSenderId;
 
+  const update = {
+    $setOnInsert: {
+      platform,
+      externalId: externalSenderId,
+      channelId: channel._id,
+      contactId: contact._id,
+      participantName: resolvedName,
+      participantExternalId: externalSenderId,
+    },
+  };
+  // Late-arriving avatars should reach existing conversations too
+  if (senderAvatar) {
+    update.$set = { participantAvatar: senderAvatar };
+  } else {
+    update.$setOnInsert.participantAvatar = null;
+  }
+
   const conversation = await Conversation.findOneAndUpdate(
     { platform: String(platform), externalId: String(externalSenderId) },
-    {
-      $setOnInsert: {
-        platform,
-        externalId: externalSenderId,
-        channelId: channel._id,
-        contactId: contact._id,
-        participantName: resolvedName,
-        participantAvatar: senderAvatar || null,
-        participantExternalId: externalSenderId,
-      },
-    },
+    update,
     { upsert: true, new: true },
   );
 
@@ -175,8 +182,48 @@ async function updateConversationAfterMessage(conversationId, message) {
   );
 }
 
+/**
+ * Batch-resolve stored avatars for a set of platform sender IDs.
+ * Used by the conversation-list routes to give DB-only conversations
+ * (created by webhooks, not yet returned by the Graph API) a profile
+ * picture without any external API calls.
+ *
+ * @param {string} platform
+ * @param {Iterable<string>} externalIds
+ * @returns {Promise<Object<string,string>>} map externalId -> avatar URL
+ */
+async function getContactAvatarMap(platform, externalIds) {
+  const ids = [...new Set([...externalIds].filter(Boolean))];
+  if (ids.length === 0) return {};
+  try {
+    const contacts = await Contact.find({
+      platformIdentities: {
+        $elemMatch: { platform, externalId: { $in: ids } },
+      },
+    })
+      .select("avatar platformIdentities.platform platformIdentities.externalId platformIdentities.avatar")
+      .lean();
+
+    const map = {};
+    for (const c of contacts) {
+      for (const ident of c.platformIdentities || []) {
+        if (ident.platform !== platform) continue;
+        const avatar = ident.avatar || c.avatar;
+        if (ids.includes(ident.externalId) && avatar) {
+          map[ident.externalId] = avatar;
+        }
+      }
+    }
+    return map;
+  } catch (err) {
+    console.error("Avatar map lookup failed (non-fatal):", err.message);
+    return {};
+  }
+}
+
 module.exports = {
   getOrCreateConversation,
   updateConversationAfterMessage,
   getOrCreateChannel,
+  getContactAvatarMap,
 };
