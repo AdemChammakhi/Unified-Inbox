@@ -1095,6 +1095,20 @@ router.post("/send", protect, async (req, res) => {
       });
     }
 
+    // Code 200: the Meta app has only Standard Access to
+    // instagram_manage_messages — Meta then restricts sending to users who
+    // hold a role on the app (admin/developer/tester). Real customers are
+    // unreachable until App Review grants Advanced Access.
+    if (apiError?.code === 200) {
+      return res.status(400).json({
+        message:
+          "Meta is blocking replies to real customers: the app has only Standard Access to instagram_manage_messages. " +
+          "Fix: developers.facebook.com → App Review → Permissions and Features → instagram_manage_messages → Request Advanced Access " +
+          "(requires Business Verification). Until approved, only users with a role on the app can receive replies.",
+        error: apiError?.message,
+      });
+    }
+
     // Detect 24-hour window error
     if (apiError?.code === 10 || apiError?.error_subcode === 2534022) {
       return res.status(400).json({

@@ -203,16 +203,56 @@ function parseWhatsAppAttachments(msg) {
 }
 
 /**
- * Text body of a WhatsApp message, including media captions.
+ * Text body of a WhatsApp message.
+ * Covers every inbound type that would otherwise render as an empty bubble:
+ * media captions, reactions (customer taps an emoji on a message), shared
+ * locations, button/list replies from welcome-message flows, contact cards
+ * and unsupported types.
  * @param {object} msg
  * @returns {string}
  */
 function whatsAppMessageText(msg) {
   if (!msg) return "";
   if (msg.text?.body) return msg.text.body;
-  const media = msg[msg.type];
-  if (media?.caption) return media.caption;
-  return "";
+
+  switch (msg.type) {
+    case "reaction":
+      // Reaction with empty emoji = the customer REMOVED a reaction
+      return msg.reaction?.emoji
+        ? `${msg.reaction.emoji} (reaction)`
+        : "(reaction removed)";
+    case "location": {
+      const loc = msg.location || {};
+      const label = loc.name || loc.address || "Shared location";
+      if (loc.latitude != null && loc.longitude != null) {
+        return `📍 ${label} — https://maps.google.com/?q=${loc.latitude},${loc.longitude}`;
+      }
+      return `📍 ${label}`;
+    }
+    case "button":
+      return msg.button?.text || "";
+    case "interactive":
+      return (
+        msg.interactive?.button_reply?.title ||
+        msg.interactive?.list_reply?.title ||
+        ""
+      );
+    case "contacts": {
+      const names = (msg.contacts || [])
+        .map((c) => c.name?.formatted_name)
+        .filter(Boolean);
+      return names.length > 0 ? `👤 Contact: ${names.join(", ")}` : "";
+    }
+    case "order":
+      return "🛒 Sent an order";
+    case "unsupported":
+      return "[Message not supported by WhatsApp — view it on the phone]";
+    default: {
+      const media = msg[msg.type];
+      if (media?.caption) return media.caption;
+      return "";
+    }
+  }
 }
 
 /**

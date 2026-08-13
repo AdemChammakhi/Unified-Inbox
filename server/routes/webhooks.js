@@ -313,7 +313,10 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
                     senderName: waName,
                     recipientId: value.metadata.phone_number_id,
                     content: waText,
-                    messageType: messageTypeFor(waAttachments),
+                    messageType:
+                      msg.type === "reaction"
+                        ? "reaction"
+                        : messageTypeFor(waAttachments),
                     attachments: waAttachments,
                     context: waContext,
                     direction: "incoming",
