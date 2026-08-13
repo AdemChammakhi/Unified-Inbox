@@ -18,6 +18,7 @@ const {
   whatsAppMessageText,
   messageTypeFor,
 } = require("../utils/metaPayload");
+const { isBlocked, reportGraphError } = require("../utils/graphAuthGate");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -119,6 +120,40 @@ async function getSenderProfile(senderId, platform) {
     };
   };
 
+  // Fallback for Facebook: the page-conversations edge resolves participant
+  // names with plain page permissions — works even without Advanced Access.
+  const facebookConversationsFallback = async () => {
+    try {
+      const pageId = process.env.FACEBOOK_PAGE_ID;
+      if (!pageId) return empty;
+      const convRes = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
+        params: {
+          fields: "participants",
+          user_id: senderId,
+          access_token: token,
+        },
+        timeout: 5000,
+      });
+      const conv = convRes.data.data?.[0];
+      const participant = conv?.participants?.data?.find(
+        (p) => p.id === senderId,
+      );
+      if (participant?.name && !isLikelyRawId(participant.name)) {
+        return { name: participant.name, avatar: null };
+      }
+    } catch {
+      // fallback failed too
+    }
+    return empty;
+  };
+
+  // While the app lacks Advanced Access, individual profile lookups fail for
+  // every real customer — skip them entirely (the gate re-probes hourly, so
+  // this heals itself the moment Meta approves App Review).
+  if (isBlocked(platform)) {
+    return platform === "facebook" ? facebookConversationsFallback() : empty;
+  }
+
   try {
     if (!_picSupported[platform]) {
       return await fetchProfile(nameFields);
@@ -133,33 +168,10 @@ async function getSenderProfile(senderId, platform) {
         );
       }
       return await fetchProfile(nameFields);
-    } catch {
-      // Fallback for Facebook: query page conversations for participant name
+    } catch (err) {
+      reportGraphError(platform, err);
       if (platform === "facebook") {
-        try {
-          const pageId = process.env.FACEBOOK_PAGE_ID;
-          if (!pageId) return empty;
-          const convRes = await axios.get(
-            `${GRAPH_API}/${pageId}/conversations`,
-            {
-              params: {
-                fields: "participants",
-                user_id: senderId,
-                access_token: token,
-              },
-              timeout: 5000,
-            },
-          );
-          const conv = convRes.data.data?.[0];
-          const participant = conv?.participants?.data?.find(
-            (p) => p.id === senderId,
-          );
-          if (participant?.name && !isLikelyRawId(participant.name)) {
-            return { name: participant.name, avatar: null };
-          }
-        } catch {
-          // all lookups failed
-        }
+        return facebookConversationsFallback();
       }
       return empty;
     }

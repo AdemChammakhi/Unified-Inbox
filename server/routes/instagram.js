@@ -11,6 +11,7 @@ const {
   messageTypeFor,
 } = require("../utils/metaPayload");
 const { getContactAvatarMap } = require("../services/conversationService");
+const { isBlocked, reportGraphError } = require("../utils/graphAuthGate");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -100,6 +101,9 @@ let _igPicSupported = true;
  */
 async function lookupIgProfile(id, accessToken) {
   if (!isValidGraphId(id)) return null;
+  // Without Advanced Access every lookup fails — don't even try while the
+  // gate is closed (it re-probes hourly and self-heals after App Review).
+  if (isBlocked("instagram")) return null;
   const get = (fields) =>
     axios.get(`${GRAPH_API}/${encodeURIComponent(id)}`, {
       params: { fields, access_token: accessToken },
@@ -123,7 +127,8 @@ async function lookupIgProfile(id, accessToken) {
     const n = r.data?.username || r.data?.name;
     if (!n || /^\d{6,}$/.test(n)) return null;
     return { name: n, avatar: r.data?.profile_pic || null };
-  } catch {
+  } catch (err) {
+    reportGraphError("instagram", err);
     return null;
   }
 }
@@ -141,6 +146,8 @@ async function healInstagramProfiles() {
   if (_igHealRunning || Date.now() - _igLastHealAt < IG_HEAL_INTERVAL_MS) {
     return;
   }
+  // No point querying the DB when lookups are permission-blocked
+  if (isBlocked("instagram")) return;
   _igHealRunning = true;
   _igLastHealAt = Date.now();
   try {
