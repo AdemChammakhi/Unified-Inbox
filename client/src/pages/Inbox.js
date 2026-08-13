@@ -17,6 +17,7 @@ import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
 import { Search, RefreshCw, Send, Paperclip } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
+import EmailBody from "../components/EmailBody";
 
 const CLASSIFICATION_LABELS = {
   non_classifie: "Non Classifié",
@@ -1628,10 +1629,10 @@ const Inbox = () => {
                         )}
                         {/* Email HTML or text */}
                         {msg.html && isEmail ? (
-                          <div
+                          <EmailBody
+                            html={msg.html}
                             className="inbox-email-render"
                             style={styles.emailHtmlContent}
-                            dangerouslySetInnerHTML={{ __html: msg.html }}
                           />
                         ) : (
                           msg.text && <p style={styles.msgText}>{msg.text}</p>

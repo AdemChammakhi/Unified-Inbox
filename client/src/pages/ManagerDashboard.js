@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
 import AdAttribution from "../components/AdAttribution";
+import EmailBody from "../components/EmailBody";
 import {
   BarChart,
   Bar,
@@ -2020,15 +2021,13 @@ const ManagerDashboard = () => {
                               </p>
                             )}
                             {msg.html && isEmail ? (
-                              <div
+                              <EmailBody
+                                html={msg.html}
                                 className="mgr-email-render"
                                 style={{
                                   margin: "8px 0",
                                   overflow: "auto",
                                   maxHeight: 600,
-                                }}
-                                dangerouslySetInnerHTML={{
-                                  __html: msg.html,
                                 }}
                               />
                             ) : (
