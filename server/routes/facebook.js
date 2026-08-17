@@ -13,6 +13,11 @@ const { getContactAvatarMap } = require("../services/conversationService");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
+// HUMAN_AGENT extends the reply window to 7 days but needs its own App
+// Review approval. Once Meta rejects the tag we stop attempting it, so
+// out-of-window sends fail fast with the real reason (window expired).
+let _fbHumanAgentApproved = true;
+
 // In-memory cache — avoids slow Graph API calls on every request.
 // 15 s is safe: webhooks and /send bust the cache via clearFbCache(), so
 // real-time updates still surface immediately; this only throttles polling.
@@ -666,10 +671,16 @@ router.post("/send", protect, async (req, res) => {
       } catch (sendErr) {
         const errData = sendErr.response?.data?.error;
         // Error code 10 / subcode 2018278 = outside the 24h allowed window
-        if (errData?.code === 10 || errData?.error_subcode === 2018278) {
-          console.log(
-            "24h window expired, retrying with HUMAN_AGENT message tag...",
-          );
+        const windowExpired =
+          errData?.code === 10 || errData?.error_subcode === 2018278;
+        if (!windowExpired) throw sendErr;
+        // Don't retry a tag Meta already told us is unapproved — surface
+        // the window error directly instead.
+        if (!_fbHumanAgentApproved) throw sendErr;
+        console.log(
+          "24h window expired, retrying with HUMAN_AGENT message tag...",
+        );
+        try {
           const r = await axios.post(
             `${GRAPH_API}/${pageId}/messages`,
             {
@@ -681,8 +692,19 @@ router.post("/send", protect, async (req, res) => {
             { params: { access_token: accessToken } },
           );
           lastData = r.data;
-        } else {
-          throw sendErr;
+        } catch (tagErr) {
+          const tagError = tagErr.response?.data?.error;
+          if (
+            tagError?.code === 100 &&
+            /cannot tag/i.test(tagError?.message || "")
+          ) {
+            _fbHumanAgentApproved = false;
+            console.warn(
+              "[Facebook] HUMAN_AGENT tag not approved for this app — disabling the fallback",
+            );
+            throw sendErr; // report the real cause: the 24h window
+          }
+          throw tagErr;
         }
       }
     }
@@ -749,6 +771,30 @@ router.post("/send", protect, async (req, res) => {
       "Facebook send error:",
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
+
+    // Outside the 24-hour reply window (and the HUMAN_AGENT extension is
+    // not approved for this app)
+    if (apiError?.code === 10 || apiError?.error_subcode === 2018278) {
+      return res.status(400).json({
+        message:
+          "This customer last wrote more than 24 hours ago — Meta blocks replies after that. " +
+          "The conversation reopens the moment they message again. " +
+          "(Extending the window to 7 days requires the 'Human Agent' permission via Meta App Review.)",
+        error: apiError?.message,
+      });
+    }
+    if (
+      apiError?.code === 100 &&
+      /cannot tag/i.test(apiError?.message || "")
+    ) {
+      return res.status(400).json({
+        message:
+          "Reply window expired and this app does not have Meta's 'Human Agent' approval to extend it. " +
+          "The conversation reopens when the customer messages again.",
+        error: apiError?.message,
+      });
+    }
+
     return res.status(500).json({
       message: "Failed to send message",
       error: apiError?.message || error.message,

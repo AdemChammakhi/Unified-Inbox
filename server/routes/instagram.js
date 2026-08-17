@@ -94,6 +94,10 @@ const IG_LIST_TIMEOUT_MS = 8000; // hard cap — never let Meta stall the inbox
 // see it fail we stop asking so every later lookup is a single request.
 let _igPicSupported = true;
 
+// HUMAN_AGENT needs its own App Review approval — stop attempting it once
+// Meta rejects the tag, so the caller sees the original error instead.
+let _igHumanAgentApproved = true;
+
 /**
  * Look up one IGSID's profile: { name, avatar } or null.
  * Single request when profile_pic is known-unsupported; otherwise tries the
@@ -1011,21 +1015,37 @@ router.post("/send", protect, async (req, res) => {
         );
         lastData = r.data;
       } catch (firstErr) {
+        if (!_igHumanAgentApproved) throw firstErr;
         console.log(
           "Instagram RESPONSE send failed, trying HUMAN_AGENT:",
           firstErr.response?.data?.error?.message || firstErr.message,
         );
-        const r = await axios.post(
-          `${GRAPH_API}/${pageId}/messages`,
-          {
-            recipient: { id: recipientId },
-            message: payload,
-            tag: "HUMAN_AGENT",
-            messaging_type: "MESSAGE_TAG",
-          },
-          { params: { access_token: accessToken } },
-        );
-        lastData = r.data;
+        try {
+          const r = await axios.post(
+            `${GRAPH_API}/${pageId}/messages`,
+            {
+              recipient: { id: recipientId },
+              message: payload,
+              tag: "HUMAN_AGENT",
+              messaging_type: "MESSAGE_TAG",
+            },
+            { params: { access_token: accessToken } },
+          );
+          lastData = r.data;
+        } catch (tagErr) {
+          const tagError = tagErr.response?.data?.error;
+          if (
+            tagError?.code === 100 &&
+            /cannot tag/i.test(tagError?.message || "")
+          ) {
+            _igHumanAgentApproved = false;
+            console.warn(
+              "[Instagram] HUMAN_AGENT tag not approved for this app — disabling the fallback",
+            );
+            throw firstErr; // report the real cause, not the tag rejection
+          }
+          throw tagErr;
+        }
       }
     }
 
@@ -1120,7 +1140,21 @@ router.post("/send", protect, async (req, res) => {
     if (apiError?.code === 10 || apiError?.error_subcode === 2534022) {
       return res.status(400).json({
         message:
-          "Cannot send: the 24-hour messaging window has expired. The user must message you first before you can reply.",
+          "This customer last wrote more than 24 hours ago — Meta blocks replies after that. " +
+          "The conversation reopens the moment they message again.",
+        error: apiError?.message,
+      });
+    }
+
+    // HUMAN_AGENT tag rejected — app lacks the Human Agent approval
+    if (
+      apiError?.code === 100 &&
+      /cannot tag/i.test(apiError?.message || "")
+    ) {
+      return res.status(400).json({
+        message:
+          "Reply window expired and this app does not have Meta's 'Human Agent' approval to extend it. " +
+          "The conversation reopens when the customer messages again.",
         error: apiError?.message,
       });
     }
