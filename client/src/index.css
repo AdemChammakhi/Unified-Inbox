@@ -1279,3 +1279,14 @@ body {
 .channel-pill .channel-icon {
   font-size: 18px;
 }
+
+/* ===== SUPPORT (Better Call Fedi help desk) ===== */
+.support-row:hover { background: var(--bg-hover) !important; }
+.support-btn:hover { background: var(--bg-hover) !important; color: var(--text-primary) !important; }
+.support-btn-primary:hover:not(:disabled) { background: var(--accent-hover) !important; }
+.support-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.support-reply:focus, .support-scroll input:focus, .support-scroll textarea:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-glow) !important; }
+.support-scroll::-webkit-scrollbar { width: 5px; }
+.support-scroll::-webkit-scrollbar-track { background: transparent; }
+.support-scroll::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+.support-scroll::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }

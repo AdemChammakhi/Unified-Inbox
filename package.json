@@ -25,6 +25,7 @@
     "imap": "^0.8.17",
     "jsonwebtoken": "^9.0.2",
     "mailparser": "^3.9.8",
+    "mongodb": "^6.21.0",
     "mongoose": "^8.2.0",
     "multer": "^2.2.0",
     "nodemailer": "^8.0.5",

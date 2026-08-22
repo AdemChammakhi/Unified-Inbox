@@ -12,6 +12,7 @@ import MarketingDashboard from "./pages/MarketingDashboard";
 import TermsOfService from "./pages/TermsOfService";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import Inbox from "./pages/Inbox";
+import Support from "./pages/Support";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { useAuth } from "./context/AuthContext";
 
@@ -37,6 +38,15 @@ function App() {
             element={
               <ProtectedRoute>
                 <Inbox />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/support"
+            element={
+              <ProtectedRoute>
+                <Support />
               </ProtectedRoute>
             }
           />

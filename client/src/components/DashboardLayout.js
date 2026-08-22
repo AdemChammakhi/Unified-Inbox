@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   MessageSquare,
+  LifeBuoy,
 } from "lucide-react";
 
 const DashboardLayout = ({ children, noPadding = false }) => {
@@ -65,6 +66,15 @@ const DashboardLayout = ({ children, noPadding = false }) => {
           >
             <LayoutDashboard size={18} className="sidebar-link-icon" />
             {!collapsed && <span>Dashboard</span>}
+          </Link>
+
+          <Link
+            to="/support"
+            className={`sidebar-link${location.pathname === "/support" ? " active" : ""}`}
+            title="Support"
+          >
+            <LifeBuoy size={18} className="sidebar-link-icon" />
+            {!collapsed && <span>Support</span>}
           </Link>
         </nav>
 

@@ -101,6 +101,19 @@ app.use(
     credentials: true,
   }),
 );
+const { apiLimiter, webhookLimiter } = require("./middleware/rateLimiter");
+
+// Support tickets carry base64 screenshots, which blow past express.json's
+// 100KB default. Mounted BEFORE the global parser with its own larger limit,
+// so only this router accepts big bodies — every other endpoint keeps the
+// tight default.
+app.use(
+  "/api/support",
+  apiLimiter,
+  express.json({ limit: "8mb" }),
+  require("./routes/support"),
+);
+
 app.use(
   express.json({
     // Keep the raw body so webhook routes can verify Meta's
@@ -110,8 +123,6 @@ app.use(
     },
   }),
 );
-
-const { apiLimiter, webhookLimiter } = require("./middleware/rateLimiter");
 
 // Uploaded media for outbound messages — must be publicly reachable because
 // Meta fetches media by URL (filenames are 128-bit random, so unguessable).
