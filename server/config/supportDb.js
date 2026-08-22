@@ -23,9 +23,14 @@ const { MongoClient, ObjectId } = require("mongodb");
 
 const DB_NAME = "bettercallfedi";
 
-/** Project identity assigned by Fedi when he registers the project. */
-const PROJECT_KEY = (process.env.BCF_PROJECT_KEY || "unified-inbox").trim();
-const PROJECT_NAME = (process.env.BCF_PROJECT_NAME || "Unified Inbox").trim();
+/**
+ * Project identity on the help desk. Deliberately hardcoded, NOT read from
+ * the environment: this is a fixed property of the product, and letting it
+ * vary per deployment would file staging tickets under a different key (or
+ * an unregistered one) than production. Changing it is a code change.
+ */
+const PROJECT_KEY = "Medtour CRM";
+const PROJECT_NAME = "Medtour CRM";
 
 let _client = null;
 let _connecting = null;
