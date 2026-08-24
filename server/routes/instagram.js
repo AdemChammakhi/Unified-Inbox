@@ -98,6 +98,46 @@ let _igPicSupported = true;
 // Meta rejects the tag, so the caller sees the original error instead.
 let _igHumanAgentApproved = true;
 
+// ── Sender → thread-id resolution ───────────────────────────────────────────
+// Webhook-created conversations are keyed by the sender's numeric IGSID, but
+// Graph history lives under the thread id (t_…). The per-user lookup
+// (?user_id=) is a light, targeted query — it can work even while the bulk
+// conversations edge is failing for this Page. Successes cache forever
+// (thread ids are stable); failures back off for 10 minutes.
+const _igThreadIdCache = new Map(); // senderId -> { threadId|null, at }
+const THREAD_ID_FAIL_TTL = 10 * 60 * 1000;
+const THREAD_ID_CACHE_MAX = 500;
+
+async function resolveIgThreadId(senderId, accessToken, pageId) {
+  const cached = _igThreadIdCache.get(senderId);
+  if (
+    cached &&
+    (cached.threadId || Date.now() - cached.at < THREAD_ID_FAIL_TTL)
+  ) {
+    return cached.threadId;
+  }
+  let threadId = null;
+  try {
+    const r = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
+      params: {
+        platform: "instagram",
+        user_id: senderId,
+        fields: "id",
+        access_token: accessToken,
+      },
+      timeout: 5000,
+    });
+    threadId = r.data?.data?.[0]?.id || null;
+  } catch {
+    // cached below as a failure — retried after the TTL
+  }
+  if (_igThreadIdCache.size >= THREAD_ID_CACHE_MAX) {
+    _igThreadIdCache.delete(_igThreadIdCache.keys().next().value);
+  }
+  _igThreadIdCache.set(senderId, { threadId, at: Date.now() });
+  return threadId;
+}
+
 /**
  * Look up one IGSID's profile: { name, avatar } or null.
  * Single request when profile_pic is known-unsupported; otherwise tries the
@@ -746,7 +786,19 @@ router.get("/messages-paged", protect, async (req, res) => {
       }
 
       if (accessToken && (accountId || pageId) && isValidGraphId(conversationId)) {
-          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
+          // Numeric id = webhook keying (the sender's IGSID). Graph history
+          // lives under the t_… thread id — resolve it, but keep STORING
+          // under the requested id so webhook and synced rows share a key.
+          let fetchId = conversationId;
+          if (/^\d+$/.test(conversationId)) {
+            fetchId = await resolveIgThreadId(
+              conversationId,
+              accessToken,
+              pageId,
+            );
+            if (!fetchId) return;
+          }
+          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(fetchId)}`, {
             params: {
               fields:
                 "messages.limit(30){message,from,to,created_time,attachments}",
@@ -800,17 +852,13 @@ router.get("/messages-paged", protect, async (req, res) => {
       }
     };
 
-    if (!before && !/^\d+$/.test(conversationId)) {
+    let refreshSuggested = false;
+    if (!before) {
       const hasLocal = await Message.exists({
         platform: "instagram",
         conversationId: sanitizeId(conversationId) || "-",
       });
-      if (hasLocal) {
-        // Local history exists — respond now, top up in the background
-        syncThreadFromGraph().catch((e) =>
-          console.error("IG background thread sync failed:", e.message),
-        );
-      } else {
+      if (!hasLocal) {
         try {
           await syncThreadFromGraph();
         } catch (syncErr) {
@@ -819,6 +867,23 @@ router.get("/messages-paged", protect, async (req, res) => {
             syncErr.message,
           );
         }
+      } else {
+        // Local history exists: give a fast sync one beat to land in THIS
+        // response; if Meta is slow, respond now and tell the client to
+        // refetch once — otherwise messages that only exist on Meta's side
+        // (sent from the phone, arrived while webhooks were down) stay
+        // invisible until the conversation is reopened.
+        const sync = syncThreadFromGraph()
+          .then(() => "done")
+          .catch((e) => {
+            console.error("IG background thread sync failed:", e.message);
+            return "failed";
+          });
+        const winner = await Promise.race([
+          sync,
+          new Promise((r) => setTimeout(r, 2500, "pending")),
+        ]);
+        if (winner === "pending") refreshSuggested = true;
       }
     }
 
@@ -884,6 +949,7 @@ router.get("/messages-paged", protect, async (req, res) => {
         };
       }),
       hasMore: messages.length === pageLimit,
+      refreshSuggested,
     });
   } catch (err) {
     console.error("IG messages-paged error:", err.message);

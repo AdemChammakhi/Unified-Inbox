@@ -756,48 +756,69 @@ const Inbox = () => {
           // messages saved by webhooks (which use senderId as conversationId) as well
           // as messages saved by the full API sync (which use the Graph API conv.id).
           const participantId = conv.participants?.[0]?.id;
-          const res = await axios.get(endpoint, {
-            params: { conversationId: conv.id, participantId, limit: 30 },
-            headers: { Authorization: `Bearer ${user?.token}` },
-          });
 
-          // If a socket message was added while we were fetching (or before), ensure it stays at the bottom
-          const loadedMessages = res.data.messages || [];
+          const loadAndMerge = async () => {
+            const res = await axios.get(endpoint, {
+              params: { conversationId: conv.id, participantId, limit: 30 },
+              headers: { Authorization: `Bearer ${user?.token}` },
+            });
 
-          // Resolve existing messages from cache or state to compute merged list synchronously
-          const cachedConvs = queryClient.getQueryData(["conversations", platform]) || [];
-          const currentCached = cachedConvs.find((c) => c.id === conv.id);
-          const existingMessages = currentCached?.messages || selectedConvRef.current?.messages || [];
+            // If a socket message was added while we were fetching (or before), ensure it stays at the bottom
+            const loadedMessages = res.data.messages || [];
 
-          const merged = [...loadedMessages];
-          existingMessages.forEach((em) => {
-            if (!merged.some((m) => m.id === em.id)) {
-              merged.push(em);
-            }
-          });
+            // Resolve existing messages from cache or state to compute merged list synchronously
+            const cachedConvs =
+              queryClient.getQueryData(["conversations", platform]) || [];
+            const currentCached = cachedConvs.find((c) => c.id === conv.id);
+            const existingMessages =
+              currentCached?.messages ||
+              selectedConvRef.current?.messages ||
+              [];
 
-          // Sort by time to ensure correct order
-          merged.sort((a, b) => new Date(a.time) - new Date(b.time));
+            const merged = [...loadedMessages];
+            existingMessages.forEach((em) => {
+              if (!merged.some((m) => m.id === em.id)) {
+                merged.push(em);
+              }
+            });
 
-          setSelectedConv((prev) => {
-            if (!prev || prev.id !== conv.id) return prev;
-            return {
-              ...prev,
-              messages: merged,
-              _hasMoreMessages: res.data.hasMore,
-              _messagesLoaded: true,
-            };
-          });
+            // Sort by time to ensure correct order
+            merged.sort((a, b) => new Date(a.time) - new Date(b.time));
 
-          queryClient.setQueryData(
-            ["conversations", platform],
-            (prevConvs = []) =>
-              prevConvs.map((c) =>
-                c.id === conv.id
-                  ? { ...c, _messagesLoaded: true, messages: merged }
-                  : c,
-              ),
-          );
+            setSelectedConv((prev) => {
+              if (!prev || prev.id !== conv.id) return prev;
+              return {
+                ...prev,
+                messages: merged,
+                _hasMoreMessages: res.data.hasMore,
+                _messagesLoaded: true,
+              };
+            });
+
+            queryClient.setQueryData(
+              ["conversations", platform],
+              (prevConvs = []) =>
+                prevConvs.map((c) =>
+                  c.id === conv.id
+                    ? { ...c, _messagesLoaded: true, messages: merged }
+                    : c,
+                ),
+            );
+            return res.data;
+          };
+
+          const first = await loadAndMerge();
+
+          // The server answered from local history while still pulling this
+          // thread's messages from Meta — pick the new rows up once, a beat
+          // later, so nothing stays invisible until the next open.
+          if (first.refreshSuggested) {
+            setTimeout(() => {
+              if (selectedConvRef.current?.id === conv.id) {
+                loadAndMerge().catch(() => {});
+              }
+            }, 4000);
+          }
         } catch (err) {
           console.error("Failed to fetch messages:", err.message);
         }

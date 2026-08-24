@@ -18,6 +18,44 @@ const GRAPH_API = "https://graph.facebook.com/v24.0";
 // out-of-window sends fail fast with the real reason (window expired).
 let _fbHumanAgentApproved = true;
 
+// ── Sender → thread-id resolution ───────────────────────────────────────────
+// Webhook-created conversations are keyed by the sender's numeric PSID, but
+// Graph history lives under the thread id (t_…). The per-user lookup
+// (?user_id=) is light and targeted. Successes cache forever (thread ids are
+// stable); failures back off for 10 minutes.
+const _fbThreadIdCache = new Map(); // senderId -> { threadId|null, at }
+const FB_THREAD_FAIL_TTL = 10 * 60 * 1000;
+const FB_THREAD_CACHE_MAX = 500;
+
+async function resolveFbThreadId(senderId, accessToken, pageId) {
+  const cached = _fbThreadIdCache.get(senderId);
+  if (
+    cached &&
+    (cached.threadId || Date.now() - cached.at < FB_THREAD_FAIL_TTL)
+  ) {
+    return cached.threadId;
+  }
+  let threadId = null;
+  try {
+    const r = await axios.get(`${GRAPH_API}/${pageId}/conversations`, {
+      params: {
+        user_id: senderId,
+        fields: "id",
+        access_token: accessToken,
+      },
+      timeout: 5000,
+    });
+    threadId = r.data?.data?.[0]?.id || null;
+  } catch {
+    // cached below as a failure — retried after the TTL
+  }
+  if (_fbThreadIdCache.size >= FB_THREAD_CACHE_MAX) {
+    _fbThreadIdCache.delete(_fbThreadIdCache.keys().next().value);
+  }
+  _fbThreadIdCache.set(senderId, { threadId, at: Date.now() });
+  return threadId;
+}
+
 // In-memory cache — avoids slow Graph API calls on every request.
 // 15 s is safe: webhooks and /send bust the cache via clearFbCache(), so
 // real-time updates still surface immediately; this only throttles polling.
@@ -429,7 +467,19 @@ router.get("/messages-paged", protect, async (req, res) => {
       const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
       const pageId = process.env.FACEBOOK_PAGE_ID;
       if (accessToken && pageId && isValidGraphId(conversationId)) {
-          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(conversationId)}`, {
+          // Numeric id = webhook keying (the sender's PSID). Graph history
+          // lives under the t_… thread id — resolve it, but keep STORING
+          // under the requested id so webhook and synced rows share a key.
+          let fetchId = conversationId;
+          if (/^\d+$/.test(conversationId)) {
+            fetchId = await resolveFbThreadId(
+              conversationId,
+              accessToken,
+              pageId,
+            );
+            if (!fetchId) return;
+          }
+          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(fetchId)}`, {
             params: {
               fields:
                 "messages.limit(30){message,from,to,created_time,attachments}",
@@ -477,17 +527,13 @@ router.get("/messages-paged", protect, async (req, res) => {
       }
     };
 
-    if (!before && !/^\d+$/.test(conversationId)) {
+    let refreshSuggested = false;
+    if (!before) {
       const hasLocal = await Message.exists({
         platform: "facebook",
         conversationId: sanitizeId(conversationId) || "-",
       });
-      if (hasLocal) {
-        // Local history exists — respond now, top up in the background
-        syncThreadFromGraph().catch((e) =>
-          console.error("FB background thread sync failed:", e.message),
-        );
-      } else {
+      if (!hasLocal) {
         try {
           await syncThreadFromGraph();
         } catch (syncErr) {
@@ -496,6 +542,22 @@ router.get("/messages-paged", protect, async (req, res) => {
             syncErr.message,
           );
         }
+      } else {
+        // Local history exists: give a fast sync one beat to land in THIS
+        // response; if Meta is slow, respond now and tell the client to
+        // refetch once — otherwise messages that only exist on Meta's side
+        // stay invisible until the conversation is reopened.
+        const sync = syncThreadFromGraph()
+          .then(() => "done")
+          .catch((e) => {
+            console.error("FB background thread sync failed:", e.message);
+            return "failed";
+          });
+        const winner = await Promise.race([
+          sync,
+          new Promise((r) => setTimeout(r, 2500, "pending")),
+        ]);
+        if (winner === "pending") refreshSuggested = true;
       }
     }
 
@@ -558,6 +620,7 @@ router.get("/messages-paged", protect, async (req, res) => {
         };
       }),
       hasMore: messages.length === pageLimit,
+      refreshSuggested,
     });
   } catch (err) {
     console.error("FB messages-paged error:", err.message);

@@ -751,45 +751,61 @@ const ManagerDashboard = () => {
 
         try {
           const participantId = conv.participants?.[0]?.id;
-          const res = await axios.get(endpoint, {
-            params: { conversationId: conv.id, participantId, limit: 30 },
-            headers: { Authorization: `Bearer ${user?.token}` },
-          });
 
-          const loadedMessages = res.data.messages || [];
-          const cachedConvs =
-            queryClient.getQueryData(["conversations", platform]) || [];
-          const currentCached = cachedConvs.find((c) => c.id === conv.id);
-          const existingMessages =
-            currentCached?.messages ||
-            selectedConvRef.current?.messages ||
-            [];
+          const loadAndMerge = async () => {
+            const res = await axios.get(endpoint, {
+              params: { conversationId: conv.id, participantId, limit: 30 },
+              headers: { Authorization: `Bearer ${user?.token}` },
+            });
 
-          const merged = [...loadedMessages];
-          existingMessages.forEach((em) => {
-            if (!merged.some((m) => m.id === em.id)) merged.push(em);
-          });
-          merged.sort((a, b) => new Date(a.time) - new Date(b.time));
+            const loadedMessages = res.data.messages || [];
+            const cachedConvs =
+              queryClient.getQueryData(["conversations", platform]) || [];
+            const currentCached = cachedConvs.find((c) => c.id === conv.id);
+            const existingMessages =
+              currentCached?.messages ||
+              selectedConvRef.current?.messages ||
+              [];
 
-          setSelectedConv((prev) => {
-            if (!prev || prev.id !== conv.id) return prev;
-            return {
-              ...prev,
-              messages: merged,
-              _hasMoreMessages: res.data.hasMore,
-              _messagesLoaded: true,
-            };
-          });
+            const merged = [...loadedMessages];
+            existingMessages.forEach((em) => {
+              if (!merged.some((m) => m.id === em.id)) merged.push(em);
+            });
+            merged.sort((a, b) => new Date(a.time) - new Date(b.time));
 
-          queryClient.setQueryData(
-            ["conversations", platform],
-            (prevConvs = []) =>
-              prevConvs.map((c) =>
-                c.id === conv.id
-                  ? { ...c, _messagesLoaded: true, messages: merged }
-                  : c,
-              ),
-          );
+            setSelectedConv((prev) => {
+              if (!prev || prev.id !== conv.id) return prev;
+              return {
+                ...prev,
+                messages: merged,
+                _hasMoreMessages: res.data.hasMore,
+                _messagesLoaded: true,
+              };
+            });
+
+            queryClient.setQueryData(
+              ["conversations", platform],
+              (prevConvs = []) =>
+                prevConvs.map((c) =>
+                  c.id === conv.id
+                    ? { ...c, _messagesLoaded: true, messages: merged }
+                    : c,
+                ),
+            );
+            return res.data;
+          };
+
+          const first = await loadAndMerge();
+
+          // Server still pulling this thread's history from Meta — pick the
+          // new rows up once, a beat later.
+          if (first.refreshSuggested) {
+            setTimeout(() => {
+              if (selectedConvRef.current?.id === conv.id) {
+                loadAndMerge().catch(() => {});
+              }
+            }, 4000);
+          }
         } catch (err) {
           console.error("Failed to fetch messages:", err.message);
         }
