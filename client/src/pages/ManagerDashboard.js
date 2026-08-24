@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
 import AdAttribution from "../components/AdAttribution";
+import AppointmentsPanel from "../components/AppointmentsPanel";
 import EmailBody from "../components/EmailBody";
 import {
   BarChart,
@@ -50,6 +51,7 @@ const CLASSIFICATION_LABELS = {
   hors_cible: "Hors Cible",
   suivi: "Suivi",
   priorite: "Priorité",
+  rdv: "RDV",
 };
 
 const CLASSIFICATION_COLORS = {
@@ -58,6 +60,21 @@ const CLASSIFICATION_COLORS = {
   hors_cible: "#E2685F",
   suivi: "#5B9BD9",
   priorite: "#E3A63C",
+  rdv: "#A98BD6",
+};
+
+/** Format an appointment for display: "lun. 25 août, 14:30". */
+const formatAppointment = (value) => {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("fr-FR", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 };
 
 const CHART_COLORS = ["#E8833A", "#5FBF8A", "#5B9BD9", "#E2685F", "#E3A63C"];
@@ -113,6 +130,7 @@ const ManagerDashboard = () => {
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
+  const [appointments, setAppointments] = useState({});
   const [classFilter, setClassFilter] = useState("all");
   const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
@@ -140,6 +158,7 @@ const ManagerDashboard = () => {
   const [analytics, setAnalytics] = useState(null);
   const [agentStats, setAgentStats] = useState([]);
   const [adAttribution, setAdAttribution] = useState([]);
+  const [appointmentStats, setAppointmentStats] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
   /* ════════════════════════════════════════
@@ -578,6 +597,7 @@ const ManagerDashboard = () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       setClassifications(res.data.classifications || {});
+      setAppointments(res.data.appointments || {});
     } catch (error) {
       if (error.response?.status === 401) {
         logout();
@@ -606,14 +626,44 @@ const ManagerDashboard = () => {
     }
   }, [activeTab, user?.token, logout, navigate]);
 
+  // RDV needs a date; managers pick one via prompt rather than the inline
+  // picker the agents' inbox uses (this view is read-only otherwise).
   const updateClassification = async (conversationId, classification) => {
+    let appointmentAt = null;
+    if (classification === "rdv") {
+      const existing = appointments[conversationId];
+      const answer = window.prompt(
+        "Date du rendez-vous (AAAA-MM-JJ HH:MM)",
+        existing
+          ? new Date(existing).toISOString().slice(0, 16).replace("T", " ")
+          : "",
+      );
+      if (answer === null) return; // cancelled
+      const parsed = new Date(answer.trim().replace(" ", "T"));
+      if (Number.isNaN(parsed.getTime())) {
+        alert("Date invalide. Utilisez le format AAAA-MM-JJ HH:MM");
+        return;
+      }
+      appointmentAt = parsed.toISOString();
+    }
     try {
       const token = user?.token;
       await axios.put(
         "/api/classifications",
-        { conversationId, platform: activeTab, classification },
+        {
+          conversationId,
+          platform: activeTab,
+          classification,
+          ...(appointmentAt ? { appointmentAt } : {}),
+        },
         { headers: { Authorization: `Bearer ${token}` } },
       );
+      setAppointments((prev) => {
+        const next = { ...prev };
+        if (appointmentAt) next[conversationId] = appointmentAt;
+        else delete next[conversationId];
+        return next;
+      });
       setClassifications((prev) => ({
         ...prev,
         [conversationId]: classification,
@@ -806,20 +856,25 @@ const ManagerDashboard = () => {
       if (!token) return;
       setAnalyticsLoading(true);
       try {
-        const [summaryRes, agentsRes, attributionRes] = await Promise.all([
-          axios.get(`/api/analytics/summary?range=${range}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-          axios.get("/api/analytics/agents", {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-          axios.get(`/api/analytics/ad-attribution?range=${range}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-        ]);
+        const [summaryRes, agentsRes, attributionRes, rdvRes] =
+          await Promise.all([
+            axios.get(`/api/analytics/summary?range=${range}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            axios.get("/api/analytics/agents", {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            axios.get(`/api/analytics/ad-attribution?range=${range}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            axios.get(`/api/analytics/appointments?range=${range}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+          ]);
         setAnalytics(summaryRes.data);
         setAgentStats(agentsRes.data?.agents || []);
         setAdAttribution(attributionRes.data?.ads || []);
+        setAppointmentStats(rdvRes.data || null);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
       } finally {
@@ -1293,6 +1348,7 @@ const ManagerDashboard = () => {
                     { key: "hors_cible", label: "Hors Cible" },
                     { key: "suivi", label: "Suivi" },
                     { key: "priorite", label: "Priorité" },
+                    { key: "rdv", label: "RDV" },
                   ].map((f) => (
                     <button
                       key={f.key}
@@ -1744,6 +1800,7 @@ const ManagerDashboard = () => {
                           </option>
                           <option value="suivi">Suivi</option>
                           <option value="priorite">Priorité</option>
+                          <option value="rdv">RDV</option>
                         </select>
                         <button
                           className="mgr-delete-btn"
@@ -2762,6 +2819,12 @@ const ManagerDashboard = () => {
                     </div>
                   )}
                 </div>
+
+                {/* RDV agenda */}
+                <AppointmentsPanel
+                  data={appointmentStats}
+                  rangeLabel={` (${analyticsRange}j)`}
+                />
 
                 {/* Ad / post attribution */}
                 <AdAttribution

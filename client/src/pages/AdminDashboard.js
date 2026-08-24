@@ -5,6 +5,7 @@ import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
 import PlatformIcon from "../components/PlatformIcon";
 import AdAttribution from "../components/AdAttribution";
+import AppointmentsPanel from "../components/AppointmentsPanel";
 import {
   BarChart,
   Bar,
@@ -41,6 +42,7 @@ const AdminDashboard = () => {
   const [analytics, setAnalytics] = useState(null);
   const [agentStats, setAgentStats] = useState([]);
   const [adAttribution, setAdAttribution] = useState([]);
+  const [appointmentStats, setAppointmentStats] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
   const fetchAnalytics = useCallback(
@@ -49,20 +51,25 @@ const AdminDashboard = () => {
       if (!token) return;
       setAnalyticsLoading(true);
       try {
-        const [summaryRes, agentsRes, attributionRes] = await Promise.all([
-          axios.get(`/api/analytics/summary?range=${range}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-          axios.get("/api/analytics/agents", {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-          axios.get(`/api/analytics/ad-attribution?range=${range}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-        ]);
+        const [summaryRes, agentsRes, attributionRes, rdvRes] =
+          await Promise.all([
+            axios.get(`/api/analytics/summary?range=${range}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            axios.get("/api/analytics/agents", {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            axios.get(`/api/analytics/ad-attribution?range=${range}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            axios.get(`/api/analytics/appointments?range=${range}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+          ]);
         setAnalytics(summaryRes.data);
         setAgentStats(agentsRes.data?.agents || []);
         setAdAttribution(attributionRes.data?.ads || []);
+        setAppointmentStats(rdvRes.data || null);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
       } finally {
@@ -490,6 +497,12 @@ const AdminDashboard = () => {
                   </div>
                 )}
               </div>
+
+              {/* RDV agenda */}
+              <AppointmentsPanel
+                data={appointmentStats}
+                rangeLabel={` (${analyticsRange}j)`}
+              />
 
               {/* Ad / post attribution */}
               <AdAttribution

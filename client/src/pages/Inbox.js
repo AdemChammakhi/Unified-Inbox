@@ -25,6 +25,29 @@ const CLASSIFICATION_LABELS = {
   hors_cible: "Hors Cible",
   suivi: "Suivi",
   priorite: "Priorité",
+  rdv: "RDV",
+};
+
+/** Format an appointment for display: "lun. 25 août, 14:30". */
+const formatAppointment = (value) => {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("fr-FR", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+/** Value for <input type="datetime-local">, which needs local time, no zone. */
+const toLocalInputValue = (value) => {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
 const CLASSIFICATION_COLORS = {
@@ -33,6 +56,7 @@ const CLASSIFICATION_COLORS = {
   hors_cible: "#E2685F",
   suivi: "#5B9BD9",
   priorite: "#E3A63C",
+  rdv: "#A98BD6",
 };
 
 // Labels for the "replying to…" context card (ads, posts, stories)
@@ -69,6 +93,9 @@ const Inbox = () => {
   const [activeTab, setActiveTab] = useState("instagram");
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
+  const [appointments, setAppointments] = useState({});
+  // { conversationId, value } while the agent is picking an RDV date
+  const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
   const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
@@ -559,6 +586,7 @@ const Inbox = () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       setClassifications(res.data.classifications || {});
+      setAppointments(res.data.appointments || {});
     } catch (error) {
       if (error.response?.status === 401) {
         logout();
@@ -589,22 +617,53 @@ const Inbox = () => {
     }
   }, [activeTab, user?.token, logout, navigate]);
 
-  // Update classification for a conversation
-  const updateClassification = async (conversationId, classification) => {
+  // Update classification for a conversation.
+  // RDV needs a date, so picking it opens the date prompt instead of saving
+  // straight away; `appointmentAt` is passed once the agent confirms.
+  const updateClassification = async (
+    conversationId,
+    classification,
+    appointmentAt = null,
+  ) => {
+    if (classification === "rdv" && !appointmentAt) {
+      setRdvDraft({
+        conversationId,
+        value: toLocalInputValue(appointments[conversationId]),
+      });
+      return;
+    }
     try {
       const token = user?.token;
       await axios.put(
         "/api/classifications",
-        { conversationId, platform: activeTab, classification },
+        {
+          conversationId,
+          platform: activeTab,
+          classification,
+          ...(appointmentAt ? { appointmentAt } : {}),
+        },
         { headers: { Authorization: `Bearer ${token}` } },
       );
       setClassifications((prev) => ({
         ...prev,
         [conversationId]: classification,
       }));
+      setAppointments((prev) => {
+        const next = { ...prev };
+        // Leaving RDV drops the date, matching what the server just stored
+        if (classification === "rdv" && appointmentAt) {
+          next[conversationId] = appointmentAt;
+        } else {
+          delete next[conversationId];
+        }
+        return next;
+      });
+      setRdvDraft(null);
     } catch (error) {
       console.error("Failed to update classification:", error.message);
-      alert("Failed to update classification");
+      alert(
+        error.response?.data?.message || "Failed to update classification",
+      );
     }
   };
 
@@ -1148,6 +1207,7 @@ const Inbox = () => {
                 { key: "hors_cible", label: "Hors Cible" },
                 { key: "suivi", label: "Suivi" },
                 { key: "priorite", label: "Priorité" },
+                { key: "rdv", label: "RDV" },
               ].map((f) => (
                 <button
                   key={f.key}
@@ -1376,6 +1436,11 @@ const Inbox = () => {
                             }}
                           />
                         </div>
+                        {cls === "rdv" && appointments[conv.id] && (
+                          <div style={styles.rdvRowDate}>
+                            📅 {formatAppointment(appointments[conv.id])}
+                          </div>
+                        )}
                         <p
                           style={{
                             ...styles.lastMsg,
@@ -1474,7 +1539,28 @@ const Inbox = () => {
                       <option value="hors_cible">Hors Cible</option>
                       <option value="suivi">Suivi</option>
                       <option value="priorite">Priorité</option>
+                      <option value="rdv">RDV</option>
                     </select>
+                    {/* Booked appointment, once set */}
+                    {classifications[selectedConv.id] === "rdv" &&
+                      appointments[selectedConv.id] &&
+                      !rdvDraft && (
+                        <button
+                          className="inbox-rdv-chip"
+                          style={styles.rdvChip}
+                          title="Change the appointment"
+                          onClick={() =>
+                            setRdvDraft({
+                              conversationId: selectedConv.id,
+                              value: toLocalInputValue(
+                                appointments[selectedConv.id],
+                              ),
+                            })
+                          }
+                        >
+                          📅 {formatAppointment(appointments[selectedConv.id])}
+                        </button>
+                      )}
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"
@@ -1519,6 +1605,49 @@ const Inbox = () => {
                     )}
                   </div>
                 </div>
+
+                {/* RDV date picker — shown while booking or changing */}
+                {rdvDraft?.conversationId === selectedConv.id && (
+                  <div style={styles.rdvBar}>
+                    <span style={styles.rdvBarLabel}>
+                      📅 Date du rendez-vous
+                    </span>
+                    <input
+                      type="datetime-local"
+                      className="inbox-rdv-input"
+                      style={styles.rdvInput}
+                      value={rdvDraft.value}
+                      autoFocus
+                      onChange={(e) =>
+                        setRdvDraft((prev) => ({
+                          ...prev,
+                          value: e.target.value,
+                        }))
+                      }
+                    />
+                    <button
+                      className="inbox-send-action"
+                      style={styles.rdvSave}
+                      disabled={!rdvDraft.value}
+                      onClick={() =>
+                        updateClassification(
+                          selectedConv.id,
+                          "rdv",
+                          new Date(rdvDraft.value).toISOString(),
+                        )
+                      }
+                    >
+                      Confirmer
+                    </button>
+                    <button
+                      className="inbox-tab-btn"
+                      style={styles.rdvCancel}
+                      onClick={() => setRdvDraft(null)}
+                    >
+                      Annuler
+                    </button>
+                  </div>
+                )}
 
                 <div className="inbox-msg-scroll" style={styles.messageList}>
                   {selectedConv._hasMoreMessages && activeTab !== "email" && (
@@ -2315,6 +2444,78 @@ const styles = {
   },
   // Provenance stamp — dashed border like a passport stamp: it certifies
   // which ad/post/story this customer arrived from.
+  rdvChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    fontSize: 11,
+    fontWeight: 700,
+    color: CLASSIFICATION_COLORS.rdv,
+    backgroundColor: `${CLASSIFICATION_COLORS.rdv}1a`,
+    border: `1px solid ${CLASSIFICATION_COLORS.rdv}55`,
+    borderRadius: 6,
+    padding: "3px 9px",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  rdvRowDate: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: CLASSIFICATION_COLORS.rdv,
+    marginTop: 2,
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  rdvBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "10px 24px",
+    borderBottom: "1px solid var(--border-primary)",
+    backgroundColor: `${CLASSIFICATION_COLORS.rdv}14`,
+    flexWrap: "wrap",
+  },
+  rdvBarLabel: {
+    fontSize: 11,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    color: CLASSIFICATION_COLORS.rdv,
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  rdvInput: {
+    padding: "7px 11px",
+    borderRadius: 8,
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-card)",
+    color: "var(--text-primary)",
+    fontSize: 13,
+    fontFamily: "'Space Grotesk', sans-serif",
+    outline: "none",
+    colorScheme: "dark light",
+  },
+  rdvSave: {
+    padding: "7px 16px",
+    borderRadius: 8,
+    border: "none",
+    backgroundColor: CLASSIFICATION_COLORS.rdv,
+    color: "#fff",
+    fontWeight: 700,
+    fontSize: 12.5,
+    cursor: "pointer",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  rdvCancel: {
+    padding: "7px 14px",
+    borderRadius: 8,
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "transparent",
+    color: "var(--text-faint)",
+    fontWeight: 600,
+    fontSize: 12.5,
+    cursor: "pointer",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
   contextCard: {
     display: "flex",
     alignItems: "center",

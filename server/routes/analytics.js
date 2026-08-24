@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
+const Classification = require("../models/Classification");
 const { protect, authorize } = require("../middleware/auth");
 
 // GET /api/analytics/summary?range=7  (range: 1, 7, 30)
@@ -159,6 +160,74 @@ router.get(
 // Groups inbound messages that carry ad/post context (captured from Meta
 // referral webhooks) and, per ad: how many distinct conversations it opened
 // and how many total inbound messages those conversations produced.
+// GET /api/analytics/appointments?range=30
+// The RDV agenda: how many appointments were booked, how they are split
+// between still-upcoming and already-past, and the next ones in order.
+// `range` scopes the *booked in* count (when the RDV was created); the
+// upcoming list is not range-bound — an appointment three months out still
+// matters today.
+router.get("/appointments", protect, async (req, res) => {
+  try {
+    const range = parseInt(req.query.range) || 30;
+    const since = new Date(Date.now() - range * 24 * 60 * 60 * 1000);
+    const now = new Date();
+
+    const [bookedInRange, upcomingDocs, pastCount, totalCount] =
+      await Promise.all([
+        Classification.countDocuments({
+          classification: "rdv",
+          createdAt: { $gte: since },
+        }),
+        Classification.find({
+          classification: "rdv",
+          appointmentAt: { $gte: now },
+        })
+          .sort({ appointmentAt: 1 })
+          .limit(50)
+          .populate("classifiedBy", "firstName lastName")
+          .lean(),
+        Classification.countDocuments({
+          classification: "rdv",
+          appointmentAt: { $lt: now },
+        }),
+        Classification.countDocuments({ classification: "rdv" }),
+      ]);
+
+    // "Today" in the server's local timezone — the agency books in its own
+    // working day, not UTC.
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const endOfWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    const upcoming = upcomingDocs.map((d) => ({
+      conversationId: d.conversationId,
+      platform: d.platform,
+      appointmentAt: d.appointmentAt,
+      bookedBy: d.classifiedBy
+        ? `${d.classifiedBy.firstName || ""} ${d.classifiedBy.lastName || ""}`.trim()
+        : null,
+    }));
+
+    return res.json({
+      range,
+      total: totalCount,
+      bookedInRange,
+      upcomingCount: upcoming.length,
+      todayCount: upcoming.filter(
+        (a) => new Date(a.appointmentAt) <= endOfToday,
+      ).length,
+      next7DaysCount: upcoming.filter(
+        (a) => new Date(a.appointmentAt) <= endOfWeek,
+      ).length,
+      pastCount,
+      upcoming,
+    });
+  } catch (err) {
+    console.error("Appointments analytics error:", err.message);
+    return res.status(500).json({ message: "Failed to load appointments" });
+  }
+});
+
 router.get("/ad-attribution", protect, async (req, res) => {
   try {
     const range = parseInt(req.query.range) || 30;

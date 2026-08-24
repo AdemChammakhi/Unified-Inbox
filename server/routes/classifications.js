@@ -12,16 +12,22 @@ router.get("/", protect, async (req, res) => {
     const safePlatform = platform ? sanitizePlatform(platform) : null;
     const filter = safePlatform ? { platform: safePlatform } : {};
     const classifications = await Classification.find(filter)
-      .select("conversationId classification")
+      .select("conversationId classification appointmentAt")
       .lean();
 
     // Return as a map: { conversationId: classification }
+    // Appointment dates ride in a parallel map so the existing shape — which
+    // several views already read as a plain string — stays untouched.
     const map = {};
+    const appointments = {};
     classifications.forEach((c) => {
       map[c.conversationId] = c.classification;
+      if (c.appointmentAt) {
+        appointments[c.conversationId] = c.appointmentAt;
+      }
     });
 
-    return res.json({ classifications: map });
+    return res.json({ classifications: map, appointments });
   } catch (error) {
     console.error("Classification fetch error:", error.message);
     return res.status(500).json({ message: "Failed to fetch classifications" });
@@ -34,7 +40,7 @@ router.put("/", protect, async (req, res) => {
   try {
     const conversationId = sanitizeId(req.body.conversationId);
     const platform = sanitizePlatform(req.body.platform);
-    const { classification } = req.body;
+    const { classification, appointmentAt } = req.body;
 
     if (!conversationId || !platform || !classification) {
       return res.status(400).json({
@@ -42,17 +48,38 @@ router.put("/", protect, async (req, res) => {
       });
     }
 
-    const valid = ["cible", "hors_cible", "non_classifie", "suivi", "priorite"];
+    const valid = [
+      "cible",
+      "hors_cible",
+      "non_classifie",
+      "suivi",
+      "priorite",
+      "rdv",
+    ];
     if (!valid.includes(classification)) {
       return res.status(400).json({
         message: `Invalid classification. Must be one of: ${valid.join(", ")}`,
       });
     }
 
+    // An RDV is only useful if we know when it is — without a date it would
+    // never surface in the agenda. Any other class clears a stale date.
+    let appointment = null;
+    if (classification === "rdv") {
+      const parsed = appointmentAt ? new Date(appointmentAt) : null;
+      if (!parsed || Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({
+          message: "An appointment date is required for RDV",
+        });
+      }
+      appointment = parsed;
+    }
+
     const result = await Classification.findOneAndUpdate(
       { conversationId: String(conversationId), platform: String(platform) },
       {
         classification: String(classification),
+        appointmentAt: appointment,
         classifiedBy: req.user._id,
       },
       { upsert: true, new: true },
