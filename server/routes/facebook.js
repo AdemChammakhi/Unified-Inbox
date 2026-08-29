@@ -12,6 +12,7 @@ const {
 const { getContactAvatarMap } = require("../services/conversationService");
 
 const { describeMetaSendError, TEXT_LIMITS } = require("../utils/metaSendError");
+const { resolveRecipientId } = require("../utils/resolveRecipient");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -635,7 +636,8 @@ router.get("/messages-paged", protect, async (req, res) => {
 // attachment = { url, name, mimeType, mediaType } from POST /api/uploads.
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message, conversationId, attachment } = req.body;
+    let { recipientId } = req.body;
+    const { message, conversationId, attachment } = req.body;
     const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FACEBOOK_PAGE_ID;
 
@@ -661,6 +663,14 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Conversation Lock Check ---
+    // Same repair as Instagram: never hand Meta a thread id as the recipient.
+    const resolved = await resolveRecipientId(
+      "facebook",
+      recipientId,
+      conversationId,
+    );
+    recipientId = resolved.id;
+
     const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
     if (!lockConvId) {
       return res.status(400).json({ message: "Invalid conversationId or recipientId" });

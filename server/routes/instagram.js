@@ -14,6 +14,7 @@ const { getContactAvatarMap } = require("../services/conversationService");
 const { isBlocked, reportGraphError } = require("../utils/graphAuthGate");
 
 const { describeMetaSendError, TEXT_LIMITS } = require("../utils/metaSendError");
+const { resolveRecipientId } = require("../utils/resolveRecipient");
 
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
@@ -965,7 +966,8 @@ router.get("/messages-paged", protect, async (req, res) => {
 // Instagram only supports image / audio / video media (8MB img, 25MB a/v).
 router.post("/send", protect, async (req, res) => {
   try {
-    const { recipientId, message, conversationId, attachment } = req.body;
+    let { recipientId } = req.body;
+    const { message, conversationId, attachment } = req.body;
 
     if (!message?.trim() && !attachment?.url) {
       return res
@@ -1005,6 +1007,16 @@ router.post("/send", protect, async (req, res) => {
     }
 
     // --- Conversation Lock Check ---
+    // The inbox falls back to the conversation id when Meta gave it no
+    // participant — normal for Instagram under Standard Access — which sends
+    // a `t_…` thread id to an API that only accepts a person.
+    const resolved = await resolveRecipientId(
+      "instagram",
+      recipientId,
+      conversationId,
+    );
+    recipientId = resolved.id;
+
     const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
     if (!lockConvId) {
       return res.status(400).json({ message: "Invalid conversationId or recipientId" });
