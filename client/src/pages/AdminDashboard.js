@@ -6,6 +6,7 @@ import { useAuth } from "../context/AuthContext";
 import PlatformIcon from "../components/PlatformIcon";
 import AdAttribution from "../components/AdAttribution";
 import AppointmentsPanel from "../components/AppointmentsPanel";
+import ProspectExport from "../components/ProspectExport";
 import {
   BarChart,
   Bar,
@@ -195,6 +196,8 @@ const AdminDashboard = () => {
             <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
               Analytics Overview
             </h2>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <ProspectExport range={analyticsRange} />
             <div className="range-tabs">
               {[1, 7, 30].map((r) => (
                 <button
@@ -205,6 +208,7 @@ const AdminDashboard = () => {
                   {r === 1 ? "Today" : r === 7 ? "7 days" : "30 days"}
                 </button>
               ))}
+            </div>
             </div>
           </div>
 

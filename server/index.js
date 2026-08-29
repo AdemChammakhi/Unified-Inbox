@@ -151,6 +151,7 @@ app.use("/api/classifications", apiLimiter, require("./routes/classifications"))
 app.use("/api/locks", apiLimiter, require("./routes/locks"));
 app.use("/api/conversations", apiLimiter, require("./routes/conversations"));
 app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
+app.use("/api/exports", apiLimiter, require("./routes/exports"));
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =

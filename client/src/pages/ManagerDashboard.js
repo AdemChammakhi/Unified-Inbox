@@ -30,6 +30,7 @@ import {
 import PlatformIcon from "../components/PlatformIcon";
 import AdAttribution from "../components/AdAttribution";
 import AppointmentsPanel from "../components/AppointmentsPanel";
+import ProspectExport from "../components/ProspectExport";
 import EmailBody from "../components/EmailBody";
 import {
   BarChart,
@@ -2405,6 +2406,10 @@ const ManagerDashboard = () => {
               >
                 Analytics Overview
               </h2>
+              <div
+                style={{ display: "flex", alignItems: "center", gap: 10 }}
+              >
+              <ProspectExport range={analyticsRange} />
               <div className="range-tabs">
                 {[1, 7, 30].map((r) => (
                   <button
@@ -2415,6 +2420,7 @@ const ManagerDashboard = () => {
                     {r === 1 ? "Today" : r === 7 ? "7 days" : "30 days"}
                   </button>
                 ))}
+              </div>
               </div>
             </div>
 
