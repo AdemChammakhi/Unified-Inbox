@@ -309,34 +309,78 @@ jobs:
     environment:
       name: production   # ← requires manual approval in GitHub settings
       url: https://${{ vars.PRODUCTION_DOMAIN }}
+    # The deploy script lives here so both attempts below run the SAME thing
+    # without duplicating it. It is idempotent — pull + up -d can be re-run
+    # safely after a half-finished attempt.
+    #
+    # NOTE: the compose file on the VPS is intentionally NOT synced from this
+    # repo. /opt/unified-inbox/docker-compose.prod.yml is the source of truth
+    # there — it additionally runs mongodb + mongo-express and reads .env
+    # (not .env.production). Copying this repo's version over it would make
+    # `up -d --remove-orphans` delete the production database container.
+    # Compose changes must be applied manually on the VPS.
+    env:
+      DEPLOY_SCRIPT: |
+        cd /opt/unified-inbox
+        docker compose -f docker-compose.prod.yml pull
+        docker compose -f docker-compose.prod.yml up -d --remove-orphans
+        docker compose -f docker-compose.prod.yml ps
+        # Wait for backend health
+        for i in $(seq 1 30); do
+          if curl -sf http://127.0.0.1:5000/ > /dev/null 2>&1; then
+            echo "Backend healthy"
+            break
+          fi
+          echo "Waiting for backend... attempt $i/30"
+          sleep 5
+        done
+        # Prune old images to reclaim disk
+        docker image prune -f
     steps:
-      # NOTE: the compose file on the VPS is intentionally NOT synced from this
-      # repo. /opt/unified-inbox/docker-compose.prod.yml is the source of truth
-      # there — it additionally runs mongodb + mongo-express and reads .env
-      # (not .env.production). Copying this repo's version over it would make
-      # `up -d --remove-orphans` delete the production database container.
-      # Compose changes must be applied manually on the VPS.
-      - name: Deploy via SSH
+      # Reaching the VPS over SSH from a GitHub runner fails intermittently
+      # with "dial tcp …:22: i/o timeout" — SYN packets dropped somewhere on
+      # the Azure→Hostinger path, while the box stays reachable from
+      # elsewhere at the same moment (fail2ban ruled out: zero bans, ever).
+      # The deploy itself is fine; only reaching it is flaky. So: try, wait,
+      # try again before failing the release.
+      - name: Deploy via SSH (attempt 1)
+        id: deploy1
+        continue-on-error: true
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: 22
+          timeout: 60s
+          command_timeout: 10m
           script_stop: true
-          script: |
-            cd /opt/unified-inbox
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            docker compose -f docker-compose.prod.yml ps
-            # Wait for backend health
-            for i in $(seq 1 30); do
-              if curl -sf http://127.0.0.1:5000/ > /dev/null 2>&1; then
-                echo "Backend healthy"
-                break
-              fi
-              echo "Waiting for backend... attempt $i/30"
-              sleep 5
-            done
-            # Prune old images to reclaim disk
-            docker image prune -f
+          script: ${{ env.DEPLOY_SCRIPT }}
+
+      - name: Pause before retry
+        if: steps.deploy1.outcome == 'failure'
+        run: |
+          echo "First SSH attempt failed — waiting 2 minutes before retrying."
+          sleep 120
+
+      - name: Deploy via SSH (attempt 2)
+        id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          timeout: 60s
+          command_timeout: 10m
+          script_stop: true
+          script: ${{ env.DEPLOY_SCRIPT }}
+
+      - name: Deploy outcome
+        run: |
+          if [ "${{ steps.deploy1.outcome }}" = "success" ]; then
+            echo "Deployed on the first attempt."
+          else
+            echo "First attempt failed; the retry above carried the deploy."
+          fi
