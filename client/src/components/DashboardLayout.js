@@ -12,6 +12,8 @@ import {
   ChevronRight,
   MessageSquare,
   LifeBuoy,
+  Table2,
+  Users,
 } from "lucide-react";
 
 const DashboardLayout = ({ children, noPadding = false }) => {
@@ -67,6 +69,31 @@ const DashboardLayout = ({ children, noPadding = false }) => {
             <LayoutDashboard size={18} className="sidebar-link-icon" />
             {!collapsed && <span>Dashboard</span>}
           </Link>
+
+          {/* The prospect sheet — admins and managers only, it is the whole
+              customer base in one table. */}
+          {(user?.role === "admin" || user?.role === "manager") && (
+            <Link
+              to="/leads"
+              className={`sidebar-link${location.pathname === "/leads" ? " active" : ""}`}
+              title="Leads"
+            >
+              <Table2 size={18} className="sidebar-link-icon" />
+              {!collapsed && <span>Leads</span>}
+            </Link>
+          )}
+
+          {/* Account management — administrators only */}
+          {user?.role === "admin" && (
+            <Link
+              to="/accounts"
+              className={`sidebar-link${location.pathname === "/accounts" ? " active" : ""}`}
+              title="Comptes"
+            >
+              <Users size={18} className="sidebar-link-icon" />
+              {!collapsed && <span>Comptes</span>}
+            </Link>
+          )}
 
           <Link
             to="/support"

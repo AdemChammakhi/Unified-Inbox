@@ -30,6 +30,26 @@ const userSchema = new mongoose.Schema(
       enum: ["admin", "manager", "marketing"],
       required: [true, "Role is required"],
     },
+    /**
+     * Which admin created this account. Lets an admin see the accounts they
+     * opened and the agents underneath them, rather than every user in the
+     * system. Null for accounts that predate this field (and for the first
+     * admin, who nobody created).
+     */
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    /**
+     * Soft disable. Deleting an account would orphan the conversation locks
+     * and reply counts attributed to it, so suspension is the safe default
+     * and hard delete stays available for genuine mistakes.
+     */
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,

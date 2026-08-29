@@ -13,6 +13,8 @@ import TermsOfService from "./pages/TermsOfService";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import Inbox from "./pages/Inbox";
 import Support from "./pages/Support";
+import Leads from "./pages/Leads";
+import Accounts from "./pages/Accounts";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { useAuth } from "./context/AuthContext";
 
@@ -47,6 +49,24 @@ function App() {
             element={
               <ProtectedRoute>
                 <Support />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/leads"
+            element={
+              <ProtectedRoute>
+                <Leads />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/accounts"
+            element={
+              <ProtectedRoute allowedRole="admin">
+                <Accounts />
               </ProtectedRoute>
             }
           />
