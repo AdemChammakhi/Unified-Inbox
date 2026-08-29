@@ -28,7 +28,10 @@ const Accounts = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const [scope, setScope] = useState("mine");
+  // "Tous" is the default on purpose: accounts that existed before createdBy
+  // was recorded have no creator, so "Mes comptes" would be empty on an
+  // established installation and look like a broken page.
+  const [scope, setScope] = useState("all");
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState(null); // {type, text}
@@ -382,9 +385,19 @@ const Accounts = () => {
         <div style={styles.card}>Chargement des comptes…</div>
       ) : users.length === 0 ? (
         <div style={styles.card}>
-          {scope === "mine"
-            ? "Vous n'avez encore créé aucun compte. « Nouveau compte » pour commencer."
-            : "Aucun compte."}
+          {scope === "mine" ? (
+            <>
+              Aucun compte créé depuis cet écran pour l'instant.
+              <br />
+              <span style={styles.muted}>
+                Les comptes ouverts avant cette version n'ont pas de créateur
+                enregistré — ils apparaissent dans l'onglet « Tous ». Les
+                nouveaux comptes que vous créez ici arriveront dans cette liste.
+              </span>
+            </>
+          ) : (
+            "Aucun compte."
+          )}
         </div>
       ) : (
         <>

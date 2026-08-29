@@ -20,20 +20,6 @@ import {
   Legend,
 } from "recharts";
 
-const EMPTY_FORM = {
-  firstName: "",
-  lastName: "",
-  email: "",
-  password: "",
-  role: "",
-};
-
-const ROLES = [
-  { key: "admin", icon: "🛡️", label: "Admin" },
-  { key: "manager", icon: "📊", label: "Manager" },
-  { key: "marketing", icon: "📢", label: "Marketing" },
-];
-
 const CHART_COLORS = ["#E8833A", "#5FBF8A", "#5B9BD9", "#E2685F", "#E3A63C"];
 
 const AdminDashboard = () => {
@@ -87,11 +73,6 @@ const AdminDashboard = () => {
   const [locks, setLocks] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Create Account state
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [formLoading, setFormLoading] = useState(false);
-  const [formError, setFormError] = useState("");
-  const [formSuccess, setFormSuccess] = useState("");
 
   const fetchLocks = useCallback(async () => {
     const token = user?.token;
@@ -118,32 +99,6 @@ const AdminDashboard = () => {
     const interval = setInterval(fetchLocks, 15000);
     return () => clearInterval(interval);
   }, [fetchLocks]);
-
-  const handleCreateUser = async (e) => {
-    e.preventDefault();
-    setFormError("");
-    setFormSuccess("");
-
-    if (!form.role) {
-      setFormError("Please select a role");
-      return;
-    }
-
-    setFormLoading(true);
-    try {
-      const res = await axios.post("/api/auth/create-user", form, {
-        headers: { Authorization: `Bearer ${user?.token}` },
-      });
-      setFormSuccess(
-        `Account created for ${res.data.firstName} ${res.data.lastName} (${res.data.role})`,
-      );
-      setForm(EMPTY_FORM);
-    } catch (err) {
-      setFormError(err.response?.data?.message || "Failed to create account");
-    } finally {
-      setFormLoading(false);
-    }
-  };
 
   const handleUnlock = async (conversationId, platform) => {
     if (
@@ -595,116 +550,20 @@ const AdminDashboard = () => {
             </div>
           )}
         </div>
-        {/* Create Account Section */}
+        {/* Account management moved to its own page (/accounts) so it is not
+            buried under the analytics. */}
         <div style={{ ...styles.section, marginTop: "24px" }}>
-          <h2 style={styles.sectionTitle}>➕ Create Account</h2>
-          <p
-            style={{
-              fontSize: "13px",
-              color: "var(--text-dim)",
-              marginBottom: "20px",
-              marginTop: 0,
-            }}
-          >
-            Create a new user account with the appropriate role.
+          <h2 style={styles.sectionTitle}>Comptes</h2>
+          <p style={{ fontSize: 13, color: "var(--text-faint)", margin: "0 0 14px" }}>
+            La création, la modification et la désactivation des comptes se font
+            désormais depuis la page « Comptes » dans la barre latérale.
           </p>
-
-          {formError && (
-            <div style={styles.formAlert("var(--danger)")}>{formError}</div>
-          )}
-          {formSuccess && (
-            <div style={styles.formAlert("var(--success, #22c55e)")}>
-              {formSuccess}
-            </div>
-          )}
-
-          <form onSubmit={handleCreateUser} style={styles.createForm}>
-            <div style={styles.formRow}>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>First Name</label>
-                <input
-                  style={styles.input}
-                  type="text"
-                  placeholder="First name"
-                  required
-                  value={form.firstName}
-                  onChange={(e) =>
-                    setForm({ ...form, firstName: e.target.value })
-                  }
-                />
-              </div>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Last Name</label>
-                <input
-                  style={styles.input}
-                  type="text"
-                  placeholder="Last name"
-                  required
-                  value={form.lastName}
-                  onChange={(e) =>
-                    setForm({ ...form, lastName: e.target.value })
-                  }
-                />
-              </div>
-            </div>
-
-            <div style={styles.formRow}>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Email</label>
-                <input
-                  style={styles.input}
-                  type="email"
-                  placeholder="user@company.com"
-                  required
-                  value={form.email}
-                  onChange={(e) => setForm({ ...form, email: e.target.value })}
-                />
-              </div>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Password</label>
-                <input
-                  style={styles.input}
-                  type="password"
-                  placeholder="Strong password"
-                  minLength={6}
-                  required
-                  value={form.password}
-                  onChange={(e) =>
-                    setForm({ ...form, password: e.target.value })
-                  }
-                />
-              </div>
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Select Your Role</label>
-              <div style={styles.roleSelector}>
-                {ROLES.map((r) => (
-                  <button
-                    key={r.key}
-                    type="button"
-                    onClick={() => setForm({ ...form, role: r.key })}
-                    style={styles.roleOption(form.role === r.key)}
-                  >
-                    <span style={styles.roleIcon}>{r.icon}</span>
-                    <span style={styles.roleName}>{r.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ ...styles.formRow, alignItems: "flex-end" }}>
-              <div style={{ ...styles.formGroup, flex: "0 0 auto" }}>
-                <button
-                  type="submit"
-                  style={styles.createBtn}
-                  disabled={formLoading}
-                >
-                  {formLoading ? "Creating…" : "Create Account"}
-                </button>
-              </div>
-            </div>
-          </form>
+          <button
+            style={styles.createBtn}
+            onClick={() => navigate("/accounts")}
+          >
+            Ouvrir la gestion des comptes
+          </button>
         </div>
       </div>
     </DashboardLayout>
