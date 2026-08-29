@@ -1111,14 +1111,16 @@ const Inbox = () => {
       }, 8000);
     } catch (error) {
       console.error("Failed to send reply:", error);
-      // Prefer the server's explanatory message; Meta's raw error text is
-      // kept in `error` for debugging but reads as jargon to agents.
-      alert(
-        "Failed to send message: " +
-          (error.response?.data?.message ||
-            error.response?.data?.error ||
-            error.message),
-      );
+      // Show the explanation AND the platform's own words. Preferring only
+      // `message` produced "Failed to send message: Failed to send message"
+      // on the generic fallback — the agent was told nothing at all. Both
+      // parts, de-duplicated, so a failure is never a dead end.
+      const data = error.response?.data || {};
+      const detail = [data.message, data.error]
+        .filter(Boolean)
+        .filter((part, i, all) => all.indexOf(part) === i)
+        .join(" — ");
+      alert("Échec de l'envoi : " + (detail || error.message));
       // Revert optimistic update — restore the attachment so it isn't lost
       setPendingAttachment(attachmentToSend);
       setSelectedConv((prev) => {

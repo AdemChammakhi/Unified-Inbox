@@ -11,6 +11,8 @@ const {
 } = require("../utils/metaPayload");
 const { getContactAvatarMap } = require("../services/conversationService");
 
+const { describeMetaSendError, TEXT_LIMITS } = require("../utils/metaSendError");
+
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
 // HUMAN_AGENT extends the reply window to 7 days but needs its own App
@@ -648,6 +650,15 @@ router.post("/send", protect, async (req, res) => {
         .status(400)
         .json({ message: "message or attachment is required" });
     }
+    // Meta rejects over-long text with an opaque parameter error, so check
+    // here and tell the agent exactly how much to cut.
+    if (message && message.length > TEXT_LIMITS.facebook) {
+      return res.status(400).json({
+        message:
+          `Message trop long : ${message.length} caractères, la limite Messenger est ${TEXT_LIMITS.facebook}. ` +
+          "Envoyez-le en deux fois.",
+      });
+    }
 
     // --- Conversation Lock Check ---
     const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
@@ -835,36 +846,11 @@ router.post("/send", protect, async (req, res) => {
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
 
-    // Outside the 24-hour reply window (and the HUMAN_AGENT extension is
-    // not approved for this app)
-    if (apiError?.code === 10 || apiError?.error_subcode === 2018278) {
-      return res.status(400).json({
-        message:
-          "This customer last wrote more than 24 hours ago — Meta blocks replies after that. " +
-          "The conversation reopens the moment they message again. " +
-          "(Extending the window to 7 days requires the 'Human Agent' permission via Meta App Review.)",
-        error: apiError?.message,
-      });
-    }
-    if (
-      apiError?.code === 100 &&
-      /cannot tag/i.test(apiError?.message || "")
-    ) {
-      return res.status(400).json({
-        message:
-          "Reply window expired and this app does not have Meta's 'Human Agent' approval to extend it. " +
-          "The conversation reopens when the customer messages again.",
-        error: apiError?.message,
-      });
-    }
 
-    return res.status(500).json({
-      message: "Failed to send message",
-      error: apiError?.message || error.message,
-      code: apiError?.code,
-      subcode: apiError?.error_subcode,
-      type: apiError?.type,
-    });
+    // Every case goes through the shared mapper, which ALWAYS carries Metas
+    // own wording through so no failure is a dead end for the agent.
+    const described = describeMetaSendError(error, "facebook");
+    return res.status(described.status).json(described);
   }
 });
 

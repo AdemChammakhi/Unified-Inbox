@@ -13,6 +13,8 @@ const {
 const { getContactAvatarMap } = require("../services/conversationService");
 const { isBlocked, reportGraphError } = require("../utils/graphAuthGate");
 
+const { describeMetaSendError, TEXT_LIMITS } = require("../utils/metaSendError");
+
 const GRAPH_API = "https://graph.facebook.com/v24.0";
 
 // Cache for the auto-discovered Instagram Business Account ID
@@ -970,6 +972,15 @@ router.post("/send", protect, async (req, res) => {
         .status(400)
         .json({ message: "message or attachment is required" });
     }
+    // Meta rejects over-long text with an opaque parameter error, so check
+    // here and tell the agent exactly how much to cut.
+    if (message && message.length > TEXT_LIMITS.instagram) {
+      return res.status(400).json({
+        message:
+          `Message trop long : ${message.length} caractères, la limite Instagram est ${TEXT_LIMITS.instagram}. ` +
+          "Envoyez-le en deux fois.",
+      });
+    }
     if (
       attachment?.url &&
       !["image", "audio", "video"].includes(attachment.mediaType)
@@ -1176,78 +1187,31 @@ router.post("/send", protect, async (req, res) => {
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
 
-    // Detect app capability / Development Mode restriction (code 3)
-    if (apiError?.code === 3) {
-      return res.status(400).json({
-        message:
-          "Instagram messaging is blocked by the Meta App configuration. " +
-          "Most likely cause: the app is in Development Mode and the recipient is not an App Tester. " +
-          "Fix: add the recipient as a Tester at developers.facebook.com → App Roles, " +
-          "or complete Meta App Review to switch to Live Mode.",
-        error: apiError?.message,
-      });
-    }
 
-    // Code 200: the Meta app has only Standard Access to
-    // instagram_manage_messages — Meta then restricts sending to users who
-    // hold a role on the app (admin/developer/tester). Real customers are
-    // unreachable until App Review grants Advanced Access.
-    if (apiError?.code === 200) {
-      return res.status(400).json({
-        message:
-          "Meta is blocking replies to real customers: the app has only Standard Access to instagram_manage_messages. " +
-          "Fix: developers.facebook.com → App Review → Permissions and Features → instagram_manage_messages → Request Advanced Access " +
-          "(requires Business Verification). Until approved, only users with a role on the app can receive replies.",
-        error: apiError?.message,
-      });
-    }
-
-    // Detect 24-hour window error
-    if (apiError?.code === 10 || apiError?.error_subcode === 2534022) {
-      return res.status(400).json({
-        message:
-          "This customer last wrote more than 24 hours ago — Meta blocks replies after that. " +
-          "The conversation reopens the moment they message again.",
-        error: apiError?.message,
-      });
-    }
-
-    // HUMAN_AGENT tag rejected — app lacks the Human Agent approval
-    if (
-      apiError?.code === 100 &&
-      /cannot tag/i.test(apiError?.message || "")
-    ) {
-      return res.status(400).json({
-        message:
-          "Reply window expired and this app does not have Meta's 'Human Agent' approval to extend it. " +
-          "The conversation reopens when the customer messages again.",
-        error: apiError?.message,
-      });
-    }
-
-    // Detect "Object does not exist / wrong IG Account ID" error (code 100)
-    // Reset the cached ID so the next call re-discovers it from the Graph API
+    // IG-specific: a wrong/stale Business Account ID. Clear the cache so the
+    // next send re-discovers it, then fall through to the shared mapper.
     if (
       apiError?.code === 100 &&
       typeof apiError?.message === "string" &&
       apiError.message.includes("does not exist")
     ) {
-      const usedAccountId =
-        process.env.INSTAGRAM_ACCOUNT_ID || _resolvedIgAccountId || "(unknown)";
       _resolvedIgAccountId = null;
+    }
+    // Development Mode / app-capability restriction is IG-specific enough to
+    // keep its own guidance.
+    if (apiError?.code === 3) {
       return res.status(400).json({
         message:
-          `Instagram Business Account ID may be misconfigured (used: ${usedAccountId}). ` +
-          "The cached ID has been cleared and will be re-discovered on next send. " +
-          "Verify INSTAGRAM_ACCOUNT_ID in .env matches the IG Professional Account linked to your Facebook Page.",
+          "Instagram bloque cet envoi : l'app est en mode Développement ou n'a pas la capacité messagerie. " +
+          "Ajoutez le destinataire comme Testeur (App Roles) ou passez l'App Review.",
         error: apiError?.message,
       });
     }
 
-    return res.status(500).json({
-      message: "Failed to send message",
-      error: apiError?.message || error.message,
-    });
+    // Everything else goes through the shared mapper, which ALWAYS carries
+    // Meta's own wording through so no failure is a dead end.
+    const described = describeMetaSendError(error, "instagram");
+    return res.status(described.status).json(described);
   }
 });
 
