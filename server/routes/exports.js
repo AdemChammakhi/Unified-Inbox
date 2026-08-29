@@ -70,8 +70,12 @@ function ownIds() {
 
 const fmtDate = (d) => {
   if (!d) return "";
+  // toLocaleString does NOT throw on an unparseable value — it returns the
+  // literal "Invalid Date", which would be written into a cell. Check first.
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return "";
   try {
-    return new Date(d).toLocaleString("fr-FR", {
+    return date.toLocaleString("fr-FR", {
       timeZone: "Africa/Tunis",
       day: "2-digit",
       month: "2-digit",
@@ -84,8 +88,22 @@ const fmtDate = (d) => {
   }
 };
 
+// Webhooks name unknown senders `User ${senderId.slice(-4)}` — the last four
+// characters are not necessarily digits ("User 12ab"), so match on length.
 const isPlaceholderName = (name) =>
-  !name || name === "Unknown" || /^User \d{4}$/.test(name) || /^\d{6,}$/.test(name);
+  !name || name === "Unknown" || /^User .{1,4}$/.test(name) || /^\d{6,}$/.test(name);
+
+/** Graph thread ids (t_…) are conversations, never people. */
+const looksLikeThreadId = (id) => typeof id === "string" && /^t_/.test(id);
+
+/** A readable fallback label when we never learned the prospect's name. */
+function fallbackName(platform, personId) {
+  const id = String(personId || "");
+  if (platform === "email" && id.includes("@")) {
+    return id.split("@")[0]; // "jean.dupont", not "Prospect .com"
+  }
+  return `Prospect ${id.slice(-4)}`;
+}
 
 /**
  * Build the prospect rows for a platform filter + date range.
@@ -113,17 +131,46 @@ async function buildProspectRows({ platform, since }) {
     .sort({ timestamp: -1 })
     .limit(MESSAGE_CAP)
     .lean();
-  if (messages.length === MESSAGE_CAP) {
+  const truncated = messages.length === MESSAGE_CAP;
+  if (truncated) {
     console.warn(
-      `[Export] hit the ${MESSAGE_CAP}-message cap — "premier contact" may be truncated for old threads`,
+      `[Export] hit the ${MESSAGE_CAP}-message cap — "premier contact" and message counts are partial for old threads`,
     );
   }
 
   const own = ownIds();
+
+  // Pass 1 — learn which PERSON each conversation key belongs to, from
+  // inbound messages (whose senderId is always the real customer).
+  // This is what lets us repair outbound rows: when the inbox had no
+  // resolvable participant (Instagram under Standard Access returns an
+  // empty participant list), the client sends the THREAD id as recipientId,
+  // so the reply is stored against `t_…` instead of the customer. Without
+  // this map that reply becomes a second, phantom prospect row.
+  const convToPerson = new Map(); // "<platform>:<convId>" -> personId
+  for (const m of messages) {
+    if (m.direction !== "incoming") continue;
+    if (!m.senderId || own.has(m.senderId) || looksLikeThreadId(m.senderId)) continue;
+    if (m.conversationId) {
+      convToPerson.set(`${m.platform}:${m.conversationId}`, m.senderId);
+    }
+    convToPerson.set(`${m.platform}:${m.senderId}`, m.senderId);
+  }
+
+  const personOf = (m) => {
+    if (m.direction === "incoming") return m.senderId;
+    // Outbound: recipientId may be a thread id — remap it to the person
+    return (
+      convToPerson.get(`${m.platform}:${m.recipientId}`) ||
+      convToPerson.get(`${m.platform}:${m.conversationId}`) ||
+      m.recipientId
+    );
+  };
+
   const prospects = new Map(); // "<platform>:<personId>" -> row accumulator
 
   for (const m of messages) {
-    const personId = m.direction === "incoming" ? m.senderId : m.recipientId;
+    const personId = personOf(m);
     if (!personId || own.has(personId)) continue;
 
     const key = `${m.platform}:${personId}`;
@@ -175,7 +222,60 @@ async function buildProspectRows({ platform, since }) {
     }
   }
 
+  // Drop outbound-only groups still keyed by a thread id: those are the
+  // unrepairable half of the case above (a reply with no inbound message in
+  // range to link it to a person). Better absent than a phantom prospect.
+  for (const [key, p] of prospects) {
+    if (p.messagesIn === 0 && looksLikeThreadId(p.personId)) prospects.delete(key);
+  }
+
   if (prospects.size === 0) return [];
+
+  // The UI stores a classification under whichever key the conversation was
+  // listed as — the thread id for Graph-listed threads, the sender id for
+  // DB-merged ones. A person's keys seen INSIDE the window are not
+  // necessarily all of them, so widen the search with an unbounded lookup of
+  // every conversation key these people have ever used. Without this, a
+  // ranged export shows "Non classifié" for a prospect the inbox shows as
+  // Cible, purely because the classified thread's messages fell out of range.
+  const personIds = [...prospects.values()].map((p) => p.personId);
+  try {
+    const keyDocs = await Message.aggregate([
+      {
+        $match: {
+          ...matchPlatform,
+          $or: [
+            { senderId: { $in: personIds } },
+            { recipientId: { $in: personIds } },
+          ],
+        },
+      },
+      {
+        $group: {
+          _id: {
+            platform: "$platform",
+            person: {
+              $cond: [
+                { $eq: ["$direction", "incoming"] },
+                "$senderId",
+                "$recipientId",
+              ],
+            },
+          },
+          convIds: { $addToSet: "$conversationId" },
+        },
+      },
+    ]).option({ maxTimeMS: 15000 });
+    for (const d of keyDocs) {
+      const p = prospects.get(`${d._id.platform}:${d._id.person}`);
+      if (p) for (const id of d.convIds || []) if (id) p.convIds.add(id);
+    }
+  } catch (err) {
+    console.warn(
+      "[Export] conversation-key widening skipped (non-fatal):",
+      err.message,
+    );
+  }
 
   // Classification + lock, matched against ANY of the person's keys
   const allConvIds = [
@@ -183,7 +283,7 @@ async function buildProspectRows({ platform, since }) {
   ];
   const [classifications, locks] = await Promise.all([
     Classification.find({ conversationId: { $in: allConvIds } })
-      .select("conversationId platform classification appointmentAt")
+      .select("conversationId platform classification appointmentAt updatedAt")
       .lean(),
     ConversationLock.find({ conversationId: { $in: allConvIds } })
       .populate("lockedBy", "firstName lastName")
@@ -196,13 +296,22 @@ async function buildProspectRows({ platform, since }) {
     locks.map((l) => [`${l.platform}:${l.conversationId}`, l]),
   );
 
-  const rows = [...prospects.values()].map((p) => {
-    let cls = null;
-    let lock = null;
+  /** Newest wins: a person may carry a stale doc under an abandoned key. */
+  const newestOf = (map, p, stamp) => {
+    let best = null;
     for (const id of p.convIds) {
-      cls = cls || classByConv.get(`${p.platform}:${id}`);
-      lock = lock || lockByConv.get(`${p.platform}:${id}`);
+      const hit = map.get(`${p.platform}:${id}`);
+      if (!hit) continue;
+      if (!best || new Date(hit[stamp] || 0) > new Date(best[stamp] || 0)) {
+        best = hit;
+      }
     }
+    return best;
+  };
+
+  const rows = [...prospects.values()].map((p) => {
+    const cls = newestOf(classByConv, p, "updatedAt");
+    const lock = newestOf(lockByConv, p, "lockedAt");
     const classification = cls?.classification || "non_classifie";
     const agent = lock?.lockedBy
       ? `${lock.lockedBy.firstName || ""} ${lock.lockedBy.lastName || ""}`.trim()
@@ -213,7 +322,7 @@ async function buildProspectRows({ platform, since }) {
       source: p.adTitle
         ? `${PLATFORM_LABELS[p.platform] || p.platform} — Pub: ${p.adTitle}`
         : PLATFORM_LABELS[p.platform] || p.platform,
-      name: p.name || `Prospect ${String(p.personId).slice(-4)}`,
+      name: p.name || fallbackName(p.platform, p.personId),
       phone: p.platform === "whatsapp" ? `+${p.personId}` : "",
       email: p.platform === "email" ? p.personId : "",
       firstContact: p.firstContact,
@@ -229,6 +338,9 @@ async function buildProspectRows({ platform, since }) {
   });
 
   rows.sort((a, b) => new Date(b.lastContact) - new Date(a.lastContact));
+  // Surfaced to the caller so the file itself can say so — a silently
+  // truncated "Premier contact" is indistinguishable from a real one.
+  rows.truncated = truncated;
   return rows;
 }
 
@@ -280,7 +392,13 @@ function rowValues(r) {
  */
 function csvSafe(value) {
   const s = String(value ?? "");
-  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  if (!s) return s;
+  // Spreadsheets strip leading blanks BEFORE deciding a cell is a formula, so
+  // " =1+1" executes just like "=1+1". Probe the value with every kind of
+  // leading blank removed — \s already covers NBSP/vertical-tab/BOM, and the
+  // zero-width family is added explicitly since \s does not match it.
+  const probe = s.replace(/^[\s​-‍⁠]+/, "");
+  return /^[=+\-@]/.test(probe) || /^[\t\r]/.test(s) ? `'${s}` : s;
 }
 
 function toCsv(rows) {
@@ -290,6 +408,13 @@ function toCsv(rows) {
   };
   const lines = [HEADERS.map(esc).join(";")];
   for (const r of rows) lines.push(rowValues(r).map(esc).join(";"));
+  if (rows.truncated) {
+    lines.push(
+      esc(
+        "⚠ Export tronqué : limite de messages atteinte. « Premier contact » et les compteurs sont partiels pour les anciens échanges.",
+      ),
+    );
+  }
   return "﻿" + lines.join("\r\n");
 }
 
@@ -303,8 +428,16 @@ async function toXlsx(rows, meta) {
   // Title band
   ws.mergeCells(1, 1, 1, HEADERS.length);
   const title = ws.getCell(1, 1);
-  title.value = `Prospects Medtour CRM — ${meta.platformLabel} — ${meta.rangeLabel} — exporté le ${fmtDate(new Date())}`;
-  title.font = { bold: true, size: 12, color: { argb: "FFE8833A" } };
+  title.value =
+    `Prospects Medtour CRM — ${meta.platformLabel} — ${meta.rangeLabel} — exporté le ${fmtDate(new Date())}` +
+    (rows.truncated
+      ? "   ⚠ EXPORT TRONQUÉ : « Premier contact » et les compteurs sont partiels pour les anciens échanges."
+      : "");
+  title.font = {
+    bold: true,
+    size: 12,
+    color: { argb: rows.truncated ? "FFE3A63C" : "FFE8833A" },
+  };
   title.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF0B111E" } };
   title.alignment = { vertical: "middle" };
   ws.getRow(1).height = 22;
@@ -338,6 +471,13 @@ async function toXlsx(rows, meta) {
   return wb.xlsx.writeBuffer();
 }
 
+// Single-flight guard. The rate limiter caps how OFTEN exports are asked for,
+// not how many run AT ONCE — and concurrency is what actually kills us: each
+// generation holds thousands of documents plus a whole workbook in a 512MB
+// container. Ten simultaneous requests OOM the backend, and restart:
+// unless-stopped turns that into a repeatable outage. One at a time.
+let _exportInFlight = false;
+
 // GET /api/exports/prospects?format=xlsx|csv&platform=all|<platform>&range=<days|all>
 router.get(
   "/prospects",
@@ -353,43 +493,70 @@ router.get(
       if (req.query.platform && req.query.platform !== "all" && !platform) {
         return res.status(400).json({ message: "Plateforme invalide" });
       }
-      const rangeDays =
-        req.query.range && req.query.range !== "all"
-          ? parseInt(req.query.range)
-          : null;
+      // Must be a plain string: Express's extended parser turns ?range[$gt]=1
+      // into an object, whose parseInt is NaN — which would silently fall
+      // through to a FULL-history export instead of the bounded one asked for.
+      let rangeDays = null;
+      if (req.query.range !== undefined && req.query.range !== "all") {
+        if (typeof req.query.range !== "string") {
+          return res.status(400).json({ message: "Période invalide" });
+        }
+        rangeDays = Number.parseInt(req.query.range, 10);
+        if (!Number.isInteger(rangeDays) || rangeDays <= 0 || rangeDays > 3650) {
+          return res.status(400).json({ message: "Période invalide" });
+        }
+      }
       const since =
         rangeDays && rangeDays > 0
           ? new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000)
           : null;
 
-      const rows = await buildProspectRows({ platform, since });
+      if (_exportInFlight) {
+        return res.status(429).json({
+          message:
+            "Un export est déjà en cours. Patientez quelques secondes et réessayez.",
+        });
+      }
+      _exportInFlight = true;
 
-      const dateTag = new Date().toISOString().slice(0, 10);
-      const platTag = platform || "tous-canaux";
-      const meta = {
-        platformLabel: platform ? PLATFORM_LABELS[platform] : "Tous les canaux",
-        rangeLabel: rangeDays ? `${rangeDays} derniers jours` : "tout l'historique",
-      };
+      try {
+        // Held across BOTH the query and the serialization — the workbook
+        // build is as memory-hungry as the fetch.
+        const rows = await buildProspectRows({ platform, since });
 
-      if (format === "csv") {
-        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        const dateTag = new Date().toISOString().slice(0, 10);
+        const platTag = platform || "tous-canaux";
+        const meta = {
+          platformLabel: platform
+            ? PLATFORM_LABELS[platform]
+            : "Tous les canaux",
+          rangeLabel: rangeDays
+            ? `${rangeDays} derniers jours`
+            : "tout l'historique",
+        };
+
+        if (format === "csv") {
+          res.setHeader("Content-Type", "text/csv; charset=utf-8");
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="prospects-medtour-${platTag}-${dateTag}.csv"`,
+          );
+          return res.send(toCsv(rows));
+        }
+
+        const buffer = await toXlsx(rows, meta);
+        res.setHeader(
+          "Content-Type",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        );
         res.setHeader(
           "Content-Disposition",
-          `attachment; filename="prospects-medtour-${platTag}-${dateTag}.csv"`,
+          `attachment; filename="prospects-medtour-${platTag}-${dateTag}.xlsx"`,
         );
-        return res.send(toCsv(rows));
+        return res.send(Buffer.from(buffer));
+      } finally {
+        _exportInFlight = false;
       }
-
-      const buffer = await toXlsx(rows, meta);
-      res.setHeader(
-        "Content-Type",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      );
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="prospects-medtour-${platTag}-${dateTag}.xlsx"`,
-      );
-      return res.send(Buffer.from(buffer));
     } catch (err) {
       console.error("[Export] prospects failed:", err.message);
       return res.status(500).json({ message: "L'export a échoué" });

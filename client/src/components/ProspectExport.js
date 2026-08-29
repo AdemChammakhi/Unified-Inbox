@@ -38,10 +38,25 @@ const ProspectExport = ({ range = 30, platform = "all" }) => {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
+      // responseType "blob" means an error JSON body arrives as a Blob, so
+      // the server's actual message ("Période invalide", "export déjà en
+      // cours"…) has to be read out of it rather than err.response.data.
+      let serverMessage = "";
+      try {
+        const data = err.response?.data;
+        if (data instanceof Blob) {
+          serverMessage = JSON.parse(await data.text())?.message || "";
+        } else if (typeof data?.message === "string") {
+          serverMessage = data.message;
+        }
+      } catch {
+        /* not JSON — fall back to the generic message */
+      }
       alert(
-        err.response?.status === 403
-          ? "Export réservé aux administrateurs et managers."
-          : "L'export a échoué — réessayez.",
+        serverMessage ||
+          (err.response?.status === 403
+            ? "Export réservé aux administrateurs et managers."
+            : "L'export a échoué — réessayez."),
       );
     } finally {
       setBusy(false);

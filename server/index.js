@@ -101,7 +101,11 @@ app.use(
     credentials: true,
   }),
 );
-const { apiLimiter, webhookLimiter } = require("./middleware/rateLimiter");
+const {
+  apiLimiter,
+  webhookLimiter,
+  exportLimiter,
+} = require("./middleware/rateLimiter");
 
 // Support tickets carry base64 screenshots, which blow past express.json's
 // 100KB default. Mounted BEFORE the global parser with its own larger limit,
@@ -151,7 +155,7 @@ app.use("/api/classifications", apiLimiter, require("./routes/classifications"))
 app.use("/api/locks", apiLimiter, require("./routes/locks"));
 app.use("/api/conversations", apiLimiter, require("./routes/conversations"));
 app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
-app.use("/api/exports", apiLimiter, require("./routes/exports"));
+app.use("/api/exports", exportLimiter, require("./routes/exports"));
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =

@@ -41,8 +41,28 @@ const webhookLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+/**
+ * Export rate limiter
+ * Generating the prospect sheet is heavy: thousands of documents plus a whole
+ * workbook held in memory at once, inside a 512MB container. The general API
+ * allowance (1000/15min) is far too generous for that, so exports get their
+ * own budget — 20 per 15 minutes per IP is well beyond real use (a manager
+ * downloads a handful a day) while removing the DoS headroom.
+ */
+const exportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  message: {
+    message:
+      "Trop d'exports demandés. Réessayez dans quelques minutes.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
   webhookLimiter,
+  exportLimiter,
 };
