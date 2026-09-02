@@ -246,6 +246,17 @@ router.get("/conversations", protect, async (req, res) => {
         };
       }
       const conv = convMap[m.conversationId];
+      // Rows come newest-first, so the entry is often created from the
+      // agent's reply — name the thread after the customer as soon as one
+      // of their messages shows up, never after whoever spoke last.
+      if (
+        m.direction === "incoming" &&
+        m.senderName &&
+        conv.participants[0].name === "Page/Agent"
+      ) {
+        conv.participants[0].name = m.senderName;
+        conv.participants[0].id = m.senderId;
+      }
       const msg = {
         id: m.externalId || m._id.toString(),
         text: m.content || "",

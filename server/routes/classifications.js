@@ -41,6 +41,7 @@ router.put("/", protect, async (req, res) => {
     const conversationId = sanitizeId(req.body.conversationId);
     const platform = sanitizePlatform(req.body.platform);
     const { classification, appointmentAt } = req.body;
+    const participantId = sanitizeId(req.body.participantId);
 
     if (!conversationId || !platform || !classification) {
       return res.status(400).json({
@@ -75,15 +76,35 @@ router.put("/", protect, async (req, res) => {
       appointment = parsed;
     }
 
+    // A conversation has no single stable id: Meta's list keys an Instagram
+    // thread as "t_…", while the DB-built list (webhook rows, or Meta in
+    // backoff) keys it by the sender's id. Only the sender's id appears in
+    // BOTH shapes (as the first participant), so that is the canonical key:
+    // find the row under either id, and re-key it to the participant.
+    const canonical = String(participantId || conversationId);
+    const keys = [String(conversationId)];
+    if (canonical !== String(conversationId)) keys.push(canonical);
     const result = await Classification.findOneAndUpdate(
-      { conversationId: String(conversationId), platform: String(platform) },
+      { conversationId: { $in: keys }, platform: String(platform) },
       {
-        classification: String(classification),
-        appointmentAt: appointment,
-        classifiedBy: req.user._id,
+        $set: {
+          conversationId: canonical,
+          classification: String(classification),
+          appointmentAt: appointment,
+          classifiedBy: req.user._id,
+        },
       },
       { upsert: true, new: true },
     );
+    if (keys.length > 1) {
+      // A stale duplicate under the other key would still shadow this one
+      // in a client lookup — drop it.
+      await Classification.deleteMany({
+        platform: String(platform),
+        conversationId: { $in: keys },
+        _id: { $ne: result._id },
+      });
+    }
 
     return res.json({ success: true, classification: result });
   } catch (error) {

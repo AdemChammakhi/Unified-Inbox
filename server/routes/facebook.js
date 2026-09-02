@@ -64,7 +64,7 @@ async function resolveFbThreadId(senderId, accessToken, pageId) {
 // real-time updates still surface immediately; this only throttles polling.
 let _fbCache = null;
 let _fbCacheTime = 0;
-const FB_CACHE_TTL = 15000; // 15 seconds
+const FB_CACHE_TTL = 45000; // 45 s — webhooks clear it on new traffic
 // Separate slim-mode cache (conversation list without embedded messages)
 let _fbCacheSlim = null;
 let _fbCacheSlimTime = 0;
@@ -272,20 +272,39 @@ async function fetchFacebookConversations(slim = false) {
       }
     });
 
+    // One entry per PERSON — see the Instagram route for why: the same
+    // customer's rows sit under the sender id and under the "t_…" thread id.
     const newConvMap = {};
     for (const m of recentDbMsgs) {
-      if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) continue;
-      const key = m.conversationId || m.senderId;
+      const customerId =
+        m.direction === "outgoing" ? m.recipientId : m.senderId;
+      if (!customerId || customerId === pageId) continue;
+      if (
+        knownIds.has(customerId) ||
+        knownIds.has(m.senderId) ||
+        knownIds.has(m.conversationId)
+      )
+        continue;
+      const key = customerId;
       const displayName = resolveStoredName(m.senderName);
       if (!newConvMap[key]) {
         newConvMap[key] = {
           id: key,
-          participants: [{ id: m.senderId, name: displayName }],
+          participants: [
+            {
+              id: customerId,
+              name: m.direction === "outgoing" ? `User ${customerId.slice(-4)}` : displayName,
+            },
+          ],
           lastMessage: null,
           messages: [],
         };
       }
       const conv = newConvMap[key];
+      if (m.direction !== "outgoing" && /^User \d{4}$/.test(conv.participants[0].name)) {
+        conv.participants[0].name = displayName;
+      }
+      if (/^t_/i.test(m.conversationId || "")) conv.id = m.conversationId;
       const msg = {
         id: m.externalId || m._id.toString(),
         text: m.content || "",
@@ -558,7 +577,7 @@ router.get("/messages-paged", protect, async (req, res) => {
           });
         const winner = await Promise.race([
           sync,
-          new Promise((r) => setTimeout(r, 2500, "pending")),
+          new Promise((r) => setTimeout(r, 1000, "pending")),
         ]);
         if (winner === "pending") refreshSuggested = true;
       }

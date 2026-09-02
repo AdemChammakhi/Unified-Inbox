@@ -59,6 +59,17 @@ const CLASSIFICATION_COLORS = {
   rdv: "#A98BD6",
 };
 
+// A conversation's id is not stable across list sources: Meta's list keys an
+// Instagram thread as "t_…", the DB-built list (webhook rows, or Meta in
+// backoff) keys it by the sender's id. Classifications, appointments and
+// locks were saved under whichever id was current — so look up both.
+const lookupBy = (map, conv) => {
+  if (!map || !conv) return undefined;
+  if (map[conv.id] !== undefined) return map[conv.id];
+  const pid = conv.participants?.[0]?.id;
+  return pid ? map[pid] : undefined;
+};
+
 // Labels for the "replying to…" context card (ads, posts, stories)
 const CONTEXT_KIND_LABELS = {
   ad: "Replied to your ad",
@@ -625,10 +636,15 @@ const Inbox = () => {
     classification,
     appointmentAt = null,
   ) => {
+    const conv =
+      selectedConvRef.current?.id === conversationId
+        ? selectedConvRef.current
+        : conversationsRef.current.find((c) => c.id === conversationId);
+    const participantId = conv?.participants?.[0]?.id || null;
     if (classification === "rdv" && !appointmentAt) {
       setRdvDraft({
         conversationId,
-        value: toLocalInputValue(appointments[conversationId]),
+        value: toLocalInputValue(lookupBy(appointments, conv)),
       });
       return;
     }
@@ -638,23 +654,30 @@ const Inbox = () => {
         "/api/classifications",
         {
           conversationId,
+          participantId,
           platform: activeTab,
           classification,
           ...(appointmentAt ? { appointmentAt } : {}),
         },
         { headers: { Authorization: `Bearer ${token}` } },
       );
-      setClassifications((prev) => ({
-        ...prev,
-        [conversationId]: classification,
-      }));
+      // The server re-keys the row to the participant id (present in every
+      // list shape) — mirror that, and drop the entry under the other id so
+      // a stale value can't shadow the new one.
+      const key = participantId || conversationId;
+      setClassifications((prev) => {
+        const next = { ...prev, [key]: classification };
+        if (key !== conversationId) delete next[conversationId];
+        return next;
+      });
       setAppointments((prev) => {
         const next = { ...prev };
+        if (key !== conversationId) delete next[conversationId];
         // Leaving RDV drops the date, matching what the server just stored
         if (classification === "rdv" && appointmentAt) {
-          next[conversationId] = appointmentAt;
+          next[key] = appointmentAt;
         } else {
-          delete next[conversationId];
+          delete next[key];
         }
         return next;
       });
@@ -672,7 +695,7 @@ const Inbox = () => {
     let filtered = conversations;
     if (classFilter !== "all") {
       filtered = conversations.filter((conv) => {
-        const cls = classifications[conv.id] || "non_classifie";
+        const cls = lookupBy(classifications, conv) || "non_classifie";
         return cls === classFilter;
       });
     }
@@ -710,7 +733,14 @@ const Inbox = () => {
     const updated = conversations.find((c) => c.id === selectedConv.id);
     if (!updated) return;
     setSelectedConv((prev) =>
-      prev ? { ...updated, messages: prev.messages } : prev,
+      prev
+        ? {
+            ...updated,
+            messages: prev.messages,
+            _messagesLoaded: prev._messagesLoaded || updated._messagesLoaded,
+            _hasMoreMessages: prev._hasMoreMessages,
+          }
+        : prev,
     );
   }, [conversations]); // eslint-disable-line
 
@@ -885,6 +915,10 @@ const Inbox = () => {
       @keyframes inboxFadeUp {
         from { opacity: 0; transform: translateY(14px); }
         to { opacity: 1; transform: translateY(0); }
+      }
+      .inbox-msg-bubble { animation: inboxFadeUp 0.25s ease-out both; }
+      @media (prefers-reduced-motion: reduce) {
+        .inbox-msg-bubble { animation: none; }
       }
       @keyframes inboxPulse {
         0%, 100% { opacity: 1; }
@@ -1329,7 +1363,7 @@ const Inbox = () => {
                 </div>
               ) : (
                 sortedConversations.map((conv, index) => {
-                  const cls = classifications[conv.id] || "non_classifie";
+                  const cls = lookupBy(classifications, conv) || "non_classifie";
                   const isSelected = selectedConv?.id === conv.id;
                   const isUnread = unreadConvIds.has(conv.id);
                   return (
@@ -1437,12 +1471,12 @@ const Inbox = () => {
                             {conv.participants?.map((p) => p.name).join(", ") ||
                               "Unknown"}
                           </strong>
-                          {locks[conv.id] && (
+                          {lookupBy(locks, conv) && (
                             <span
                               style={styles.lockBadge}
-                              title={`Assigned to ${locks[conv.id].agentName}`}
+                              title={`Assigned to ${lookupBy(locks, conv).agentName}`}
                             >
-                              🔒 {locks[conv.id].agentName?.split(" ")[0]}
+                              🔒 {lookupBy(locks, conv).agentName?.split(" ")[0]}
                             </span>
                           )}
                           <span
@@ -1459,9 +1493,9 @@ const Inbox = () => {
                             }}
                           />
                         </div>
-                        {cls === "rdv" && appointments[conv.id] && (
+                        {cls === "rdv" && lookupBy(appointments, conv) && (
                           <div style={styles.rdvRowDate}>
-                            📅 {formatAppointment(appointments[conv.id])}
+                            📅 {formatAppointment(lookupBy(appointments, conv))}
                           </div>
                         )}
                         <p
@@ -1538,7 +1572,7 @@ const Inbox = () => {
                     </span>
                     <select
                       value={
-                        classifications[selectedConv.id] || "non_classifie"
+                        lookupBy(classifications, selectedConv) || "non_classifie"
                       }
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) =>
@@ -1549,11 +1583,11 @@ const Inbox = () => {
                         ...styles.classSelect,
                         color:
                           CLASSIFICATION_COLORS[
-                            classifications[selectedConv.id] || "non_classifie"
+                            lookupBy(classifications, selectedConv) || "non_classifie"
                           ],
                         borderColor:
                           CLASSIFICATION_COLORS[
-                            classifications[selectedConv.id] || "non_classifie"
+                            lookupBy(classifications, selectedConv) || "non_classifie"
                           ] + "55",
                       }}
                     >
@@ -1565,8 +1599,8 @@ const Inbox = () => {
                       <option value="rdv">RDV</option>
                     </select>
                     {/* Booked appointment, once set */}
-                    {classifications[selectedConv.id] === "rdv" &&
-                      appointments[selectedConv.id] &&
+                    {lookupBy(classifications, selectedConv) === "rdv" &&
+                      lookupBy(appointments, selectedConv) &&
                       !rdvDraft && (
                         <button
                           className="inbox-rdv-chip"
@@ -1576,12 +1610,12 @@ const Inbox = () => {
                             setRdvDraft({
                               conversationId: selectedConv.id,
                               value: toLocalInputValue(
-                                appointments[selectedConv.id],
+                                lookupBy(appointments, selectedConv),
                               ),
                             })
                           }
                         >
-                          📅 {formatAppointment(appointments[selectedConv.id])}
+                          📅 {formatAppointment(lookupBy(appointments, selectedConv))}
                         </button>
                       )}
                     {(user?.role === "admin" || user?.role === "manager") && (
@@ -1701,6 +1735,7 @@ const Inbox = () => {
                     return (
                       <div
                         key={msg.id || idx}
+                        className="inbox-msg-bubble"
                         style={{
                           ...(isEmail
                             ? styles.emailBubble
@@ -1721,7 +1756,6 @@ const Inbox = () => {
                               ? "var(--msg-received-color)"
                               : "var(--bg-primary)",
                           opacity: msg.sending ? 0.5 : 1,
-                          animation: `inboxFadeUp 0.3s ease-out ${Math.min(idx * 0.02, 0.3)}s both`,
                         }}
                       >
                         <small style={styles.msgFrom}>{msg.from}</small>
@@ -1923,7 +1957,7 @@ const Inbox = () => {
 
                 {/* Reply Box */}
                 {(() => {
-                  const lock = locks[selectedConv?.id];
+                  const lock = lookupBy(locks, selectedConv);
                   const isLockedToOther =
                     lock &&
                     lock.agentId !== user?._id &&
@@ -2286,10 +2320,13 @@ const styles = {
   messageHeaderRow: {
     display: "flex",
     alignItems: "center",
-    gap: "12px",
+    flexWrap: "wrap",
+    gap: "8px 12px",
   },
   messageHeaderName: {
     margin: 0,
+    minWidth: 0,
+    overflowWrap: "anywhere",
     fontSize: "14px",
     fontWeight: 700,
     color: "var(--text-primary)",

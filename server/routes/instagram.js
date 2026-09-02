@@ -74,7 +74,7 @@ async function resolveIgAccountId(accessToken, pageId) {
 // real-time updates still surface immediately; this only throttles polling.
 let _igCache = null;
 let _igCacheTime = 0;
-const IG_CACHE_TTL = 15000; // 15 seconds
+const IG_CACHE_TTL = 45000; // 45 s — webhooks clear it on new traffic
 // Separate slim-mode cache (conversation list without embedded messages)
 let _igCacheSlim = null;
 let _igCacheSlimTime = 0;
@@ -216,7 +216,7 @@ async function healInstagramProfiles() {
       direction: "incoming",
       ...badNameFilter,
     })
-      .sort({ createdAt: -1 })
+      .sort({ timestamp: -1 })
       .limit(200)
       .select("senderId")
       .lean();
@@ -485,8 +485,9 @@ async function fetchInstagramConversations(slim = false) {
       c.participants.forEach((p) => knownIds.add(p.id));
     });
 
+    // timestamp is what messages_recent indexes; createdAt forced an in-memory sort
     const recentDbMsgs = await Message.find({ platform: "instagram" })
-      .sort({ createdAt: -1 })
+      .sort({ timestamp: -1 })
       .limit(500)
       .lean();
 
@@ -525,26 +526,37 @@ async function fetchInstagramConversations(slim = false) {
       }
     });
 
+    // One entry per PERSON. The same customer's rows live under two keys
+    // (the sender id from webhooks, the "t_…" thread id from Graph sync);
+    // grouping by storage key listed them twice with half a thread each.
+    const ownIds = new Set([igAccountId, pageId].filter(Boolean));
     const newConvMap = {};
     for (const m of recentDbMsgs) {
-      if (knownIds.has(m.senderId) || knownIds.has(m.conversationId)) continue;
-      const key = m.conversationId || m.senderId;
+      const customerId =
+        m.direction === "outgoing" ? m.recipientId : m.senderId;
+      if (!customerId || ownIds.has(customerId)) continue;
+      if (
+        knownIds.has(customerId) ||
+        knownIds.has(m.senderId) ||
+        knownIds.has(m.conversationId)
+      )
+        continue;
+      const key = customerId;
       // Resolve name: prefer stored name, then supplementary lookup, then partial ID
+      const storedName = m.direction === "outgoing" ? null : m.senderName;
       const isUnknown =
-        !m.senderName ||
-        m.senderName === "Unknown" ||
-        /^\d{6,}$/.test(m.senderName);
+        !storedName || storedName === "Unknown" || /^\d{6,}$/.test(storedName);
       const resolvedName = isUnknown
-        ? resolvedExtra[m.senderId]?.name || `User ${m.senderId.slice(-4)}`
-        : m.senderName;
+        ? resolvedExtra[customerId]?.name || `User ${customerId.slice(-4)}`
+        : storedName;
       if (!newConvMap[key]) {
         newConvMap[key] = {
           id: key,
           participants: [
             {
-              id: m.senderId,
+              id: customerId,
               name: resolvedName,
-              profilePicUrl: resolvedExtra[m.senderId]?.avatar || null,
+              profilePicUrl: resolvedExtra[customerId]?.avatar || null,
             },
           ],
           lastMessage: null,
@@ -553,6 +565,13 @@ async function fetchInstagramConversations(slim = false) {
         };
       }
       const conv = newConvMap[key];
+      // Prefer a real name over a placeholder once one turns up
+      if (!isUnknown && /^User \d{4}$/.test(conv.participants[0].name)) {
+        conv.participants[0].name = resolvedName;
+      }
+      // Expose the thread id when we have one: /messages-paged then reads
+      // both keys (conversationId + participantId) and shows the whole thread.
+      if (/^t_/i.test(m.conversationId || "")) conv.id = m.conversationId;
       const msg = {
         id: m.externalId || m._id.toString(),
         text: m.content || "",
@@ -884,7 +903,7 @@ router.get("/messages-paged", protect, async (req, res) => {
           });
         const winner = await Promise.race([
           sync,
-          new Promise((r) => setTimeout(r, 2500, "pending")),
+          new Promise((r) => setTimeout(r, 1000, "pending")),
         ]);
         if (winner === "pending") refreshSuggested = true;
       }

@@ -64,6 +64,17 @@ const CLASSIFICATION_COLORS = {
   rdv: "#A98BD6",
 };
 
+// A conversation's id is not stable across list sources: Meta's list keys an
+// Instagram thread as "t_…", the DB-built list (webhook rows, or Meta in
+// backoff) keys it by the sender's id. Classifications, appointments and
+// locks were saved under whichever id was current — so look up both.
+const lookupBy = (map, conv) => {
+  if (!map || !conv) return undefined;
+  if (map[conv.id] !== undefined) return map[conv.id];
+  const pid = conv.participants?.[0]?.id;
+  return pid ? map[pid] : undefined;
+};
+
 /** Format an appointment for display: "lun. 25 août, 14:30". */
 const formatAppointment = (value) => {
   if (!value) return "";
@@ -630,9 +641,14 @@ const ManagerDashboard = () => {
   // RDV needs a date; managers pick one via prompt rather than the inline
   // picker the agents' inbox uses (this view is read-only otherwise).
   const updateClassification = async (conversationId, classification) => {
+    const conv =
+      selectedConvRef.current?.id === conversationId
+        ? selectedConvRef.current
+        : conversationsRef.current.find((c) => c.id === conversationId);
+    const participantId = conv?.participants?.[0]?.id || null;
     let appointmentAt = null;
     if (classification === "rdv") {
-      const existing = appointments[conversationId];
+      const existing = lookupBy(appointments, conv);
       const answer = window.prompt(
         "Date du rendez-vous (AAAA-MM-JJ HH:MM)",
         existing
@@ -653,22 +669,27 @@ const ManagerDashboard = () => {
         "/api/classifications",
         {
           conversationId,
+          participantId,
           platform: activeTab,
           classification,
           ...(appointmentAt ? { appointmentAt } : {}),
         },
         { headers: { Authorization: `Bearer ${token}` } },
       );
+      // Mirror the server's canonical key (participant id, see Inbox.js)
+      const key = participantId || conversationId;
       setAppointments((prev) => {
         const next = { ...prev };
-        if (appointmentAt) next[conversationId] = appointmentAt;
-        else delete next[conversationId];
+        if (key !== conversationId) delete next[conversationId];
+        if (appointmentAt) next[key] = appointmentAt;
+        else delete next[key];
         return next;
       });
-      setClassifications((prev) => ({
-        ...prev,
-        [conversationId]: classification,
-      }));
+      setClassifications((prev) => {
+        const next = { ...prev, [key]: classification };
+        if (key !== conversationId) delete next[conversationId];
+        return next;
+      });
     } catch (error) {
       alert("Failed to update classification");
     }
@@ -679,7 +700,7 @@ const ManagerDashboard = () => {
     let filtered = conversations;
     if (classFilter !== "all") {
       filtered = conversations.filter((conv) => {
-        const cls = classifications[conv.id] || "non_classifie";
+        const cls = lookupBy(classifications, conv) || "non_classifie";
         return cls === classFilter;
       });
     }
@@ -1489,7 +1510,7 @@ const ManagerDashboard = () => {
                   ) : (
                     sortedConversations.map((conv, index) => {
                       const cls =
-                        classifications[conv.id] || "non_classifie";
+                        lookupBy(classifications, conv) || "non_classifie";
                       const isSelected = selectedConv?.id === conv.id;
                       const isUnread = unreadConvIds.has(conv.id);
                       return (
@@ -1627,7 +1648,7 @@ const ManagerDashboard = () => {
                                   ?.map((p) => p.name)
                                   .join(", ") || "Unknown"}
                               </strong>
-                              {locks[conv.id] && (
+                              {lookupBy(locks, conv) && (
                                 <span
                                   style={{
                                     display: "inline-flex",
@@ -1642,10 +1663,10 @@ const ManagerDashboard = () => {
                                     padding: "1px 7px",
                                     whiteSpace: "nowrap",
                                   }}
-                                  title={`Assigned to ${locks[conv.id].agentName}`}
+                                  title={`Assigned to ${lookupBy(locks, conv).agentName}`}
                                 >
                                   🔒{" "}
-                                  {locks[conv.id].agentName?.split(" ")[0]}
+                                  {lookupBy(locks, conv).agentName?.split(" ")[0]}
                                 </span>
                               )}
                               <span
@@ -1771,7 +1792,7 @@ const ManagerDashboard = () => {
                         </span>
                         <select
                           value={
-                            classifications[selectedConv.id] ||
+                            lookupBy(classifications, selectedConv) ||
                             "non_classifie"
                           }
                           onClick={(e) => e.stopPropagation()}
@@ -1798,12 +1819,12 @@ const ManagerDashboard = () => {
                               "'Hanken Grotesk', sans-serif",
                             color:
                               CLASSIFICATION_COLORS[
-                                classifications[selectedConv.id] ||
+                                lookupBy(classifications, selectedConv) ||
                                   "non_classifie"
                               ],
                             borderColor:
                               CLASSIFICATION_COLORS[
-                                classifications[selectedConv.id] ||
+                                lookupBy(classifications, selectedConv) ||
                                   "non_classifie"
                               ] + "55",
                           }}
@@ -2311,7 +2332,7 @@ const ManagerDashboard = () => {
                         }}
                       >
                         👁️ Read-only view — monitoring conversations
-                        {locks[selectedConv?.id] && (
+                        {lookupBy(locks, selectedConv) && (
                           <span
                             style={{
                               fontSize: "10px",
@@ -2323,7 +2344,7 @@ const ManagerDashboard = () => {
                               fontWeight: 700,
                             }}
                           >
-                            🔒 Assigned to {locks[selectedConv.id].agentName}
+                            🔒 Assigned to {lookupBy(locks, selectedConv).agentName}
                           </span>
                         )}
                       </span>
