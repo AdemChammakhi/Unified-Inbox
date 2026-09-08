@@ -84,26 +84,40 @@ router.put("/", protect, async (req, res) => {
     const canonical = String(participantId || conversationId);
     const keys = [String(conversationId)];
     if (canonical !== String(conversationId)) keys.push(canonical);
-    const result = await Classification.findOneAndUpdate(
-      { conversationId: { $in: keys }, platform: String(platform) },
-      {
-        $set: {
-          conversationId: canonical,
-          classification: String(classification),
-          appointmentAt: appointment,
-          classifiedBy: req.user._id,
-        },
-      },
-      { upsert: true, new: true },
-    );
-    if (keys.length > 1) {
-      // A stale duplicate under the other key would still shadow this one
-      // in a client lookup — drop it.
-      await Classification.deleteMany({
+    // Rows may exist under BOTH keys (one saved before the re-keying, one
+    // after). Re-keying the thread row while a customer row exists would
+    // trip the unique (conversationId, platform) index and fail the save —
+    // so merge first: keep one row, delete the rest, then write.
+    const rows = await Classification.find({
+      conversationId: { $in: keys },
+      platform: String(platform),
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+    const payload = {
+      conversationId: canonical,
+      classification: String(classification),
+      appointmentAt: appointment,
+      classifiedBy: req.user._id,
+    };
+    let result;
+    if (rows.length === 0) {
+      result = await Classification.create({
+        ...payload,
         platform: String(platform),
-        conversationId: { $in: keys },
-        _id: { $ne: result._id },
       });
+    } else {
+      const keep =
+        rows.find((r) => r.conversationId === canonical) || rows[0];
+      const dropIds = rows.filter((r) => r._id !== keep._id).map((r) => r._id);
+      if (dropIds.length > 0) {
+        await Classification.deleteMany({ _id: { $in: dropIds } });
+      }
+      result = await Classification.findByIdAndUpdate(
+        keep._id,
+        { $set: payload },
+        { new: true },
+      );
     }
 
     return res.json({ success: true, classification: result });

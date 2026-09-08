@@ -101,6 +101,7 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
               />
               <PlatformIcon platform={a.platform} size={15} />
               <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={styles.name}>{a.name || "Client"}</div>
                 <div style={styles.when}>{formatWhen(a.appointmentAt)}</div>
                 {a.bookedBy && (
                   <div style={styles.by}>pris par {a.bookedBy}</div>
@@ -133,6 +134,14 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
 };
 
 const styles = {
+  name: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: "var(--text-primary)",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   counts: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",

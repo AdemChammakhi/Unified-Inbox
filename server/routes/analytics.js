@@ -199,9 +199,42 @@ router.get("/appointments", protect, async (req, res) => {
     endOfToday.setHours(23, 59, 59, 999);
     const endOfWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
+    // The agenda is useless without a name. Classification rows only carry
+    // the customer's id, so resolve the name from the latest inbound message
+    // of that customer (stored under either the customer id or a thread id
+    // they sent from) — one query for the whole list.
+    const ids = [...new Set(upcomingDocs.map((d) => String(d.conversationId)))];
+    const nameById = {};
+    if (ids.length > 0) {
+      const inbound = await Message.find({
+        direction: "incoming",
+        $or: [{ senderId: { $in: ids } }, { conversationId: { $in: ids } }],
+      })
+        .sort({ timestamp: -1 })
+        .select("senderId conversationId senderName platform")
+        .limit(ids.length * 5)
+        .lean();
+      for (const m of inbound) {
+        const usable =
+          m.senderName &&
+          m.senderName !== "Unknown" &&
+          !/^User \d{4}$/.test(m.senderName) &&
+          !/^\d{6,}$/.test(m.senderName);
+        if (!usable) continue;
+        for (const key of [m.senderId, m.conversationId]) {
+          if (ids.includes(key) && !nameById[key]) nameById[key] = m.senderName;
+        }
+      }
+    }
+
     const upcoming = upcomingDocs.map((d) => ({
       conversationId: d.conversationId,
       platform: d.platform,
+      name:
+        nameById[String(d.conversationId)] ||
+        (d.platform === "whatsapp"
+          ? `+${d.conversationId}`
+          : `Client ${String(d.conversationId).slice(-4)}`),
       appointmentAt: d.appointmentAt,
       bookedBy: d.classifiedBy
         ? `${d.classifiedBy.firstName || ""} ${d.classifiedBy.lastName || ""}`.trim()
