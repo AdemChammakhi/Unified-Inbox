@@ -5,6 +5,12 @@ import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
 import PlatformIcon from "../components/PlatformIcon";
 import ProspectExport from "../components/ProspectExport";
+import MaturityChip from "../components/MaturityChip";
+import {
+  FREINS,
+  MATURITY,
+  MATURITY_RANK,
+} from "../constants/leadQualification";
 import { RefreshCw, X } from "lucide-react";
 
 /**
@@ -12,9 +18,13 @@ import { RefreshCw, X } from "lucide-react";
  *
  * The same rows the team used to keep by hand and now export to Excel, but
  * readable and filterable in place. Every column filters: free-text columns
- * take a substring, the closed sets (platform, classification, agent) become
- * dropdowns built from the data actually present, so a filter never offers a
- * value that would return nothing.
+ * take a substring, the closed sets (platform, classification, maturity,
+ * frein, agent) become dropdowns built from the data actually present, so a
+ * filter never offers a value that would return nothing.
+ *
+ * Maturity and frein come from the server (buildProspectRows): `maturity`,
+ * `maturityLevel`, `maturityReason`, `frein` (label, "Autre : note" included)
+ * and `freinCode`.
  */
 
 const CLASSIFICATION_LABELS = {
@@ -52,11 +62,13 @@ const COLUMNS = [
   { key: "firstContact", label: "Premier contact", type: "date", width: 140 },
   { key: "lastContact", label: "Dernier contact", type: "date", width: 140 },
   { key: "classification", label: "Étape", type: "select", width: 120 },
+  { key: "maturity", label: "Maturité", type: "select", width: 118 },
+  { key: "frein", label: "Motif / frein", type: "select", width: 180 },
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
   { key: "agent", label: "Commercial", type: "select", width: 150 },
   { key: "messagesIn", label: "Reçus", type: "number", width: 78 },
   { key: "messagesOut", label: "Envoyés", type: "number", width: 84 },
-  { key: "lastIncomingText", label: "Dernier message", type: "text", width: 300 },
+  { key: "lastMessage", label: "Dernier message", type: "text", width: 300 },
 ];
 
 const fmtDate = (v) => {
@@ -72,8 +84,26 @@ const fmtDate = (v) => {
   });
 };
 
-/** Display value for a cell — what the filter matches against, too. */
+const FREIN_LABELS = Object.fromEntries(FREINS.map((f) => [f.code, f.label]));
+
+/** Filter value that selects the rows with no frein recorded yet. */
+const FREIN_NONE = "__none__";
+
+/** chaud / tiede / froid, from the level or, failing that, the label. */
+const maturityLevelOf = (row) => {
+  if (row.maturityLevel && MATURITY[row.maturityLevel]) return row.maturityLevel;
+  if (!row.maturity) return null;
+  const hit = Object.entries(MATURITY).find(([, m]) => m.label === row.maturity);
+  return hit ? hit[0] : null;
+};
+
+/** Display value for a cell — what the text filters match against, too. */
 const cellText = (row, key) => {
+  if (key === "maturity") {
+    const level = maturityLevelOf(row);
+    return (level && MATURITY[level].label) || String(row.maturity || "");
+  }
+  if (key === "frein") return String(row.frein || "");
   const v = row[key];
   if (v === null || v === undefined) return "";
   if (key === "platform") return PLATFORM_LABELS[v] || v;
@@ -83,6 +113,29 @@ const cellText = (row, key) => {
   }
   return String(v);
 };
+
+/**
+ * Value a dropdown filter compares with. Same as the cell text, except the
+ * frein: "Autre : <note>" filters as "Autre", so free notes do not each
+ * become a dropdown entry.
+ */
+const selectText = (row, key) => {
+  if (key === "frein") {
+    return FREIN_LABELS[row.freinCode] || cellText(row, key);
+  }
+  return cellText(row, key);
+};
+
+/** Orders present values the way the vocabulary lists them, extras last. */
+const orderedLike = (present, order) => [
+  ...order.filter((v) => present.has(v)),
+  ...[...present].filter((v) => !order.includes(v)).sort(),
+];
+
+const MATURITY_ORDER = Object.keys(MATURITY_RANK)
+  .sort((a, b) => MATURITY_RANK[a] - MATURITY_RANK[b])
+  .map((level) => MATURITY[level].label);
+const FREIN_ORDER = FREINS.map((f) => f.label);
 
 const Leads = () => {
   const { user, logout } = useAuth();
@@ -128,12 +181,17 @@ const Leads = () => {
 
   /** Options for the dropdown filters, taken from the rows themselves. */
   const options = useMemo(() => {
-    const build = (key) =>
-      [...new Set(rows.map((r) => cellText(r, key)).filter(Boolean))].sort();
+    const present = (key) =>
+      new Set(rows.map((r) => selectText(r, key)).filter(Boolean));
+    const build = (key) => [...present(key)].sort();
     return {
       platform: build("platform"),
       classification: build("classification"),
+      maturity: orderedLike(present("maturity"), MATURITY_ORDER),
+      frein: orderedLike(present("frein"), FREIN_ORDER),
       agent: build("agent"),
+      // Offer "Non renseigné" only when some row actually lacks a frein.
+      freinMissing: rows.some((r) => !selectText(r, "frein")),
     };
   }, [rows]);
 
@@ -144,8 +202,12 @@ const Leads = () => {
       out = rows.filter((row) =>
         active.every(([key, value]) => {
           const col = COLUMNS.find((c) => c.key === key);
+          if (col?.type === "select") {
+            const picked = selectText(row, key);
+            if (key === "frein" && value === FREIN_NONE) return !picked;
+            return picked === value;
+          }
           const cell = cellText(row, key);
-          if (col?.type === "select") return cell === value;
           if (col?.type === "number") {
             // "5" matches exactly; ">3" and "<3" compare
             const raw = Number(row[key] ?? 0);
@@ -162,6 +224,26 @@ const Leads = () => {
     const mul = dir === "asc" ? 1 : -1;
     return [...out].sort((a, b) => {
       const col = COLUMNS.find((c) => c.key === key);
+      if (key === "maturity") {
+        // Ascending = hottest first (Chaud, Tiède, Froid). Rows without a
+        // level stay last either way; ties put the most messages received
+        // first.
+        const la = maturityLevelOf(a);
+        const lb = maturityLevelOf(b);
+        if (la !== lb) {
+          if (!la) return 1;
+          if (!lb) return -1;
+          return (MATURITY_RANK[la] - MATURITY_RANK[lb]) * mul;
+        }
+        return Number(b.messagesIn || 0) - Number(a.messagesIn || 0);
+      }
+      if (key === "frein") {
+        // Unqualified rows stay last either way.
+        const fa = cellText(a, key);
+        const fb = cellText(b, key);
+        if (!fa || !fb) return fa ? -1 : fb ? 1 : 0;
+        return fa.localeCompare(fb, "fr") * mul;
+      }
       if (col?.type === "number") return (Number(a[key] || 0) - Number(b[key] || 0)) * mul;
       if (col?.type === "date") {
         return (new Date(a[key] || 0) - new Date(b[key] || 0)) * mul;
@@ -276,6 +358,9 @@ const Leads = () => {
                             {o}
                           </option>
                         ))}
+                        {c.key === "frein" && options.freinMissing && (
+                          <option value={FREIN_NONE}>Non renseigné</option>
+                        )}
                       </select>
                     ) : (
                       <input
@@ -346,6 +431,28 @@ const Leads = () => {
                           </td>
                         );
                       }
+                      if (c.key === "maturity") {
+                        const level = maturityLevelOf(r);
+                        return (
+                          <td
+                            key={c.key}
+                            style={styles.td}
+                            title={r.maturityReason || cellText(r, c.key)}
+                          >
+                            {level ? (
+                              <MaturityChip
+                                maturity={{
+                                  level,
+                                  label: r.maturity || MATURITY[level].label,
+                                  reason: r.maturityReason || "",
+                                }}
+                              />
+                            ) : (
+                              cellText(r, c.key)
+                            )}
+                          </td>
+                        );
+                      }
                       const isNum = c.type === "number";
                       return (
                         <td
@@ -353,7 +460,7 @@ const Leads = () => {
                           style={{
                             ...styles.td,
                             ...(isNum ? styles.tdNum : {}),
-                            ...(c.key === "lastIncomingText"
+                            ...(c.key === "lastMessage"
                               ? styles.tdWrap
                               : {}),
                           }}

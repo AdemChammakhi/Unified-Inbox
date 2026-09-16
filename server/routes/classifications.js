@@ -120,6 +120,22 @@ router.put("/", protect, async (req, res) => {
       );
     }
 
+    // Maturity reads the classification, so cached lead insights are stale,
+    // and so is the Leads sheet (its "Étape" and "Maturité" columns).
+    // Required lazily: both are optional to this route.
+    try {
+      const { clearInsightsCache } = require("./leadInsights");
+      if (typeof clearInsightsCache === "function") clearInsightsCache();
+    } catch (err) {
+      console.error("Lead insights cache clear failed:", err.message);
+    }
+    try {
+      const { clearLeadsCache } = require("./leads");
+      if (typeof clearLeadsCache === "function") clearLeadsCache();
+    } catch (err) {
+      console.error("Leads cache clear failed:", err.message);
+    }
+
     return res.json({ success: true, classification: result });
   } catch (error) {
     console.error("Classification update error:", error.message);

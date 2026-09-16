@@ -18,6 +18,41 @@ const EMAIL_CACHE_TTL = 60000; // 60 seconds
 // In-flight promise — prevents concurrent IMAP connections when multiple agents load at once
 let _emailFetch = null;
 
+// ── In-flight send claims ────────────────────────────────────────────────────
+// The lock is written only after the mail was accepted, so the time between
+// the lock check and the lock creation spans the whole SMTP exchange. A claim
+// taken before the lock check and released once the lock is written (or the
+// send failed) keeps a second agent out of that window. Production runs one
+// backend process, so an in-memory map is enough.
+const _emailSendClaims = new Map(); // lockConvId -> { userId, count }
+const noopRelease = () => {};
+
+function emailSendClaimHolder(key) {
+  return _emailSendClaims.get(key)?.userId || null;
+}
+
+/**
+ * Take the claim on a conversation (shared when the same user already holds
+ * it, e.g. two quick sends). Returns an idempotent release function, or null
+ * when another user holds the claim.
+ */
+function takeEmailSendClaim(key, userId) {
+  const uid = String(userId);
+  const held = _emailSendClaims.get(key);
+  if (held && held.userId !== uid) return null;
+  if (held) held.count += 1;
+  else _emailSendClaims.set(key, { userId: uid, count: 1 });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const current = _emailSendClaims.get(key);
+    if (!current || current.userId !== uid) return;
+    current.count -= 1;
+    if (current.count <= 0) _emailSendClaims.delete(key);
+  };
+}
+
 // Helper: connect to IMAP and fetch emails
 function fetchEmails(limit = 50) {
   return new Promise((resolve, reject) => {
@@ -249,6 +284,8 @@ router.get("/conversations", protect, async (req, res) => {
 // Body: { to, subject?, text?, conversationId, attachment? }
 // attachment = { url, path, name, mimeType, mediaType } from POST /api/uploads.
 router.post("/send", protect, async (req, res) => {
+  // Released in `finally` at the latest (see takeEmailSendClaim).
+  let releaseClaim = noopRelease;
   try {
     const { to, subject, text, conversationId, attachment } = req.body;
 
@@ -263,10 +300,25 @@ router.post("/send", protect, async (req, res) => {
     if (!lockConvId) {
       return res.status(400).json({ message: "Invalid conversationId or recipient" });
     }
+    // Another agent's send on this conversation is still in flight: its lock
+    // is not written yet, but it will be once the mail is accepted.
+    const myId = req.user._id.toString();
+    const claimHolder = emailSendClaimHolder(lockConvId);
+    if (claimHolder && claimHolder !== myId && req.user.role !== "admin") {
+      return res.status(403).json({
+        message: "This conversation was just locked by another agent.",
+      });
+    }
+    // Every sender is locked after a successful send (see below): hold the
+    // conversation for the duration of the send. An admin passing another
+    // agent's claim gets no claim of their own.
+    releaseClaim = takeEmailSendClaim(lockConvId, myId) || noopRelease;
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
       platform: "email",
     });
+    // The lock exists and is only refreshed: the claim is not needed.
+    if (existingLock) releaseClaim();
     if (
       existingLock &&
       existingLock.lockedBy.toString() !== req.user._id.toString() &&
@@ -277,28 +329,9 @@ router.post("/send", protect, async (req, res) => {
           "This conversation is locked to another agent. Only the assigned agent can reply.",
       });
     }
-    // Auto-lock on first reply (marketing agents)
-    // --- Auto-lock functionality ---
-    if (!existingLock) {
-      try {
-        await ConversationLock.create({
-          conversationId: lockConvId,
-          platform: "email",
-          lockedBy: req.user._id,
-          lockedAt: new Date(),
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
-        });
-      } catch (lockErr) {
-        if (lockErr.code === 11000) {
-          console.log("[Email:Lock] Lock race detected (non-fatal)");
-        } else {
-          throw lockErr;
-        }
-      }
-    } else {
-      existingLock.expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      await existingLock.save();
-    }
+    // The lock is created or refreshed further down, only once the SMTP
+    // configuration is present and the mail was accepted, so a failed send
+    // never assigns anyone.
 
     if (
       !process.env.EMAIL_USER ||
@@ -351,6 +384,34 @@ router.post("/send", protect, async (req, res) => {
       attachments: mailAttachments,
     });
 
+    // --- Auto-lock functionality ---
+    // Runs only after the mail was accepted. The mail is already sent, so a
+    // lock failure here must never fail the request: log it and carry on.
+    try {
+      if (!existingLock) {
+        await ConversationLock.create({
+          conversationId: lockConvId,
+          platform: "email",
+          lockedBy: req.user._id,
+          lockedAt: new Date(),
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+        });
+      } else {
+        existingLock.expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+        await existingLock.save();
+      }
+    } catch (lockErr) {
+      if (lockErr.code === 11000) {
+        console.log("[Email:Lock] Lock race detected (non-fatal)");
+      } else {
+        console.error(
+          "[Email:Lock] Lock update failed after send (non-fatal):",
+          lockErr.message,
+        );
+      }
+    }
+    releaseClaim();
+
     // Sync sent email to DB
     await Message.create({
       platform: "email",
@@ -364,6 +425,7 @@ router.post("/send", protect, async (req, res) => {
       direction: "outgoing",
       status: "sent",
       externalId: info.messageId,
+      sentBy: req.user._id,
       timestamp: new Date(),
     });
 
@@ -390,6 +452,8 @@ router.post("/send", protect, async (req, res) => {
     return res
       .status(500)
       .json({ message: "Failed to send email: " + error.message });
+  } finally {
+    releaseClaim();
   }
 });
 

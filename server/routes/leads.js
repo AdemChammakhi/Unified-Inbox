@@ -21,6 +21,19 @@ const { buildProspectRows } = require("./exports");
 
 const CACHE_TTL_MS = 30 * 1000;
 const _cache = new Map(); // "<platform>:<range>" -> { at, rows }
+// Bumped by every clear, so a build that started before the clear does not
+// put its now-stale rows back into the cache when it finishes.
+let _generation = 0;
+
+/**
+ * Forget every cached sheet. Called when something the rows are derived from
+ * changes outside a message (a frein recorded, for instance), so the next
+ * visit shows it instead of a 30-second-old copy.
+ */
+function clearLeadsCache() {
+  _generation++;
+  _cache.clear();
+}
 
 // GET /api/leads?platform=all|<platform>&range=<days|all>
 router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
@@ -53,11 +66,14 @@ router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
     const since = rangeDays
       ? new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000)
       : null;
+    const generation = _generation;
     const rows = await buildProspectRows({ platform, since });
     const payload = { rows: [...rows], truncated: Boolean(rows.truncated) };
-    _cache.set(key, { at: Date.now(), ...payload });
-    // Keep the cache from growing without bound across filter combinations
-    if (_cache.size > 20) _cache.delete(_cache.keys().next().value);
+    if (generation === _generation) {
+      _cache.set(key, { at: Date.now(), ...payload });
+      // Keep the cache from growing without bound across filter combinations
+      if (_cache.size > 20) _cache.delete(_cache.keys().next().value);
+    }
 
     return res.json({ ...payload, cached: false });
   } catch (err) {
@@ -67,3 +83,4 @@ router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
 });
 
 module.exports = router;
+module.exports.clearLeadsCache = clearLeadsCache;

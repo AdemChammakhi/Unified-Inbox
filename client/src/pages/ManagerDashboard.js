@@ -32,6 +32,10 @@ import AdAttribution from "../components/AdAttribution";
 import AppointmentsPanel from "../components/AppointmentsPanel";
 import ProspectExport from "../components/ProspectExport";
 import EmailBody from "../components/EmailBody";
+import MaturityChip from "../components/MaturityChip";
+import FreinSelector from "../components/FreinSelector";
+import { useLeadInsights } from "../hooks/useLeadInsights";
+import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
 import {
   BarChart,
   Bar,
@@ -124,6 +128,83 @@ const PLATFORMS = [
   { key: "email", label: "Email" },
 ];
 
+/* ── Conversation list ordering (lead insights) ── */
+const SORT_STORAGE_KEY = "manager.sortMode";
+const SORT_KEYS = new Set(SORT_MODES.map((m) => m.key));
+const DEFAULT_SORT_MODE = "recent";
+const NO_CONVERSATIONS = [];
+
+const readSortMode = () => {
+  try {
+    const saved = window.localStorage.getItem(SORT_STORAGE_KEY);
+    return SORT_KEYS.has(saved) ? saved : DEFAULT_SORT_MODE;
+  } catch {
+    return DEFAULT_SORT_MODE;
+  }
+};
+
+const receivedCount = (insight) => Number(insight?.messagesIn) || 0;
+
+/** "1 reçu", "12 reçus" — French keeps 0 and 1 singular. */
+const receivedLabel = (count) => `${count} ${count > 1 ? "reçus" : "reçu"}`;
+
+/** Tooltip naming who recorded the frein, and when. */
+const freinAuthorTitle = (frein) => {
+  if (!frein?.code) return "Motif ou frein principal de l’échange";
+  const parts = [];
+  if (frein.setByName) parts.push(`par ${frein.setByName}`);
+  const at = frein.setAt ? new Date(frein.setAt) : null;
+  if (at && !Number.isNaN(at.getTime())) {
+    parts.push(
+      `le ${at.toLocaleString("fr-FR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`,
+    );
+  }
+  return parts.length ? `Renseigné ${parts.join(" ")}` : "Motif renseigné";
+};
+
+// Unknown maturity sorts after froid; no insight at all sorts last.
+const UNKNOWN_MATURITY_RANK = 3;
+const NO_INSIGHT_RANK = 4;
+const maturityRank = (insight) => {
+  if (!insight) return NO_INSIGHT_RANK;
+  const rank = MATURITY_RANK[insight.maturity?.level];
+  return rank === undefined ? UNKNOWN_MATURITY_RANK : rank;
+};
+
+/**
+ * Reorder a newest-first list by the chosen mode. The sort is stable and
+ * falls back to the incoming index, so ties and conversations without
+ * insights keep their recency order at the end of their group.
+ */
+const sortByInsight = (list, mode, getInsight) => {
+  if (mode !== "received" && mode !== "maturity") return list;
+  const decorated = list.map((conv, index) => ({
+    conv,
+    index,
+    insight: getInsight(conv),
+  }));
+  decorated.sort((a, b) => {
+    if (mode === "maturity") {
+      const rankDiff = maturityRank(a.insight) - maturityRank(b.insight);
+      if (rankDiff !== 0) return rankDiff;
+    } else if (!a.insight !== !b.insight) {
+      return a.insight ? -1 : 1;
+    }
+    if (a.insight && b.insight) {
+      const countDiff = receivedCount(b.insight) - receivedCount(a.insight);
+      if (countDiff !== 0) return countDiff;
+    }
+    return a.index - b.index;
+  });
+  return decorated.map((d) => d.conv);
+};
+
 /* ════════════════════════════════════════════════════════════════════════
    MANAGER DASHBOARD
    ════════════════════════════════════════════════════════════════════════ */
@@ -144,6 +225,7 @@ const ManagerDashboard = () => {
   const [classifications, setClassifications] = useState({});
   const [appointments, setAppointments] = useState({});
   const [classFilter, setClassFilter] = useState("all");
+  const [sortMode, setSortMode] = useState(readSortMode);
   const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
     instagram: 0,
@@ -276,6 +358,13 @@ const ManagerDashboard = () => {
     const t = setTimeout(() => setSearchDebounced(searchQuery), 200);
     return () => clearTimeout(t);
   }, [searchQuery]);
+
+  // Remember the list ordering per browser
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SORT_STORAGE_KEY, sortMode);
+    } catch {}
+  }, [sortMode]);
 
   // Keep refs in sync
   useEffect(() => {
@@ -690,16 +779,38 @@ const ManagerDashboard = () => {
         if (key !== conversationId) delete next[conversationId];
         return next;
       });
+      // The stage feeds the maturity (hors cible, prioritaire, RDV)
+      queryClient.invalidateQueries({ queryKey: ["leadInsights", activeTab] });
     } catch (error) {
       alert("Failed to update classification");
     }
   };
 
+  // Every conversation of the tab, newest first
+  const recentConversations = useMemo(
+    () =>
+      [...conversations].sort((a, b) => {
+        const tA = new Date(a.lastMessage?.time || 0).getTime();
+        const tB = new Date(b.lastMessage?.time || 0).getTime();
+        return tB - tA;
+      }),
+    [conversations],
+  );
+
+  // Maturity, message counts and frein — computed by the server for the
+  // 200 most recent conversations. Paused outside the Chats tab.
+  const { getInsight, saveFrein } = useLeadInsights({
+    platform: activeTab,
+    conversations:
+      activeMainTab === "chats" ? recentConversations : NO_CONVERSATIONS,
+    token: user?.token,
+  });
+
   // Sorted + filtered conversations
   const sortedConversations = useMemo(() => {
-    let filtered = conversations;
+    let filtered = recentConversations;
     if (classFilter !== "all") {
-      filtered = conversations.filter((conv) => {
+      filtered = filtered.filter((conv) => {
         const cls = lookupBy(classifications, conv) || "non_classifie";
         return cls === classFilter;
       });
@@ -723,12 +834,16 @@ const ManagerDashboard = () => {
         );
       });
     }
-    return [...filtered].sort((a, b) => {
-      const tA = new Date(a.lastMessage?.time || 0).getTime();
-      const tB = new Date(b.lastMessage?.time || 0).getTime();
-      return tB - tA;
-    });
-  }, [conversations, classifications, classFilter, searchDebounced]);
+    // "recent" keeps the newest-first order as is
+    return sortByInsight(filtered, sortMode, getInsight);
+  }, [
+    recentConversations,
+    classifications,
+    classFilter,
+    searchDebounced,
+    sortMode,
+    getInsight,
+  ]);
 
   // Keep selectedConv in sync
   useEffect(() => {
@@ -1030,6 +1145,9 @@ const ManagerDashboard = () => {
       .mgr-refresh-icon:hover { background: var(--bg-hover) !important; transform: rotate(180deg); }
       .mgr-class-dropdown { appearance: none; -webkit-appearance: none; cursor: pointer; }
       .mgr-class-dropdown option { background: var(--bg-elevated); color: var(--text-primary); }
+      .mgr-sort-select { cursor: pointer; }
+      .mgr-sort-select:focus { border-color: var(--accent) !important; }
+      .mgr-sort-select option { background: var(--bg-elevated); color: var(--text-primary); }
       .mgr-email-render img { max-width: 100% !important; height: auto !important; }
       .mgr-email-render a { color: var(--accent) !important; }
       .mgr-main-tab:hover { background: var(--bg-hover) !important; }
@@ -1063,6 +1181,7 @@ const ManagerDashboard = () => {
      ════════════════════════════════════════════════════════════════════ */
 
   const isChat = activeMainTab === "chats";
+  const selectedInsight = selectedConv ? getInsight(selectedConv) : null;
 
   return (
     <DashboardLayout noPadding={isChat}>
@@ -1368,6 +1487,53 @@ const ManagerDashboard = () => {
                   </div>
                 </div>
 
+                {/* Sort order */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "6px 14px 8px",
+                  }}
+                >
+                  <label
+                    htmlFor="mgr-sort-mode"
+                    style={{
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      color: "var(--text-faint)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Trier :
+                  </label>
+                  <select
+                    id="mgr-sort-mode"
+                    className="mgr-sort-select"
+                    value={sortMode}
+                    onChange={(e) => setSortMode(e.target.value)}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      padding: "4px 8px",
+                      border: "1px solid var(--border-primary)",
+                      borderRadius: "6px",
+                      backgroundColor: "var(--bg-card)",
+                      color: "var(--text-primary)",
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      fontFamily: "'Hanken Grotesk', sans-serif",
+                      outline: "none",
+                    }}
+                  >
+                    {SORT_MODES.map((m) => (
+                      <option key={m.key} value={m.key}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Classification Filter */}
                 <div
                   style={{
@@ -1513,6 +1679,8 @@ const ManagerDashboard = () => {
                         lookupBy(classifications, conv) || "non_classifie";
                       const isSelected = selectedConv?.id === conv.id;
                       const isUnread = unreadConvIds.has(conv.id);
+                      const insight = getInsight(conv);
+                      const received = receivedCount(insight);
                       return (
                         <div
                           key={conv.id}
@@ -1696,16 +1864,69 @@ const ManagerDashboard = () => {
                             >
                               {conv.lastMessage?.text || "No messages"}
                             </p>
-                            <small
+                            <div
                               style={{
-                                fontSize: "10px",
-                                color: "var(--text-dim)",
-                                display: "block",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
                                 marginTop: "2px",
+                                minWidth: 0,
                               }}
                             >
-                              {timeAgo(conv.lastMessage?.time)}
-                            </small>
+                              <small
+                                style={{
+                                  fontSize: "10px",
+                                  color: "var(--text-dim)",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {timeAgo(conv.lastMessage?.time)}
+                              </small>
+                              {insight && (
+                                <span
+                                  style={{
+                                    marginLeft: "auto",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: "5px",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {insight.needsQualification && (
+                                    <span
+                                      title="Motif ou frein principal non renseigné"
+                                      style={{
+                                        fontSize: "9px",
+                                        fontWeight: 700,
+                                        color: "var(--danger)",
+                                        border:
+                                          "1px solid var(--danger)",
+                                        borderRadius: "4px",
+                                        padding: "1px 4px",
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      À qualifier
+                                    </span>
+                                  )}
+                                  <span
+                                    title="Messages reçus du prospect"
+                                    style={{
+                                      fontSize: "10px",
+                                      fontWeight: 600,
+                                      color: "var(--text-faint)",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {receivedLabel(received)}
+                                  </span>
+                                  <MaturityChip
+                                    maturity={insight.maturity}
+                                    compact
+                                  />
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       );
@@ -1899,6 +2120,67 @@ const ManagerDashboard = () => {
                         >
                           🗑
                         </button>
+                      </div>
+
+                      {/* Lead qualification: maturity, counts, frein */}
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                          gap: "8px 12px",
+                          marginTop: "10px",
+                          minWidth: 0,
+                        }}
+                      >
+                        <MaturityChip maturity={selectedInsight?.maturity} />
+                        {selectedInsight && (
+                          <span
+                            style={{
+                              fontSize: "11px",
+                              color: "var(--text-faint)",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {receivedLabel(receivedCount(selectedInsight))}
+                            {" · "}
+                            {Number(selectedInsight.messagesOut) || 0}{" "}
+                            {Number(selectedInsight.messagesOut) > 1
+                              ? "envoyés"
+                              : "envoyé"}
+                          </span>
+                        )}
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "6px",
+                            minWidth: 0,
+                          }}
+                        >
+                          <span
+                            title={freinAuthorTitle(selectedInsight?.frein)}
+                            style={{
+                              fontSize: "11px",
+                              fontWeight: 600,
+                              color: "var(--text-faint)",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            Motif / frein :
+                          </span>
+                          <FreinSelector
+                            key={`${activeTab}:${selectedConv.id}`}
+                            value={selectedInsight?.frein || null}
+                            required={Boolean(
+                              selectedInsight?.needsQualification,
+                            )}
+                            onSave={(code, note) =>
+                              saveFrein(selectedConv, code, note)
+                            }
+                            compact
+                          />
+                        </div>
                       </div>
                     </div>
 

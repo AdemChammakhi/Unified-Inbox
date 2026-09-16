@@ -18,6 +18,37 @@ import { useAuth } from "../context/AuthContext";
 import { Search, RefreshCw, Send, Paperclip } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
 import EmailBody from "../components/EmailBody";
+import MaturityChip from "../components/MaturityChip";
+import FreinSelector from "../components/FreinSelector";
+import { useLeadInsights } from "../hooks/useLeadInsights";
+import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
+
+// Conversation list ordering, remembered per browser.
+const SORT_STORAGE_KEY = "inbox.sortMode";
+const SORT_KEYS = new Set(SORT_MODES.map((m) => m.key));
+const DEFAULT_SORT = "recent";
+
+const readSortMode = () => {
+  try {
+    const saved = window.localStorage.getItem(SORT_STORAGE_KEY);
+    return SORT_KEYS.has(saved) ? saved : DEFAULT_SORT;
+  } catch {
+    return DEFAULT_SORT;
+  }
+};
+
+/** Last activity of a conversation, in ms; 0 when unknown. */
+const lastActivityOf = (conv) => {
+  const t = new Date(conv?.lastMessage?.time || 0).getTime();
+  return Number.isNaN(t) ? 0 : t;
+};
+
+// The server caches insights for 20 s, so an immediate refetch after a reply
+// can still return the old counts; refetch once more after that window.
+const INSIGHTS_RECHECK_MS = 21000;
+
+/** "1 reçu", "12 reçus" — French keeps 0 and 1 singular. */
+const receivedLabel = (n) => `${n} ${n > 1 ? "reçus" : "reçu"}`;
 
 const CLASSIFICATION_LABELS = {
   non_classifie: "Non Classifié",
@@ -108,6 +139,7 @@ const Inbox = () => {
   // { conversationId, value } while the agent is picking an RDV date
   const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
+  const [sortMode, setSortMode] = useState(readSortMode);
   const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
     instagram: 0,
@@ -229,6 +261,30 @@ const Inbox = () => {
     const t = setTimeout(() => setSearchDebounced(searchQuery), 200);
     return () => clearTimeout(t);
   }, [searchQuery]);
+
+  // Remember the chosen ordering
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SORT_STORAGE_KEY, sortMode);
+    } catch {}
+  }, [sortMode]);
+
+  // Newest first — the base order of every sort mode, and the order that
+  // decides which conversations get insights when there are more than 200.
+  const recentConversations = useMemo(
+    () =>
+      [...conversations].sort(
+        (a, b) => lastActivityOf(b) - lastActivityOf(a),
+      ),
+    [conversations],
+  );
+
+  // Maturity, received count and frein per conversation (computed server-side)
+  const { getInsight, saveFrein } = useLeadInsights({
+    platform: activeTab,
+    conversations: recentConversations,
+    token: user?.token,
+  });
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -682,6 +738,10 @@ const Inbox = () => {
         return next;
       });
       setRdvDraft(null);
+      // Maturity reads the classification (Hors cible, Priorité, RDV): the
+      // server already dropped its cached insights, so refetch the chip and
+      // the maturity sort now rather than at the next 60 s poll.
+      queryClient.invalidateQueries({ queryKey: ["leadInsights", activeTab] });
     } catch (error) {
       console.error("Failed to update classification:", error.message);
       alert(
@@ -692,9 +752,9 @@ const Inbox = () => {
 
   // Sorted, filtered, and searched conversations
   const sortedConversations = useMemo(() => {
-    let filtered = conversations;
+    let filtered = recentConversations;
     if (classFilter !== "all") {
-      filtered = conversations.filter((conv) => {
+      filtered = filtered.filter((conv) => {
         const cls = lookupBy(classifications, conv) || "non_classifie";
         return cls === classFilter;
       });
@@ -719,12 +779,41 @@ const Inbox = () => {
         );
       });
     }
-    return [...filtered].sort((a, b) => {
-      const tA = new Date(a.lastMessage?.time || 0).getTime();
-      const tB = new Date(b.lastMessage?.time || 0).getTime();
-      return tB - tA;
+    // `filtered` is already newest first; the other modes re-rank on top of
+    // that, and the recency position is the final tie-breaker. Conversations
+    // without insights (still loading, or beyond the first 200) keep their
+    // recency order at the end of their group.
+    if (sortMode === DEFAULT_SORT || !SORT_KEYS.has(sortMode)) {
+      return [...filtered];
+    }
+    const byMaturity = sortMode === "maturity";
+    const decorated = filtered.map((conv, index) => {
+      const insight = getInsight(conv);
+      return {
+        conv,
+        index,
+        insight,
+        rank: byMaturity
+          ? (MATURITY_RANK[insight?.maturity?.level] ?? 3)
+          : 0,
+        received: Number(insight?.messagesIn) || 0,
+      };
     });
-  }, [conversations, classifications, classFilter, searchDebounced]);
+    decorated.sort((a, b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      if (!a.insight !== !b.insight) return a.insight ? -1 : 1;
+      if (a.received !== b.received) return b.received - a.received;
+      return a.index - b.index;
+    });
+    return decorated.map((d) => d.conv);
+  }, [
+    recentConversations,
+    classifications,
+    classFilter,
+    searchDebounced,
+    sortMode,
+    getInsight,
+  ]);
 
   // When React Query refreshes conversations, sync selectedConv so header/preview stay current
   // while preserving locally-loaded messages (not returned by slim mode).
@@ -953,6 +1042,8 @@ const Inbox = () => {
       .inbox-refresh-icon:hover { background: var(--bg-hover) !important; transform: rotate(180deg); }
       .inbox-class-dropdown { appearance: none; -webkit-appearance: none; cursor: pointer; }
       .inbox-class-dropdown option { background: var(--bg-elevated); color: var(--text-primary); }
+      .inbox-sort-select:focus { border-color: var(--accent) !important; }
+      .inbox-sort-select option { background: var(--bg-elevated); color: var(--text-primary); }
       .inbox-email-render img { max-width: 100% !important; height: auto !important; }
       .inbox-email-render a { color: var(--accent) !important; }
       .inbox-email-render * { max-width: 100% !important; }
@@ -1122,6 +1213,16 @@ const Inbox = () => {
       // Refresh locks after sending (may have auto-locked)
       fetchLocks();
 
+      // The reply changes the counts, the maturity and whether the exchange
+      // now needs a frein — refresh insights now, and once more after the
+      // server's cache window so the new reply is certainly counted.
+      // Invalidation (unlike refetch()) never fires a disabled query.
+      const sentTab = activeTab;
+      const refreshInsights = () =>
+        queryClient.invalidateQueries({ queryKey: ["leadInsights", sentTab] });
+      refreshInsights();
+      setTimeout(refreshInsights, INSIGHTS_RECHECK_MS);
+
       // Replace the optimistic temp message with the confirmed real ID from the
       // HTTP response. This makes the message persistent immediately — no need to
       // wait for the socket messageSent event.
@@ -1168,6 +1269,19 @@ const Inbox = () => {
       setSending(false);
     }
   };
+
+  // Insights of the open conversation, and the frein save bound to it
+  const selectedInsight = selectedConv ? getInsight(selectedConv) : null;
+  const saveSelectedFrein = (code, note) => saveFrein(selectedConv, code, note);
+  // The frein records the exchange of the agent in charge: an agent cannot
+  // qualify a conversation assigned to a colleague (admins and managers can).
+  const selectedLock = selectedConv ? lookupBy(locks, selectedConv) : null;
+  const freinLockedTo =
+    user?.role === "marketing" &&
+    selectedLock &&
+    selectedLock.agentId !== user?._id
+      ? selectedLock.agentName || "un autre agent"
+      : null;
 
   return (
     <DashboardLayout noPadding>
@@ -1253,6 +1367,26 @@ const Inbox = () => {
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
               </div>
+            </div>
+
+            {/* Ordering */}
+            <div style={styles.sortRow}>
+              <label htmlFor="inbox-sort-mode" style={styles.sortLabel}>
+                Trier :
+              </label>
+              <select
+                id="inbox-sort-mode"
+                className="inbox-sort-select"
+                value={sortMode}
+                onChange={(e) => setSortMode(e.target.value)}
+                style={styles.sortSelect}
+              >
+                {SORT_MODES.map((m) => (
+                  <option key={m.key} value={m.key}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Classification Filter */}
@@ -1366,6 +1500,8 @@ const Inbox = () => {
                   const cls = lookupBy(classifications, conv) || "non_classifie";
                   const isSelected = selectedConv?.id === conv.id;
                   const isUnread = unreadConvIds.has(conv.id);
+                  const insight = getInsight(conv);
+                  const received = Number(insight?.messagesIn) || 0;
                   return (
                     <div
                       key={conv.id}
@@ -1511,25 +1647,49 @@ const Inbox = () => {
                         >
                           {conv.lastMessage?.text || "No messages"}
                         </p>
-                        <small style={styles.time}>
-                          {conv.lastMessage?.time
-                            ? (() => {
-                                const diff =
-                                  Date.now() -
-                                  new Date(conv.lastMessage.time).getTime();
-                                if (diff < 60000) return "just now";
-                                if (diff < 3600000)
-                                  return `${Math.floor(diff / 60000)}m ago`;
-                                if (diff < 86400000)
-                                  return `${Math.floor(diff / 3600000)}h ago`;
-                                if (diff < 604800000)
-                                  return `${Math.floor(diff / 86400000)}d ago`;
-                                return new Date(
-                                  conv.lastMessage.time,
-                                ).toLocaleDateString();
-                              })()
-                            : ""}
-                        </small>
+                        <div style={styles.convMetaRow}>
+                          <small style={styles.time}>
+                            {conv.lastMessage?.time
+                              ? (() => {
+                                  const diff =
+                                    Date.now() -
+                                    new Date(conv.lastMessage.time).getTime();
+                                  if (diff < 60000) return "just now";
+                                  if (diff < 3600000)
+                                    return `${Math.floor(diff / 60000)}m ago`;
+                                  if (diff < 86400000)
+                                    return `${Math.floor(diff / 3600000)}h ago`;
+                                  if (diff < 604800000)
+                                    return `${Math.floor(diff / 86400000)}d ago`;
+                                  return new Date(
+                                    conv.lastMessage.time,
+                                  ).toLocaleDateString();
+                                })()
+                              : ""}
+                          </small>
+                          {insight && (
+                            <span style={styles.convInsights}>
+                              {insight.needsQualification && (
+                                <span
+                                  style={styles.qualifyMarker}
+                                  title="Motif ou frein principal non renseigné"
+                                >
+                                  À qualifier
+                                </span>
+                              )}
+                              <span
+                                style={styles.receivedCount}
+                                title="Messages reçus du prospect"
+                              >
+                                {receivedLabel(received)}
+                              </span>
+                              <MaturityChip
+                                maturity={insight.maturity}
+                                compact
+                              />
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
@@ -1618,6 +1778,23 @@ const Inbox = () => {
                           📅 {formatAppointment(lookupBy(appointments, selectedConv))}
                         </button>
                       )}
+                    {/* Lead maturity (reason in the tooltip) and main frein */}
+                    <MaturityChip maturity={selectedInsight?.maturity} />
+                    <span
+                      title={
+                        freinLockedTo
+                          ? `Conversation assignée à ${freinLockedTo} : seul cet agent peut qualifier l’échange.`
+                          : undefined
+                      }
+                    >
+                      <FreinSelector
+                        key={`${activeTab}:${selectedConv.id}`}
+                        value={selectedInsight?.frein || null}
+                        onSave={saveSelectedFrein}
+                        disabled={Boolean(freinLockedTo)}
+                        compact
+                      />
+                    </span>
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"
@@ -1972,6 +2149,21 @@ const Inbox = () => {
                   }
                   return (
                     <div>
+                      {/* Not dismissible: it goes away once a frein is saved */}
+                      {selectedInsight?.needsQualification && (
+                        <div style={styles.qualifyBar} role="status">
+                          <span style={styles.qualifyBarText}>
+                            Qualification requise : indiquez le motif ou le
+                            frein principal de cet échange.
+                          </span>
+                          <FreinSelector
+                            key={`qualify:${activeTab}:${selectedConv.id}`}
+                            value={selectedInsight.frein || null}
+                            onSave={saveSelectedFrein}
+                            required
+                          />
+                        </div>
+                      )}
                       {pendingAttachment && (
                         <div style={styles.attachChipRow}>
                           <span style={styles.attachChip}>
@@ -2302,6 +2494,86 @@ const styles = {
     marginTop: "2px",
     fontVariantNumeric: "tabular-nums",
     fontFamily: "'Space Grotesk', sans-serif",
+  },
+  convMetaRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "6px",
+    minWidth: 0,
+  },
+  convInsights: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "5px",
+    marginLeft: "auto",
+    marginTop: "2px",
+    flexShrink: 0,
+  },
+  receivedCount: {
+    fontSize: "10px",
+    fontWeight: 600,
+    color: "var(--text-faint)",
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  qualifyMarker: {
+    fontSize: "9px",
+    fontWeight: 700,
+    color: "var(--danger, #E2685F)",
+    border: "1px solid var(--danger, #E2685F)",
+    borderRadius: "4px",
+    padding: "1px 4px",
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  sortRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "4px 14px 8px",
+    minWidth: 0,
+  },
+  sortLabel: {
+    fontSize: "11px",
+    fontWeight: 700,
+    color: "var(--text-faint)",
+    whiteSpace: "nowrap",
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  sortSelect: {
+    flex: 1,
+    minWidth: 0,
+    padding: "4px 8px",
+    border: "1px solid var(--border-primary)",
+    borderRadius: "6px",
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "var(--text-primary)",
+    backgroundColor: "var(--bg-card)",
+    outline: "none",
+    cursor: "pointer",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  qualifyBar: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: "8px 12px",
+    padding: "10px 20px",
+    borderTop: "1px solid var(--border-primary)",
+    borderLeft: "3px solid var(--danger, #E2685F)",
+    backgroundColor: "rgba(226, 104, 95, 0.08)",
+  },
+  qualifyBarText: {
+    flex: "1 1 240px",
+    minWidth: 0,
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "var(--text-primary)",
+    lineHeight: 1.4,
   },
   messageView: {
     flex: 1,

@@ -157,6 +157,7 @@ app.use("/api/conversations", apiLimiter, require("./routes/conversations"));
 app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
 app.use("/api/exports", exportLimiter, require("./routes/exports"));
 app.use("/api/leads", apiLimiter, require("./routes/leads"));
+app.use("/api/lead-insights", apiLimiter, require("./routes/leadInsights"));
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =
@@ -179,58 +180,14 @@ if (!isLocalDevRun && fs.existsSync(clientBuildPath)) {
   });
 }
 
+// Subscribes the app to the Page's messaging webhook fields (messages,
+// referrals, echoes...). See server/services/metaSubscription.js.
+const { subscribePageToMessaging } = require("./services/metaSubscription");
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   subscribePageToMessaging();
 });
-
-// Subscribe the app to the Facebook Page's 'messages' field so the
-// Instagram Messaging Send API (POST /{ig-user-id}/messages) works.
-// Error code 3 "Application does not have the capability" is the symptom
-// when this subscription is missing even if the token has the right scopes.
-async function subscribePageToMessaging() {
-  const axios = require("axios");
-  const pageId = process.env.FACEBOOK_PAGE_ID;
-  const token =
-    process.env.FACEBOOK_PAGE_ACCESS_TOKEN ||
-    process.env.INSTAGRAM_ACCESS_TOKEN;
-
-  if (!pageId || !token) {
-    console.warn(
-      "[Startup] Skipping page subscription: FACEBOOK_PAGE_ID or page token not set",
-    );
-    return;
-  }
-
-  try {
-    const res = await axios.post(
-      `https://graph.facebook.com/v24.0/${pageId}/subscribed_apps`,
-      null,
-      {
-        params: {
-          // messaging_referrals is REQUIRED for ad-referral data: Meta only
-          // delivers ads_context_data when the Page is subscribed to BOTH
-          // messages and messaging_referrals. Without it, a customer clicking
-          // a sponsored post into an existing thread produces no referral
-          // event at all, so the inbox cannot show which ad they came from.
-          subscribed_fields:
-            "messages,messaging_postbacks,message_deliveries,message_reads,messaging_referrals,messaging_optins",
-          access_token: token,
-        },
-      },
-    );
-    if (res.data?.success) {
-      console.log("[Startup] Page subscription to messaging: OK");
-    } else {
-      console.warn("[Startup] Page subscription response:", res.data);
-    }
-  } catch (err) {
-    console.warn(
-      "[Startup] Page subscription failed (non-fatal):",
-      err.response?.data?.error?.message || err.message,
-    );
-  }
-}
 
 module.exports = app;

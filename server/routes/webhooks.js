@@ -210,6 +210,263 @@ function takeReferral(platform, senderId) {
   return hit.context;
 }
 
+// ─── Message echoes (replies sent by the business) ───────────────────────────
+// Meta sends a copy ("echo", message.is_echo = true) of every message the
+// Page / Instagram account sends: sender = our account, recipient = the
+// customer. Echoes of replies typed OUTSIDE the CRM (Business Suite, the
+// Messenger or Instagram apps) are the only way those replies reach MongoDB
+// in real time, so we store them as outgoing rows.
+//
+// Dedupe contract with the CRM send routes (routes/facebook.js and
+// routes/instagram.js), which store their own row keyed by the message id:
+//  - processing waits META_ECHO_DELAY_MS (default 5 s) so the CRM row
+//    usually lands first;
+//  - Facebook echoes carrying our own app_id are CRM sends and are skipped;
+//  - a text-only echo is skipped when the CRM already stored the same text
+//    for the same customer within 2 minutes (a text + attachment send is
+//    stored as ONE row under the attachment's id);
+//  - the write is an upsert by externalId with $setOnInsert only, so it never
+//    overwrites a row the CRM stored; the CRM's own upsert claims (sets
+//    sentBy on) a row an echo stored first.
+const ECHO_DEFAULT_DELAY_MS = 5000;
+const ECHO_MAX_DELAY_MS = 2147483647; // setTimeout's ceiling
+const ECHO_DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
+// While the CRM is still sending the attachment that follows a text, the
+// text's echo is retried every ECHO_PENDING_RETRY_MS, for at most the
+// duplicate window; the text is then stored inside the CRM's row.
+const ECHO_PENDING_RETRY_MS = 2000;
+const ECHO_PENDING_MAX_WAIT_MS = ECHO_DUPLICATE_WINDOW_MS;
+// Attachment types that are link previews rather than media the agent sent.
+const ECHO_NON_MEDIA_ATTACHMENT_TYPES = new Set(["fallback"]);
+
+function echoDelayMs() {
+  const raw = process.env.META_ECHO_DELAY_MS;
+  if (raw === undefined || String(raw).trim() === "") {
+    return ECHO_DEFAULT_DELAY_MS;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return ECHO_DEFAULT_DELAY_MS;
+  return Math.min(n, ECHO_MAX_DELAY_MS);
+}
+
+/** Meta timestamps are epoch milliseconds; tolerate seconds and junk. */
+function echoTimestamp(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return new Date();
+  return new Date(n < 1e11 ? n * 1000 : n);
+}
+
+/** True when a Facebook echo was sent by this very app (i.e. by the CRM). */
+function isOwnAppEcho(message) {
+  const ownAppId = process.env.FACEBOOK_APP_ID;
+  const appId = message?.app_id;
+  if (!ownAppId || appId === undefined || appId === null) return false;
+  if (String(appId) === String(ownAppId).trim()) return true;
+  // app_id is a JSON number; compare numerically too in case the id is past
+  // 2^53 and lost precision the same way on both sides.
+  return typeof appId === "number" && Number(ownAppId) === appId;
+}
+
+/**
+ * True when the CRM already stored `content` as an outgoing reply (sentBy set)
+ * to this customer within the duplicate window around `timestamp`.
+ * @param {string} [excludeId] - _id of a row to ignore (the echo's own row)
+ */
+async function hasCrmTextCopy(platform, customerId, content, timestamp, excludeId) {
+  const query = {
+    platform,
+    recipientId: customerId,
+    direction: "outgoing",
+    sentBy: { $ne: null },
+    content,
+    timestamp: {
+      $gte: new Date(timestamp.getTime() - ECHO_DUPLICATE_WINDOW_MS),
+      $lte: new Date(timestamp.getTime() + ECHO_DUPLICATE_WINDOW_MS),
+    },
+  };
+  if (excludeId) query._id = { $ne: excludeId };
+  return Boolean(await Message.exists(query));
+}
+
+/**
+ * Store one echo as an outgoing Message, following the dedupe contract.
+ * @param {"facebook"|"instagram"} platform
+ * @param {object} event - the raw messaging event (sender, recipient, message)
+ * @param {object} io    - Socket.IO server (may be undefined)
+ * @param {number} [waitedMs] - time already spent waiting for a CRM send
+ */
+async function storeEcho(platform, event, io, waitedMs = 0) {
+  const tag = platform === "facebook" ? "FB" : "IG";
+  const message = event?.message || {};
+  const echoSenderId = sanitizeId(event?.sender?.id);
+  const customerId = sanitizeId(event?.recipient?.id);
+  const mid = sanitizeId(message.mid);
+
+  const ownId =
+    platform === "facebook"
+      ? sanitizeId(process.env.FACEBOOK_PAGE_ID) || echoSenderId
+      : sanitizeId(process.env.INSTAGRAM_ACCOUNT_ID) || echoSenderId;
+
+  if (!mid || !customerId || !isValidGraphId(customerId) || !ownId) {
+    console.warn(`[Webhook:${tag}] Echo skipped: missing mid, recipient or account id`);
+    return;
+  }
+
+  // A test message to our own account (Instagram's is_self), or anything
+  // addressed to one of our own ids, is not a reply to a customer.
+  const ownIds = new Set(
+    [
+      process.env.FACEBOOK_PAGE_ID,
+      process.env.INSTAGRAM_ACCOUNT_ID,
+      echoSenderId,
+      ownId,
+    ].filter(Boolean),
+  );
+  if (message.is_self === true || ownIds.has(customerId)) {
+    console.log(`[Webhook:${tag}] Echo skipped (sent to our own account):`, mid);
+    return;
+  }
+
+  // An unsent message is not a new reply.
+  if (message.is_deleted === true) {
+    console.log(`[Webhook:${tag}] Echo skipped (deleted message):`, mid);
+    return;
+  }
+
+  const content = typeof message.text === "string" ? message.text : "";
+  // Judge on the PARSED attachments: templates, buttons and shares have no
+  // media URL and are dropped, and an echo of only those would be an empty
+  // bubble.
+  const attachments = parseMetaAttachments(message);
+  if (!content && attachments.length === 0) {
+    console.log(`[Webhook:${tag}] Echo skipped (nothing to store):`, mid);
+    return;
+  }
+
+  const timestamp = echoTimestamp(event.timestamp);
+
+  // Text-only echo: the CRM may already have stored this text under another
+  // message id (text + attachment sends keep only the attachment's id).
+  const isTextOnly =
+    content !== "" &&
+    attachments.every((a) => ECHO_NON_MEDIA_ATTACHMENT_TYPES.has(a.type));
+  if (isTextOnly) {
+    // The CRM is still sending the attachment that goes with this text, and
+    // stores both in one row once that is done: wait for that row.
+    const route = platform === "facebook" ? facebookRoute : instagramRoute;
+    if (
+      typeof route.isTextSendPending === "function" &&
+      route.isTextSendPending(mid) &&
+      waitedMs < ECHO_PENDING_MAX_WAIT_MS
+    ) {
+      scheduleEcho(
+        platform,
+        event,
+        io,
+        ECHO_PENDING_RETRY_MS,
+        waitedMs + ECHO_PENDING_RETRY_MS,
+      );
+      return;
+    }
+    if (await hasCrmTextCopy(platform, customerId, content, timestamp)) {
+      console.log(`[Webhook:${tag}] Echo skipped (already stored by the CRM):`, mid);
+      return;
+    }
+  }
+
+  let saved;
+  try {
+    saved = await Message.findOneAndUpdate(
+      { externalId: mid },
+      {
+        $setOnInsert: {
+          platform,
+          conversationId: customerId,
+          senderId: ownId,
+          senderName: "Page",
+          recipientId: customerId,
+          content,
+          messageType: messageTypeFor(attachments),
+          attachments,
+          direction: "outgoing",
+          status: "sent",
+          sentBy: null,
+          externalId: mid,
+          timestamp,
+        },
+      },
+      { upsert: true, new: true, includeResultMetadata: true },
+    );
+  } catch (err) {
+    // A concurrent insert of the same message id won (only possible with a
+    // unique index on externalId): the message is stored already.
+    if (err?.code === 11000) {
+      console.log(`[DB] ${platform} echo already stored, skipping:`, mid);
+      return;
+    }
+    throw err;
+  }
+
+  const wasInserted = saved?.lastErrorObject?.updatedExisting === false;
+  if (!wasInserted) {
+    console.log(`[DB] ${platform} echo already stored, skipping:`, mid);
+    return;
+  }
+
+  // Check again now that our row exists: a CRM row carrying the same text may
+  // have landed between the first check and the insert. Whichever write came
+  // last, the echo copy is then removed (the send routes do the same after
+  // storing their row), so a text is never stored twice.
+  if (isTextOnly) {
+    const insertedId = saved?.value?._id;
+    if (
+      insertedId &&
+      (await hasCrmTextCopy(platform, customerId, content, timestamp, insertedId))
+    ) {
+      await Message.deleteOne({ _id: insertedId, sentBy: null });
+      console.log(`[Webhook:${tag}] Echo removed (stored by the CRM meanwhile):`, mid);
+      return;
+    }
+  }
+
+  console.log(`[DB] ${platform} echo saved (reply sent outside the CRM):`, mid);
+  logWebhook(platform, "ECHO", `stored mid=${mid}`);
+
+  if (platform === "facebook") facebookRoute.clearCache();
+  else instagramRoute.clearCache();
+
+  if (io) {
+    io.emit("messageSent", {
+      platform,
+      message: {
+        id: mid,
+        text: content,
+        from: "Page",
+        fromId: ownId,
+        time: timestamp.toISOString(),
+        attachments,
+      },
+      conversationId: customerId,
+      recipientId: customerId,
+    });
+  }
+}
+
+/**
+ * Process an echo after META_ECHO_DELAY_MS (or `delayMs` when it is retried).
+ * The webhook has already been acknowledged; failures are logged and never
+ * reach Meta.
+ */
+function scheduleEcho(platform, event, io, delayMs = echoDelayMs(), waitedMs = 0) {
+  const timer = setTimeout(() => {
+    storeEcho(platform, event, io, waitedMs).catch((err) => {
+      console.error(`[Webhook] ${platform} echo processing failed:`, err.message);
+    });
+  }, delayMs);
+  // Pending echoes must not keep the process alive on shutdown.
+  if (typeof timer.unref === "function") timer.unref();
+}
+
 // Helper: extract messaging events from an Instagram webhook entry.
 // Instagram can deliver events in TWO formats:
 //   1) entry.messaging  — array of {sender, recipient, message, ...}
@@ -431,12 +688,39 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
           const senderId = event.sender?.id;
           const recipientId = event.recipient?.id;
 
-          // Skip messages sent by the page itself
-          if (
+          // Messages sent by our own account (echoes) are stored as outgoing
+          // replies, after a delay (see storeEcho). is_echo decides when Meta
+          // sends it; otherwise fall back to comparing the sender with our ids.
+          const sentByUs =
             senderId === process.env.FACEBOOK_PAGE_ID ||
-            senderId === process.env.INSTAGRAM_ACCOUNT_ID
-          ) {
-            console.log("Skipping IG echo (sent by page):", senderId);
+            senderId === process.env.INSTAGRAM_ACCOUNT_ID;
+          const echoFlag = event.message?.is_echo;
+          const isEcho =
+            !!event.message &&
+            (echoFlag !== undefined && echoFlag !== null
+              ? echoFlag === true
+              : sentByUs);
+          if (isEcho) {
+            if (body.object === "instagram") {
+              console.log(
+                "IG echo received (sent by our account), storing after delay:",
+                event.message.mid,
+              );
+              scheduleEcho("instagram", event, io);
+            } else {
+              // Page-object traffic: a Messenger echo, which the /facebook
+              // webhook handles. Never store it as an Instagram reply.
+              console.log(
+                "Skipping echo on the Instagram webhook (object=page):",
+                event.message.mid,
+              );
+            }
+            continue;
+          }
+
+          // Anything else sent by our own account is still skipped
+          if (sentByUs) {
+            console.log("Skipping IG event sent by page:", senderId);
             continue;
           }
 
@@ -616,13 +900,32 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
         for (const event of messaging) {
           const senderId = event.sender?.id;
           const recipientId = event.recipient?.id;
+          const pageId = process.env.FACEBOOK_PAGE_ID;
+          const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
 
-          // Skip messages sent by the page itself
-          if (senderId === process.env.FACEBOOK_PAGE_ID) continue;
+          // Message echoes (message_echoes field): a copy of what the Page
+          // sent. Replies typed outside the CRM are stored after a delay
+          // (see storeEcho); the CRM's own sends are recognised by app_id.
+          if (event.message?.is_echo === true) {
+            const mid = event.message.mid;
+            if (pageId ? senderId !== pageId : senderId === igAccountId) {
+              // Not sent by our Page (e.g. an Instagram echo, which the
+              // /instagram webhook handles).
+              console.log("Skipping echo not sent by our Page:", mid);
+            } else if (isOwnAppEcho(event.message)) {
+              console.log("Skipping FB echo of a CRM send (own app_id):", mid);
+            } else {
+              console.log("FB echo received, storing after delay:", mid);
+              scheduleEcho("facebook", event, io);
+            }
+            continue;
+          }
+
+          // Skip other events sent by the page itself
+          if (senderId === pageId) continue;
 
           // Skip Instagram messages arriving via Page subscription —
           // these are already handled by the dedicated /instagram webhook.
-          const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
           const isInstagramMsg = igAccountId && recipientId === igAccountId;
           if (isInstagramMsg) {
             console.log(

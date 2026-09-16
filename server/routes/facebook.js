@@ -21,6 +21,108 @@ const GRAPH_API = "https://graph.facebook.com/v24.0";
 // out-of-window sends fail fast with the real reason (window expired).
 let _fbHumanAgentApproved = true;
 
+// ── In-flight send claims ────────────────────────────────────────────────────
+// The auto-lock is written only after Meta accepted the message, so the time
+// between the lock check and the lock creation spans the whole send. A claim
+// taken before the lock check and released once the lock is written (or the
+// send failed) keeps a second agent out of that window, as the unique lock
+// index did when the lock was created before sending. Production runs one
+// backend process, so an in-memory map is enough.
+const _fbSendClaims = new Map(); // lockConvId -> { userId, count }
+const noopRelease = () => {};
+
+function fbSendClaimHolder(key) {
+  return _fbSendClaims.get(key)?.userId || null;
+}
+
+/**
+ * Take the claim on a conversation (shared when the same user already holds
+ * it, e.g. two quick sends). Returns an idempotent release function, or null
+ * when another user holds the claim.
+ */
+function takeFbSendClaim(key, userId) {
+  const uid = String(userId);
+  const held = _fbSendClaims.get(key);
+  if (held && held.userId !== uid) return null;
+  if (held) held.count += 1;
+  else _fbSendClaims.set(key, { userId: uid, count: 1 });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const current = _fbSendClaims.get(key);
+    if (!current || current.userId !== uid) return;
+    current.count -= 1;
+    if (current.count <= 0) _fbSendClaims.delete(key);
+  };
+}
+
+// ── Text parts waiting for their CRM row ────────────────────────────────────
+// A text + attachment send is two Meta messages but ONE CRM row, stored under
+// the attachment's id once both calls are done. While that row is not stored,
+// the text part's message id is listed here, and the echo webhook
+// (routes/webhooks.js) waits instead of storing the text a second time.
+const _fbPendingTextMids = new Set();
+
+function isTextSendPending(mid) {
+  return _fbPendingTextMids.has(mid);
+}
+
+/**
+ * Store a message the CRM sent, following the dedupe contract with the echo
+ * webhook (routes/webhooks.js). With Meta's message id, the write is an upsert
+ * keyed by it, so a row the echo stored first (sentBy null) is claimed instead
+ * of duplicated. Without an id, a plain create.
+ */
+async function storeFbCrmSend({
+  messageId,
+  recipientId,
+  pageId,
+  content,
+  attachments,
+  sentBy,
+}) {
+  if (messageId) {
+    return Message.updateOne(
+      { externalId: messageId },
+      {
+        $set: {
+          sentBy,
+          senderName: "Page",
+          direction: "outgoing",
+          status: "sent",
+        },
+        $setOnInsert: {
+          platform: "facebook",
+          conversationId: recipientId,
+          senderId: pageId,
+          recipientId: recipientId,
+          content,
+          messageType: messageTypeFor(attachments),
+          attachments,
+          externalId: messageId,
+          timestamp: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+  }
+  return Message.create({
+    platform: "facebook",
+    conversationId: recipientId,
+    senderId: pageId,
+    senderName: "Page",
+    recipientId: recipientId,
+    content,
+    messageType: messageTypeFor(attachments),
+    attachments,
+    direction: "outgoing",
+    status: "sent",
+    externalId: messageId,
+    sentBy,
+  });
+}
+
 // ── Sender → thread-id resolution ───────────────────────────────────────────
 // Webhook-created conversations are keyed by the sender's numeric PSID, but
 // Graph history lives under the thread id (t_…). The per-user lookup
@@ -654,6 +756,12 @@ router.get("/messages-paged", protect, async (req, res) => {
 // Body: { recipientId, message?, conversationId, attachment? }
 // attachment = { url, name, mimeType, mediaType } from POST /api/uploads.
 router.post("/send", protect, async (req, res) => {
+  // Released in `finally` at the latest (see takeFbSendClaim).
+  let releaseClaim = noopRelease;
+  // Text part of a text + attachment send, once Meta accepted it.
+  let acceptedText = null;
+  // True once Meta accepted every part of the message.
+  let allPartsSent = false;
   try {
     let { recipientId } = req.body;
     const { message, conversationId, attachment } = req.body;
@@ -694,10 +802,26 @@ router.post("/send", protect, async (req, res) => {
     if (!lockConvId) {
       return res.status(400).json({ message: "Invalid conversationId or recipientId" });
     }
+    // Another agent's send on this conversation is still in flight: its lock
+    // is not written yet, but it will be once Meta accepts the message.
+    const myId = req.user._id.toString();
+    const claimHolder = fbSendClaimHolder(lockConvId);
+    if (claimHolder && claimHolder !== myId && req.user.role !== "admin") {
+      return res.status(403).json({
+        message: "This conversation was just locked by another agent.",
+      });
+    }
+    // Marketing agents are auto-locked after a successful send: hold the
+    // conversation for the duration of the send.
+    if (req.user.role === "marketing") {
+      releaseClaim = takeFbSendClaim(lockConvId, myId) || noopRelease;
+    }
     const existingLock = await ConversationLock.findOne({
       conversationId: lockConvId,
       platform: "facebook",
     });
+    // No lock will be created: the claim is not needed.
+    if (existingLock) releaseClaim();
     if (
       existingLock &&
       existingLock.lockedBy.toString() !== req.user._id.toString() &&
@@ -708,34 +832,8 @@ router.post("/send", protect, async (req, res) => {
           "This conversation is locked to another agent. Only the assigned agent can reply.",
       });
     }
-    // Auto-lock on first reply (marketing agents)
-    if (!existingLock && req.user.role === "marketing") {
-      try {
-        await ConversationLock.create({
-          conversationId: lockConvId,
-          platform: "facebook",
-          lockedBy: req.user._id,
-        });
-      } catch (lockErr) {
-        // Duplicate key: another agent locked between our check and create
-        if (lockErr.code === 11000) {
-          const raceLock = await ConversationLock.findOne({
-            conversationId: lockConvId,
-            platform: "facebook",
-          });
-          if (
-            raceLock &&
-            raceLock.lockedBy.toString() !== req.user._id.toString()
-          ) {
-            return res.status(403).json({
-              message: "This conversation was just locked by another agent.",
-            });
-          }
-        } else {
-          throw lockErr;
-        }
-      }
-    }
+    // The auto-lock for marketing agents is created further down, only once
+    // Meta has accepted the message, so a failed send never assigns anyone.
 
     // Build the Send API message objects: optional text, then optional media.
     // Messenger requires text and attachments to be separate messages.
@@ -810,9 +908,45 @@ router.post("/send", protect, async (req, res) => {
           throw tagErr;
         }
       }
+      // Remember an accepted text part that is followed by an attachment: its
+      // CRM row is only stored after the attachment call (see below).
+      if (payload.text && messagePayloads.length > 1) {
+        const mid = lastData?.message_id || null;
+        if (mid) {
+          acceptedText = { mid, recipientId, pageId, content: message };
+          _fbPendingTextMids.add(mid);
+        }
+      }
     }
+    allPartsSent = true;
 
     const messageId = lastData?.message_id || lastData?.id || null;
+
+    // Auto-lock on first reply (marketing agents), now that Meta accepted the
+    // message. The message is already delivered, so a lock failure here must
+    // never fail the request: log it and answer with the normal success.
+    if (!existingLock && req.user.role === "marketing") {
+      try {
+        await ConversationLock.create({
+          conversationId: lockConvId,
+          platform: "facebook",
+          lockedBy: req.user._id,
+        });
+      } catch (lockErr) {
+        if (lockErr.code === 11000) {
+          // Duplicate key: another agent locked between our check and create
+          console.log(
+            "[Facebook:Lock] Lock race detected after send (non-fatal)",
+          );
+        } else {
+          console.error(
+            "[Facebook:Lock] Lock creation failed after send (non-fatal):",
+            lockErr.message,
+          );
+        }
+      }
+    }
+    releaseClaim();
 
     const storedAttachments = attachment?.url
       ? [
@@ -829,20 +963,24 @@ router.post("/send", protect, async (req, res) => {
 
     // Save to database (non-blocking — don't let DB errors fail the response)
     try {
-      await Message.create({
-        platform: "facebook",
-        conversationId: recipientId,
-        senderId: pageId,
-        senderName: "Page",
-        recipientId: recipientId,
+      await storeFbCrmSend({
+        messageId,
+        recipientId,
+        pageId,
         content: message || "",
-        messageType: messageTypeFor(storedAttachments),
         attachments: storedAttachments,
-        direction: "outgoing",
-        status: "sent",
-        externalId: messageId,
         sentBy: req.user?._id || null,
       });
+      // The text part lives in this row. If the echo webhook stored it under
+      // its own id before this row existed, remove that copy.
+      if (acceptedText && acceptedText.mid !== messageId) {
+        await Message.deleteOne({
+          platform: "facebook",
+          externalId: acceptedText.mid,
+          direction: "outgoing",
+          sentBy: null,
+        });
+      }
     } catch (dbErr) {
       console.error("DB save error (non-fatal):", dbErr.message);
     }
@@ -875,11 +1013,51 @@ router.post("/send", protect, async (req, res) => {
       JSON.stringify(error.response?.data, null, 2) || error.message,
     );
 
+    // Text + attachment send where Meta accepted the text but not the
+    // attachment: the customer did receive the text, so store it (no lock:
+    // the send as a whole failed) and show it in the inbox.
+    if (acceptedText && !allPartsSent) {
+      try {
+        await storeFbCrmSend({
+          messageId: acceptedText.mid,
+          recipientId: acceptedText.recipientId,
+          pageId: acceptedText.pageId,
+          content: acceptedText.content || "",
+          attachments: [],
+          sentBy: req.user?._id || null,
+        });
+        clearFbCache();
+        const io = req.app.get("io");
+        if (io) {
+          io.emit("messageSent", {
+            platform: "facebook",
+            message: {
+              id: acceptedText.mid,
+              text: acceptedText.content || "",
+              from: "You",
+              fromId: acceptedText.pageId,
+              time: new Date().toISOString(),
+              attachments: [],
+            },
+            conversationId: acceptedText.recipientId,
+            recipientId: acceptedText.recipientId,
+          });
+        }
+      } catch (dbErr) {
+        console.error(
+          "DB save error for the delivered text part (non-fatal):",
+          dbErr.message,
+        );
+      }
+    }
 
     // Every case goes through the shared mapper, which ALWAYS carries Metas
     // own wording through so no failure is a dead end for the agent.
     const described = describeMetaSendError(error, "facebook");
     return res.status(described.status).json(described);
+  } finally {
+    releaseClaim();
+    if (acceptedText) _fbPendingTextMids.delete(acceptedText.mid);
   }
 });
 
@@ -952,3 +1130,4 @@ router.get("/diagnose", protect, async (req, res) => {
 
 module.exports = router;
 module.exports.clearCache = clearFbCache;
+module.exports.isTextSendPending = isTextSendPending;
