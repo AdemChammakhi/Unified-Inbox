@@ -138,8 +138,12 @@ const userIdOf = (value) => {
   return /^[a-f0-9]{24}$/i.test(id) ? id : null;
 };
 
-/** True when the row carries media (current array or the legacy single URL). */
+/**
+ * True when the row carries media. The scan projects this as `hasMedia`
+ * (see buildProspectRows); the array/URL checks cover a full document.
+ */
 const hasAttachment = (m) =>
+  m.hasMedia === true ||
   (Array.isArray(m.attachments) && m.attachments.length > 0) ||
   Boolean(m.attachmentUrl);
 
@@ -175,16 +179,63 @@ async function buildProspectRows({ platform, since }) {
   // thread predates the cap, "premier contact" shows the oldest message we
   // still hold, not the true first.
   const MESSAGE_CAP = 20000;
-  const messages = await Message.find({
-    ...matchPlatform,
-    ...(since ? { timestamp: { $gte: since } } : {}),
-  })
-    .select(
-      "platform conversationId senderId recipientId senderName content attachments attachmentUrl direction status sentBy timestamp createdAt context",
-    )
-    .sort({ timestamp: -1 })
-    .limit(MESSAGE_CAP)
-    .lean();
+  // Only a short preview of the text is ever shown ("Dernier message" is cut
+  // to 160 characters) and only WHETHER media exists — never the media. Both
+  // are trimmed inside the database: loading every body in full made a
+  // full-history build pull the whole collection's text into a 512 MB /
+  // half-a-core container, where it ran for minutes and the browser gave up
+  // (Nginx 499). The type guards keep a malformed legacy row from failing
+  // the whole build.
+  const PREVIEW_CHARS = 200;
+  const isString = (field) => ({ $eq: [{ $type: field }, "string"] });
+  const messages = await Message.aggregate([
+    {
+      $match: {
+        ...matchPlatform,
+        ...(since ? { timestamp: { $gte: since } } : {}),
+      },
+    },
+    { $sort: { timestamp: -1 } },
+    { $limit: MESSAGE_CAP },
+    {
+      $project: {
+        platform: 1,
+        conversationId: 1,
+        senderId: 1,
+        recipientId: 1,
+        senderName: 1,
+        direction: 1,
+        status: 1,
+        sentBy: 1,
+        timestamp: 1,
+        createdAt: 1,
+        "context.title": 1,
+        content: {
+          $cond: [
+            isString("$content"),
+            { $substrCP: ["$content", 0, PREVIEW_CHARS] },
+            "",
+          ],
+        },
+        hasMedia: {
+          $or: [
+            {
+              $and: [
+                { $isArray: "$attachments" },
+                { $gt: [{ $size: "$attachments" }, 0] },
+              ],
+            },
+            {
+              $and: [
+                isString("$attachmentUrl"),
+                { $ne: ["$attachmentUrl", ""] },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  ]).option({ maxTimeMS: 120000 });
   const truncated = messages.length === MESSAGE_CAP;
   if (truncated) {
     console.warn(

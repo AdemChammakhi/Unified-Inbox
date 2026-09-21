@@ -127,6 +127,13 @@ const messageSchema = new mongoose.Schema(
 // Index for fast lookup
 messageSchema.index({ platform: 1, conversationId: 1 });
 messageSchema.index({ platform: 1, senderId: 1 });
+// The prospect sheet's widening pass matches senderId OR recipientId for
+// every listed person; without this the recipient branch scans the whole
+// collection.
+messageSchema.index(
+  { platform: 1, recipientId: 1 },
+  { name: "messages_recipient" },
+);
 
 // Compound index for paginated message fetch sorted by time (most common query pattern)
 messageSchema.index(

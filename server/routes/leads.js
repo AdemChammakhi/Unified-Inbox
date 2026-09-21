@@ -35,6 +35,31 @@ function clearLeadsCache() {
   _cache.clear();
 }
 
+// Builds run ONE at a time and concurrent requests for the same sheet share
+// the build in flight. The backend container has 512 MB and half a core:
+// an agent clicking 90j → 30j → Tout used to start three full scans at once,
+// each slower for the others' sake, until the browser's timeout gave up on
+// all of them.
+const _inFlight = new Map(); // key -> Promise<payload>
+let _queue = Promise.resolve();
+
+function buildOnce(key, platform, since) {
+  if (_inFlight.has(key)) return _inFlight.get(key);
+  const run = _queue.then(async () => {
+    const t0 = Date.now();
+    const rows = await buildProspectRows({ platform, since });
+    console.log(
+      `[Leads] built ${key} in ${Date.now() - t0} ms — ${rows.length} rows` +
+        (rows.truncated ? " (truncated)" : ""),
+    );
+    return { rows: [...rows], truncated: Boolean(rows.truncated) };
+  });
+  _queue = run.catch(() => {});
+  const tracked = run.finally(() => _inFlight.delete(key));
+  _inFlight.set(key, tracked);
+  return tracked;
+}
+
 // GET /api/leads?platform=all|<platform>&range=<days|all>
 router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
   try {
@@ -67,8 +92,7 @@ router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
       ? new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000)
       : null;
     const generation = _generation;
-    const rows = await buildProspectRows({ platform, since });
-    const payload = { rows: [...rows], truncated: Boolean(rows.truncated) };
+    const payload = await buildOnce(key, platform, since);
     if (generation === _generation) {
       _cache.set(key, { at: Date.now(), ...payload });
       // Keep the cache from growing without bound across filter combinations

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
@@ -141,8 +141,16 @@ const Leads = () => {
   const [filters, setFilters] = useState({});
   const [sort, setSort] = useState({ key: "lastContact", dir: "desc" });
 
+  // One request at a time: switching the period cancels the previous fetch
+  // so an older, slower answer cannot land on top of the newer one, and the
+  // rows already on screen stay visible while the next period loads.
+  const abortRef = useRef(null);
+
   const load = useCallback(async () => {
     if (!user?.token) return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setError("");
     try {
@@ -150,25 +158,32 @@ const Leads = () => {
         params: { range },
         headers: { Authorization: `Bearer ${user.token}` },
         timeout: 120000,
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       setRows(res.data.rows || []);
       setTruncated(Boolean(res.data.truncated));
     } catch (err) {
+      if (axios.isCancel(err) || controller.signal.aborted) return;
       if (err.response?.status === 401) {
         logout();
         navigate("/login");
         return;
       }
       setError(
-        err.response?.data?.message || "Impossible de charger les leads.",
+        err.response?.data?.message ||
+          (err.code === "ECONNABORTED"
+            ? "Le chargement a pris trop de temps. Réessayez dans un instant."
+            : "Impossible de charger les leads."),
       );
     } finally {
-      setLoading(false);
+      if (abortRef.current === controller) setLoading(false);
     }
   }, [user?.token, range, logout, navigate]);
 
   useEffect(() => {
     load();
+    return () => abortRef.current?.abort();
   }, [load]);
 
   /** Options for the dropdown filters, taken from the rows themselves. */
