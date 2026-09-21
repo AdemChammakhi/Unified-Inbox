@@ -13,6 +13,7 @@
 "use strict";
 
 const { freinLabel } = require("./leadFrein");
+const { ENGAGED_STAGES, STAGE_LABEL } = require("../constants/pipeline");
 
 const THRESHOLDS = Object.freeze({
   HOT_RECENT_DAYS: 3,
@@ -77,8 +78,9 @@ function result(level, reason) {
  * @param {number} p.messagesOut       replies sent to the prospect
  * @param {Date|string|null} p.lastIncomingAt
  * @param {Date|string|null} [p.lastOutgoingAt]  accepted for callers; no rule uses it yet
- * @param {string|null} p.classification  Classification code (cible, rdv, …)
- * @param {Date|string|null} p.appointmentAt
+ * @param {string|null} p.stage          Pipeline stage code (server/constants/pipeline.js)
+ * @param {boolean} [p.isPriority]       Agent's urgency flag
+ * @param {Date|string|null} p.appointmentAt  RDV date, independent of the stage
  * @param {{code: string, note?: string}|null} p.frein
  * @param {Date|number} [p.now]
  * @returns {{level: "chaud"|"tiede"|"froid", label: string, reason: string}}
@@ -87,31 +89,33 @@ function computeMaturity(p = {}) {
   const nowMs = toTime(p.now) ?? Date.now();
   const messagesIn = count(p.messagesIn);
   const messagesOut = count(p.messagesOut);
-  const classification =
-    typeof p.classification === "string" ? p.classification : "";
+  const stage = typeof p.stage === "string" ? p.stage : "";
 
-  // 1. Explicitly out of target
-  if (classification === "hors_cible") return result("froid", "Hors cible");
+  // 1. Lost: nothing else matters
+  if (stage === "perdu") return result("froid", "Perdu");
 
-  // 2. Appointment booked and not long past
-  if (classification === "rdv") {
-    const at = toTime(p.appointmentAt);
-    if (at !== null && at >= nowMs - THRESHOLDS.RDV_GRACE_DAYS * DAY_MS) {
-      return result("chaud", `RDV le ${ddmm.format(new Date(at))}`);
-    }
+  // 2. The customer has committed (booking, payment, confirmed, departed)
+  if (ENGAGED_STAGES.has(stage)) {
+    return result("chaud", STAGE_LABEL[stage] || "Dossier engagé");
   }
 
-  // 3. The prospect never wrote
+  // 3. Appointment booked and not long past
+  const at = toTime(p.appointmentAt);
+  if (at !== null && at >= nowMs - THRESHOLDS.RDV_GRACE_DAYS * DAY_MS) {
+    return result("chaud", `RDV le ${ddmm.format(new Date(at))}`);
+  }
+
+  // 4. The prospect never wrote
   if (messagesIn === 0) return result("froid", "Aucun message du prospect");
 
-  // 4. The prospect went quiet
+  // 5. The prospect went quiet
   const silentFor = daysSince(p.lastIncomingAt, nowMs);
   if (silentFor !== null && silentFor >= THRESHOLDS.SILENT_DAYS) {
     return result("froid", `Silencieux depuis ${silentFor} j`);
   }
 
-  // 5. An agent flagged it
-  if (classification === "priorite") return result("chaud", "Marqué prioritaire");
+  // 6. An agent flagged it
+  if (p.isPriority === true) return result("chaud", "Marqué prioritaire");
 
   // 6. A named obstacle: interest is real, the decision is pending
   const frein = freinLabel(p.frein);

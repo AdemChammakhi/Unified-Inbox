@@ -34,6 +34,14 @@ import ProspectExport from "../components/ProspectExport";
 import EmailBody from "../components/EmailBody";
 import MaturityChip from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
+import DossierPanel from "../components/DossierPanel";
+import {
+  STAGES,
+  STAGE_LABELS,
+  STAGE_COLORS,
+  DEFAULT_STAGE,
+  TYPOLOGY_LABELS,
+} from "../constants/pipeline";
 import { useLeadInsights } from "../hooks/useLeadInsights";
 import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
 import {
@@ -49,24 +57,27 @@ import {
   Legend,
 } from "recharts";
 
-/* ── Constants ── */
-const CLASSIFICATION_LABELS = {
-  non_classifie: "Non Classifié",
-  cible: "Cible",
-  hors_cible: "Hors Cible",
-  suivi: "Suivi",
-  priorite: "Priorité",
-  rdv: "RDV",
-};
+/** Small header chip (priority, typologie, RDV, dossier toggle). */
+const mgrChip = (color) => ({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  fontSize: 10,
+  fontWeight: 700,
+  color,
+  border: `1px solid ${color.startsWith("var(") ? "var(--border-primary)" : color + "66"}`,
+  backgroundColor: color.startsWith("var(") ? "transparent" : color + "1a",
+  borderRadius: 6,
+  padding: "2px 7px",
+  whiteSpace: "nowrap",
+  fontFamily: "'Hanken Grotesk', sans-serif",
+});
 
-const CLASSIFICATION_COLORS = {
-  non_classifie: "#6E7A96",
-  cible: "#5FBF8A",
-  hors_cible: "#E2685F",
-  suivi: "#5B9BD9",
-  priorite: "#E3A63C",
-  rdv: "#A98BD6",
-};
+/* ── Constants ── */
+// Pipeline stages from the shared constants; the old names stay as aliases
+// because the list and header read them in many places.
+const CLASSIFICATION_LABELS = STAGE_LABELS;
+const CLASSIFICATION_COLORS = { ...STAGE_COLORS, rdv: "#A98BD6" };
 
 // A conversation's id is not stable across list sources: Meta's list keys an
 // Instagram thread as "t_…", the DB-built list (webhook rows, or Meta in
@@ -224,6 +235,9 @@ const ManagerDashboard = () => {
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
   const [appointments, setAppointments] = useState({});
+  // customerId -> { stage, typologie, invoiceRef, isPriority, appointmentAt }
+  const [dossiers, setDossiers] = useState({});
+  const [dossierOpen, setDossierOpen] = useState(false);
   const [classFilter, setClassFilter] = useState("all");
   const [sortMode, setSortMode] = useState(readSortMode);
   const [locks, setLocks] = useState({});
@@ -699,6 +713,7 @@ const ManagerDashboard = () => {
       });
       setClassifications(res.data.classifications || {});
       setAppointments(res.data.appointments || {});
+      setDossiers(res.data.dossiers || {});
     } catch (error) {
       if (error.response?.status === 401) {
         logout();
@@ -727,62 +742,53 @@ const ManagerDashboard = () => {
     }
   }, [activeTab, user?.token, logout, navigate]);
 
-  // RDV needs a date; managers pick one via prompt rather than the inline
-  // picker the agents' inbox uses (this view is read-only otherwise).
-  const updateClassification = async (conversationId, classification) => {
+  // Save dossier fields for a conversation. `patch` holds any of
+  // { classification (stage code), typologie, invoiceRef, isPriority,
+  // appointmentAt (ISO string, or null to clear) }; the RDV date is set from
+  // the DossierPanel, independently of the stage.
+  const updateClassification = async (conversationId, patch) => {
     const conv =
       selectedConvRef.current?.id === conversationId
         ? selectedConvRef.current
         : conversationsRef.current.find((c) => c.id === conversationId);
     const participantId = conv?.participants?.[0]?.id || null;
-    let appointmentAt = null;
-    if (classification === "rdv") {
-      const existing = lookupBy(appointments, conv);
-      const answer = window.prompt(
-        "Date du rendez-vous (AAAA-MM-JJ HH:MM)",
-        existing
-          ? new Date(existing).toISOString().slice(0, 16).replace("T", " ")
-          : "",
-      );
-      if (answer === null) return; // cancelled
-      const parsed = new Date(answer.trim().replace(" ", "T"));
-      if (Number.isNaN(parsed.getTime())) {
-        alert("Date invalide. Utilisez le format AAAA-MM-JJ HH:MM");
-        return;
-      }
-      appointmentAt = parsed.toISOString();
-    }
     try {
       const token = user?.token;
-      await axios.put(
+      const res = await axios.put(
         "/api/classifications",
         {
           conversationId,
           participantId,
           platform: activeTab,
-          classification,
-          ...(appointmentAt ? { appointmentAt } : {}),
+          ...patch,
         },
         { headers: { Authorization: `Bearer ${token}` } },
       );
+      const dossier = res.data?.dossier || {};
       // Mirror the server's canonical key (participant id, see Inbox.js)
       const key = participantId || conversationId;
       setAppointments((prev) => {
         const next = { ...prev };
         if (key !== conversationId) delete next[conversationId];
-        if (appointmentAt) next[key] = appointmentAt;
+        if (dossier.appointmentAt) next[key] = dossier.appointmentAt;
         else delete next[key];
         return next;
       });
       setClassifications((prev) => {
-        const next = { ...prev, [key]: classification };
+        const next = { ...prev, [key]: dossier.stage || DEFAULT_STAGE };
         if (key !== conversationId) delete next[conversationId];
         return next;
       });
-      // The stage feeds the maturity (hors cible, prioritaire, RDV)
+      setDossiers((prev) => {
+        const next = { ...prev, [key]: dossier };
+        if (key !== conversationId) delete next[conversationId];
+        return next;
+      });
+      // The stage, priority and RDV feed the maturity
       queryClient.invalidateQueries({ queryKey: ["leadInsights", activeTab] });
     } catch (error) {
-      alert("Failed to update classification");
+      alert(error.response?.data?.message || "Impossible de mettre à jour le dossier.");
+      throw error;
     }
   };
 
@@ -811,7 +817,7 @@ const ManagerDashboard = () => {
     let filtered = recentConversations;
     if (classFilter !== "all") {
       filtered = filtered.filter((conv) => {
-        const cls = lookupBy(classifications, conv) || "non_classifie";
+        const cls = lookupBy(classifications, conv) || DEFAULT_STAGE;
         return cls === classFilter;
       });
     }
@@ -1545,15 +1551,7 @@ const ManagerDashboard = () => {
                     backgroundColor: "var(--bg-nav)",
                   }}
                 >
-                  {[
-                    { key: "all", label: "All" },
-                    { key: "non_classifie", label: "Unclassified" },
-                    { key: "cible", label: "Cible" },
-                    { key: "hors_cible", label: "Hors Cible" },
-                    { key: "suivi", label: "Suivi" },
-                    { key: "priorite", label: "Priorité" },
-                    { key: "rdv", label: "RDV" },
-                  ].map((f) => (
+                  {[{ key: "all", label: "Toutes" }, ...STAGES].map((f) => (
                     <button
                       key={f.key}
                       className="mgr-filter-pill"
@@ -1676,7 +1674,7 @@ const ManagerDashboard = () => {
                   ) : (
                     sortedConversations.map((conv, index) => {
                       const cls =
-                        lookupBy(classifications, conv) || "non_classifie";
+                        lookupBy(classifications, conv) || DEFAULT_STAGE;
                       const isSelected = selectedConv?.id === conv.id;
                       const isUnread = unreadConvIds.has(conv.id);
                       const insight = getInsight(conv);
@@ -2018,10 +2016,9 @@ const ManagerDashboard = () => {
                           }
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) =>
-                            updateClassification(
-                              selectedConv.id,
-                              e.target.value,
-                            )
+                            updateClassification(selectedConv.id, {
+                              classification: e.target.value,
+                            }).catch(() => {})
                           }
                           className="mgr-class-dropdown"
                           style={{
@@ -2050,17 +2047,42 @@ const ManagerDashboard = () => {
                               ] + "55",
                           }}
                         >
-                          <option value="non_classifie">
-                            Non Classifié
-                          </option>
-                          <option value="cible">Cible</option>
-                          <option value="hors_cible">
-                            Hors Cible
-                          </option>
-                          <option value="suivi">Suivi</option>
-                          <option value="priorite">Priorité</option>
-                          <option value="rdv">RDV</option>
+                          {STAGES.map((s) => (
+                            <option key={s.key} value={s.key}>{s.label}</option>
+                          ))}
                         </select>
+                        {lookupBy(dossiers, selectedConv)?.isPriority && (
+                          <span style={mgrChip("#E3A63C")} title="Dossier prioritaire">
+                            ★ Prioritaire
+                          </span>
+                        )}
+                        {lookupBy(dossiers, selectedConv)?.typologie && (
+                          <span style={mgrChip("var(--text-secondary)")}>
+                            {TYPOLOGY_LABELS[lookupBy(dossiers, selectedConv).typologie]}
+                          </span>
+                        )}
+                        {lookupBy(appointments, selectedConv) && (
+                          <span style={mgrChip("#A98BD6")} title="Rendez-vous fixé">
+                            📅{" "}
+                            {new Date(lookupBy(appointments, selectedConv)).toLocaleString("fr-FR", {
+                              day: "numeric",
+                              month: "short",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                        )}
+                        <button
+                          className="mgr-filter-pill"
+                          style={{
+                            ...mgrChip(dossierOpen ? "var(--accent)" : "var(--text-muted)"),
+                            cursor: "pointer",
+                          }}
+                          title="Dossier client : typologie, facture, priorité, RDV, pièces jointes"
+                          onClick={() => setDossierOpen((v) => !v)}
+                        >
+                          📁 Dossier
+                        </button>
                         <button
                           className="mgr-delete-btn"
                           style={{
@@ -2183,6 +2205,26 @@ const ManagerDashboard = () => {
                         </div>
                       </div>
                     </div>
+
+                    {/* Dossier client: typologie, facture, priorité, RDV, pièces jointes */}
+                    {dossierOpen && (
+                      <DossierPanel
+                        key={`${activeTab}:${selectedConv.id}`}
+                        dossier={lookupBy(dossiers, selectedConv)}
+                        onSave={(patch) =>
+                          updateClassification(selectedConv.id, patch)
+                        }
+                        platform={activeTab}
+                        customerId={
+                          activeTab === "email"
+                            ? selectedConv.email ||
+                              selectedConv.participants?.[0]?.email ||
+                              selectedConv.id
+                            : selectedConv.participants?.[0]?.id || selectedConv.id
+                        }
+                        canEdit
+                      />
+                    )}
 
                     {/* Messages */}
                     <div

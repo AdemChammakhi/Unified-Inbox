@@ -271,7 +271,7 @@ async function computeInsights(platform, items) {
       ...countStages,
     ]),
     Classification.find({ platform, conversationId: { $in: convIds } })
-      .select("conversationId classification appointmentAt updatedAt")
+      .select("conversationId stage isPriority appointmentAt updatedAt")
       .lean(),
     getFreins(platform, customers),
   ]);
@@ -373,7 +373,8 @@ async function computeInsights(platform, items) {
         messagesOut: st.messagesOut,
         lastIncomingAt: st.lastIncomingAt,
         lastOutgoingAt: st.lastOutgoingAt,
-        classification: cls ? cls.classification : null,
+        stage: cls ? cls.stage : null,
+        isPriority: cls ? cls.isPriority === true : false,
         appointmentAt: cls ? cls.appointmentAt : null,
         frein,
         now,

@@ -20,6 +20,14 @@ import PlatformIcon from "../components/PlatformIcon";
 import EmailBody from "../components/EmailBody";
 import MaturityChip from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
+import DossierPanel from "../components/DossierPanel";
+import {
+  STAGES,
+  STAGE_LABELS,
+  STAGE_COLORS,
+  DEFAULT_STAGE,
+  TYPOLOGY_LABELS,
+} from "../constants/pipeline";
 import { useLeadInsights } from "../hooks/useLeadInsights";
 import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
 
@@ -50,14 +58,9 @@ const INSIGHTS_RECHECK_MS = 21000;
 /** "1 reçu", "12 reçus" — French keeps 0 and 1 singular. */
 const receivedLabel = (n) => `${n} ${n > 1 ? "reçus" : "reçu"}`;
 
-const CLASSIFICATION_LABELS = {
-  non_classifie: "Non Classifié",
-  cible: "Cible",
-  hors_cible: "Hors Cible",
-  suivi: "Suivi",
-  priorite: "Priorité",
-  rdv: "RDV",
-};
+// Pipeline stages come from the shared constants; the old names stay as
+// aliases because the list, header and styles read them in many places.
+const CLASSIFICATION_LABELS = STAGE_LABELS;
 
 /** Format an appointment for display: "lun. 25 août, 14:30". */
 const formatAppointment = (value) => {
@@ -81,14 +84,8 @@ const toLocalInputValue = (value) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
-const CLASSIFICATION_COLORS = {
-  non_classifie: "#6E7A96",
-  cible: "#5FBF8A",
-  hors_cible: "#E2685F",
-  suivi: "#5B9BD9",
-  priorite: "#E3A63C",
-  rdv: "#A98BD6",
-};
+// `rdv` is the colour of the appointment chip and bar, not a stage.
+const CLASSIFICATION_COLORS = { ...STAGE_COLORS, rdv: "#A98BD6" };
 
 // A conversation's id is not stable across list sources: Meta's list keys an
 // Instagram thread as "t_…", the DB-built list (webhook rows, or Meta in
@@ -136,6 +133,9 @@ const Inbox = () => {
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
   const [appointments, setAppointments] = useState({});
+  // customerId -> { stage, typologie, invoiceRef, isPriority, appointmentAt }
+  const [dossiers, setDossiers] = useState({});
+  const [dossierOpen, setDossierOpen] = useState(false);
   // { conversationId, value } while the agent is picking an RDV date
   const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
@@ -654,6 +654,7 @@ const Inbox = () => {
       });
       setClassifications(res.data.classifications || {});
       setAppointments(res.data.appointments || {});
+      setDossiers(res.data.dossiers || {});
     } catch (error) {
       if (error.response?.status === 401) {
         logout();
@@ -684,57 +685,48 @@ const Inbox = () => {
     }
   }, [activeTab, user?.token, logout, navigate]);
 
-  // Update classification for a conversation.
-  // RDV needs a date, so picking it opens the date prompt instead of saving
-  // straight away; `appointmentAt` is passed once the agent confirms.
-  const updateClassification = async (
-    conversationId,
-    classification,
-    appointmentAt = null,
-  ) => {
+  // Save one or more dossier fields for a conversation. `patch` holds any of
+  // { classification (stage code), typologie, invoiceRef, isPriority,
+  // appointmentAt (ISO string, or null to clear) }. The stage select, the RDV
+  // bar and the DossierPanel all go through here.
+  const updateClassification = async (conversationId, patch) => {
     const conv =
       selectedConvRef.current?.id === conversationId
         ? selectedConvRef.current
         : conversationsRef.current.find((c) => c.id === conversationId);
     const participantId = conv?.participants?.[0]?.id || null;
-    if (classification === "rdv" && !appointmentAt) {
-      setRdvDraft({
-        conversationId,
-        value: toLocalInputValue(lookupBy(appointments, conv)),
-      });
-      return;
-    }
     try {
       const token = user?.token;
-      await axios.put(
+      const res = await axios.put(
         "/api/classifications",
         {
           conversationId,
           participantId,
           platform: activeTab,
-          classification,
-          ...(appointmentAt ? { appointmentAt } : {}),
+          ...patch,
         },
         { headers: { Authorization: `Bearer ${token}` } },
       );
+      const dossier = res.data?.dossier || {};
       // The server re-keys the row to the participant id (present in every
       // list shape) — mirror that, and drop the entry under the other id so
       // a stale value can't shadow the new one.
       const key = participantId || conversationId;
       setClassifications((prev) => {
-        const next = { ...prev, [key]: classification };
+        const next = { ...prev, [key]: dossier.stage || DEFAULT_STAGE };
         if (key !== conversationId) delete next[conversationId];
         return next;
       });
       setAppointments((prev) => {
         const next = { ...prev };
         if (key !== conversationId) delete next[conversationId];
-        // Leaving RDV drops the date, matching what the server just stored
-        if (classification === "rdv" && appointmentAt) {
-          next[key] = appointmentAt;
-        } else {
-          delete next[key];
-        }
+        if (dossier.appointmentAt) next[key] = dossier.appointmentAt;
+        else delete next[key];
+        return next;
+      });
+      setDossiers((prev) => {
+        const next = { ...prev, [key]: dossier };
+        if (key !== conversationId) delete next[conversationId];
         return next;
       });
       setRdvDraft(null);
@@ -755,7 +747,7 @@ const Inbox = () => {
     let filtered = recentConversations;
     if (classFilter !== "all") {
       filtered = filtered.filter((conv) => {
-        const cls = lookupBy(classifications, conv) || "non_classifie";
+        const cls = lookupBy(classifications, conv) || DEFAULT_STAGE;
         return cls === classFilter;
       });
     }
@@ -1389,53 +1381,28 @@ const Inbox = () => {
               </select>
             </div>
 
-            {/* Classification Filter */}
+            {/* Pipeline stage filter — twelve stages, so a select rather
+                than a row of pills */}
             <div style={styles.classFilterBar}>
-              {[
-                { key: "all", label: "All" },
-                { key: "non_classifie", label: "Unclassified" },
-                { key: "cible", label: "Cible" },
-                { key: "hors_cible", label: "Hors Cible" },
-                { key: "suivi", label: "Suivi" },
-                { key: "priorite", label: "Priorité" },
-                { key: "rdv", label: "RDV" },
-              ].map((f) => (
-                <button
-                  key={f.key}
-                  className="inbox-filter-pill"
-                  onClick={() => setClassFilter(f.key)}
-                  style={{
-                    ...styles.classFilterBtn,
-                    ...(classFilter === f.key
-                      ? {
-                          backgroundColor:
-                            f.key === "all"
-                              ? "var(--accent)"
-                              : CLASSIFICATION_COLORS[f.key] || "var(--accent)",
-                          color: "#fff",
-                          fontWeight: 700,
-                          borderColor: "transparent",
-                        }
-                      : {}),
-                  }}
-                >
-                  {f.key !== "all" && (
-                    <span
-                      style={{
-                        display: "inline-block",
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        backgroundColor:
-                          CLASSIFICATION_COLORS[f.key] || "transparent",
-                        marginRight: 5,
-                        flexShrink: 0,
-                      }}
-                    />
-                  )}
-                  {f.label}
-                </button>
-              ))}
+              <span style={styles.sortLabel}>Étape :</span>
+              <select
+                className="inbox-class-dropdown"
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                style={{
+                  ...styles.classSelect,
+                  flex: 1,
+                  color:
+                    classFilter === "all"
+                      ? "var(--text-primary)"
+                      : CLASSIFICATION_COLORS[classFilter],
+                }}
+              >
+                <option value="all">Toutes les étapes</option>
+                {STAGES.map((s) => (
+                  <option key={s.key} value={s.key}>{s.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Conversation Items */}
@@ -1497,7 +1464,7 @@ const Inbox = () => {
                 </div>
               ) : (
                 sortedConversations.map((conv, index) => {
-                  const cls = lookupBy(classifications, conv) || "non_classifie";
+                  const cls = lookupBy(classifications, conv) || DEFAULT_STAGE;
                   const isSelected = selectedConv?.id === conv.id;
                   const isUnread = unreadConvIds.has(conv.id);
                   const insight = getInsight(conv);
@@ -1629,7 +1596,7 @@ const Inbox = () => {
                             }}
                           />
                         </div>
-                        {cls === "rdv" && lookupBy(appointments, conv) && (
+                        {lookupBy(appointments, conv) && (
                           <div style={styles.rdvRowDate}>
                             📅 {formatAppointment(lookupBy(appointments, conv))}
                           </div>
@@ -1732,35 +1699,45 @@ const Inbox = () => {
                     </span>
                     <select
                       value={
-                        lookupBy(classifications, selectedConv) || "non_classifie"
+                        lookupBy(classifications, selectedConv) || DEFAULT_STAGE
                       }
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) =>
-                        updateClassification(selectedConv.id, e.target.value)
+                        updateClassification(selectedConv.id, {
+                          classification: e.target.value,
+                        })
                       }
                       className="inbox-class-dropdown"
                       style={{
                         ...styles.classSelect,
                         color:
                           CLASSIFICATION_COLORS[
-                            lookupBy(classifications, selectedConv) || "non_classifie"
+                            lookupBy(classifications, selectedConv) || DEFAULT_STAGE
                           ],
                         borderColor:
                           CLASSIFICATION_COLORS[
-                            lookupBy(classifications, selectedConv) || "non_classifie"
+                            lookupBy(classifications, selectedConv) || DEFAULT_STAGE
                           ] + "55",
                       }}
                     >
-                      <option value="non_classifie">Non Classifié</option>
-                      <option value="cible">Cible</option>
-                      <option value="hors_cible">Hors Cible</option>
-                      <option value="suivi">Suivi</option>
-                      <option value="priorite">Priorité</option>
-                      <option value="rdv">RDV</option>
+                      {STAGES.map((s) => (
+                        <option key={s.key} value={s.key}>{s.label}</option>
+                      ))}
                     </select>
-                    {/* Booked appointment, once set */}
-                    {lookupBy(classifications, selectedConv) === "rdv" &&
-                      lookupBy(appointments, selectedConv) &&
+                    {/* Priority and typologie, when set (edited in the panel) */}
+                    {lookupBy(dossiers, selectedConv)?.isPriority && (
+                      <span style={styles.priorityChip} title="Dossier prioritaire">
+                        ★ Prioritaire
+                      </span>
+                    )}
+                    {lookupBy(dossiers, selectedConv)?.typologie && (
+                      <span style={styles.typologyChip}>
+                        {TYPOLOGY_LABELS[lookupBy(dossiers, selectedConv).typologie]}
+                      </span>
+                    )}
+                    {/* Booked appointment, once set; the date is independent
+                        of the stage */}
+                    {lookupBy(appointments, selectedConv) &&
                       !rdvDraft && (
                         <button
                           className="inbox-rdv-chip"
@@ -1778,6 +1755,32 @@ const Inbox = () => {
                           📅 {formatAppointment(lookupBy(appointments, selectedConv))}
                         </button>
                       )}
+                    {!lookupBy(appointments, selectedConv) && !rdvDraft && (
+                      <button
+                        className="inbox-rdv-chip"
+                        style={{ ...styles.rdvChip, opacity: 0.8 }}
+                        title="Fixer un rendez-vous"
+                        onClick={() =>
+                          setRdvDraft({
+                            conversationId: selectedConv.id,
+                            value: toLocalInputValue(null),
+                          })
+                        }
+                      >
+                        📅 RDV
+                      </button>
+                    )}
+                    <button
+                      className="inbox-tab-btn"
+                      style={{
+                        ...styles.rdvCancel,
+                        ...(dossierOpen ? styles.dossierBtnOn : {}),
+                      }}
+                      title="Dossier client : typologie, facture, priorité, pièces jointes"
+                      onClick={() => setDossierOpen((v) => !v)}
+                    >
+                      📁 Dossier
+                    </button>
                     {/* Lead maturity (reason in the tooltip) and main frein */}
                     <MaturityChip maturity={selectedInsight?.maturity} />
                     <span
@@ -1864,15 +1867,26 @@ const Inbox = () => {
                       style={styles.rdvSave}
                       disabled={!rdvDraft.value}
                       onClick={() =>
-                        updateClassification(
-                          selectedConv.id,
-                          "rdv",
-                          new Date(rdvDraft.value).toISOString(),
-                        )
+                        updateClassification(selectedConv.id, {
+                          appointmentAt: new Date(rdvDraft.value).toISOString(),
+                        })
                       }
                     >
                       Confirmer
                     </button>
+                    {lookupBy(appointments, selectedConv) && (
+                      <button
+                        className="inbox-tab-btn"
+                        style={styles.rdvCancel}
+                        onClick={() =>
+                          updateClassification(selectedConv.id, {
+                            appointmentAt: null,
+                          })
+                        }
+                      >
+                        Retirer le RDV
+                      </button>
+                    )}
                     <button
                       className="inbox-tab-btn"
                       style={styles.rdvCancel}
@@ -1881,6 +1895,24 @@ const Inbox = () => {
                       Annuler
                     </button>
                   </div>
+                )}
+
+                {/* Dossier client: typologie, facture, priorité, RDV, pièces jointes */}
+                {dossierOpen && (
+                  <DossierPanel
+                    key={`${activeTab}:${selectedConv.id}`}
+                    dossier={lookupBy(dossiers, selectedConv)}
+                    onSave={(patch) => updateClassification(selectedConv.id, patch)}
+                    platform={activeTab}
+                    customerId={
+                      activeTab === "email"
+                        ? selectedConv.email ||
+                          selectedConv.participants?.[0]?.email ||
+                          selectedConv.id
+                        : selectedConv.participants?.[0]?.id || selectedConv.id
+                    }
+                    canEdit
+                  />
                 )}
 
                 <div className="inbox-msg-scroll" style={styles.messageList}>
@@ -2790,6 +2822,31 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
     fontFamily: "'Space Grotesk', sans-serif",
+  },
+  priorityChip: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: "#E3A63C",
+    backgroundColor: "#E3A63C1a",
+    border: "1px solid #E3A63C66",
+    borderRadius: 6,
+    padding: "3px 8px",
+    whiteSpace: "nowrap",
+  },
+  typologyChip: {
+    fontSize: 10.5,
+    fontWeight: 600,
+    color: "var(--text-secondary)",
+    backgroundColor: "var(--bg-elevated)",
+    border: "1px solid var(--border-primary)",
+    borderRadius: 6,
+    padding: "3px 8px",
+    whiteSpace: "nowrap",
+  },
+  dossierBtnOn: {
+    color: "var(--accent)",
+    borderColor: "var(--accent)",
+    backgroundColor: "var(--accent-bg)",
   },
   rdvRowDate: {
     fontSize: 10.5,

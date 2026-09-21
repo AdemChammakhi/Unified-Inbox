@@ -128,6 +128,11 @@ app.use(
   }),
 );
 
+// Customer dossier documents (passport copies, invoices…) share the uploads
+// volume but must never be public: only the authenticated download route in
+// routes/dossierDocuments.js may read them. Mounted BEFORE the static handler.
+app.use("/uploads/dossiers", (req, res) => res.sendStatus(404));
+
 // Uploaded media for outbound messages — must be publicly reachable because
 // Meta fetches media by URL (filenames are 128-bit random, so unguessable).
 app.use(
@@ -159,6 +164,11 @@ app.use("/api/exports", exportLimiter, require("./routes/exports"));
 app.use("/api/leads", apiLimiter, require("./routes/leads"));
 app.use("/api/lead-insights", apiLimiter, require("./routes/leadInsights"));
 app.use("/api/partners", apiLimiter, require("./routes/partners"));
+app.use(
+  "/api/dossier-documents",
+  apiLimiter,
+  require("./routes/dossierDocuments"),
+);
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =

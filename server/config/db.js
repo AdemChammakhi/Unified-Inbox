@@ -14,6 +14,14 @@ const connectDB = async () => {
         }
       })
       .catch((e) => console.error("[Startup] Classification key migration failed:", e.message));
+    // Idempotent: derive the pipeline stage on records that predate it.
+    require("../db/migrateStages")()
+      .then((r) => {
+        if (r.migrated > 0) {
+          console.log(`[Startup] Pipeline stages migrated: ${r.migrated}/${r.scanned}`);
+        }
+      })
+      .catch((e) => console.error("[Startup] Stage migration failed:", e.message));
     // Idempotent: insert the embedded agencies/partners directory when
     // missing; never overwrites rows edited from the UI.
     require("../db/seedPartners")()

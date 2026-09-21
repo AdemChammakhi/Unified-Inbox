@@ -3,77 +3,124 @@ const router = express.Router();
 const Classification = require("../models/Classification");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
+const {
+  DEFAULT_STAGE,
+  STAGE_KEYS,
+  TYPOLOGY_KEYS,
+  isStage,
+  isTypology,
+} = require("../constants/pipeline");
+
+/**
+ * The customer "dossier": pipeline stage, typologie of the request, priority
+ * flag, RDV date and invoice reference, one record per customer per platform
+ * (keyed by the customer id — see CLAUDE.md §6).
+ *
+ * The response keeps the historical shape the pages read — `classifications`
+ * is a map customerId → STAGE code, `appointments` a map customerId → date —
+ * and adds `dossiers`, a map customerId → { stage, typologie, invoiceRef,
+ * isPriority, appointmentAt }.
+ */
+
+const publicDossier = (c) => ({
+  stage: c.stage || DEFAULT_STAGE,
+  typologie: c.typologie || "",
+  invoiceRef: c.invoiceRef || "",
+  isPriority: c.isPriority === true,
+  appointmentAt: c.appointmentAt || null,
+});
 
 // GET /api/classifications?platform=instagram
-// Returns all classifications for a given platform
 router.get("/", protect, async (req, res) => {
   try {
     const { platform } = req.query;
     const safePlatform = platform ? sanitizePlatform(platform) : null;
     const filter = safePlatform ? { platform: safePlatform } : {};
-    const classifications = await Classification.find(filter)
-      .select("conversationId classification appointmentAt")
+    const rows = await Classification.find(filter)
+      .select("conversationId stage typologie invoiceRef isPriority appointmentAt")
       .lean();
 
-    // Return as a map: { conversationId: classification }
-    // Appointment dates ride in a parallel map so the existing shape — which
-    // several views already read as a plain string — stays untouched.
-    const map = {};
+    const classifications = {};
     const appointments = {};
-    classifications.forEach((c) => {
-      map[c.conversationId] = c.classification;
-      if (c.appointmentAt) {
-        appointments[c.conversationId] = c.appointmentAt;
-      }
+    const dossiers = {};
+    rows.forEach((c) => {
+      const d = publicDossier(c);
+      classifications[c.conversationId] = d.stage;
+      if (d.appointmentAt) appointments[c.conversationId] = d.appointmentAt;
+      dossiers[c.conversationId] = d;
     });
 
-    return res.json({ classifications: map, appointments });
+    return res.json({ classifications, appointments, dossiers });
   } catch (error) {
     console.error("Classification fetch error:", error.message);
-    return res.status(500).json({ message: "Failed to fetch classifications" });
+    return res.status(500).json({ message: "Impossible de charger les dossiers." });
   }
 });
 
 // PUT /api/classifications
-// Set or update classification for a conversation
+// Body: { conversationId, participantId?, platform, and any of:
+//   classification (stage code) | stage, typologie, invoiceRef, isPriority,
+//   appointmentAt (ISO date, or null to clear) }
 router.put("/", protect, async (req, res) => {
   try {
     const conversationId = sanitizeId(req.body.conversationId);
     const platform = sanitizePlatform(req.body.platform);
-    const { classification, appointmentAt } = req.body;
     const participantId = sanitizeId(req.body.participantId);
+    const body = req.body || {};
 
-    if (!conversationId || !platform || !classification) {
+    if (!conversationId || !platform) {
       return res.status(400).json({
-        message: "conversationId, platform, and classification are required",
+        message: "conversationId et platform sont obligatoires.",
       });
     }
 
-    const valid = [
-      "cible",
-      "hors_cible",
-      "non_classifie",
-      "suivi",
-      "priorite",
-      "rdv",
-    ];
-    if (!valid.includes(classification)) {
-      return res.status(400).json({
-        message: `Invalid classification. Must be one of: ${valid.join(", ")}`,
-      });
-    }
+    const set = {};
 
-    // An RDV is only useful if we know when it is — without a date it would
-    // never surface in the agenda. Any other class clears a stale date.
-    let appointment = null;
-    if (classification === "rdv") {
-      const parsed = appointmentAt ? new Date(appointmentAt) : null;
-      if (!parsed || Number.isNaN(parsed.getTime())) {
+    const stage = body.stage !== undefined ? body.stage : body.classification;
+    if (stage !== undefined) {
+      if (!isStage(stage)) {
         return res.status(400).json({
-          message: "An appointment date is required for RDV",
+          message: `Étape invalide. Valeurs possibles : ${STAGE_KEYS.join(", ")}`,
         });
       }
-      appointment = parsed;
+      set.stage = stage;
+    }
+
+    if (body.typologie !== undefined) {
+      const t = body.typologie === null ? "" : body.typologie;
+      if (t !== "" && !isTypology(t)) {
+        return res.status(400).json({
+          message: `Typologie invalide. Valeurs possibles : ${TYPOLOGY_KEYS.join(", ")}`,
+        });
+      }
+      set.typologie = t;
+    }
+
+    if (body.invoiceRef !== undefined) {
+      if (body.invoiceRef !== null && typeof body.invoiceRef !== "string") {
+        return res.status(400).json({ message: "Référence de facture invalide." });
+      }
+      set.invoiceRef = String(body.invoiceRef || "").trim().slice(0, 60);
+    }
+
+    if (body.isPriority !== undefined) {
+      set.isPriority = body.isPriority === true || body.isPriority === "true";
+    }
+
+    if (body.appointmentAt !== undefined) {
+      if (body.appointmentAt === null || body.appointmentAt === "") {
+        set.appointmentAt = null;
+      } else {
+        const parsed = new Date(body.appointmentAt);
+        if (Number.isNaN(parsed.getTime())) {
+          return res.status(400).json({ message: "Date de rendez-vous invalide." });
+        }
+        set.appointmentAt = parsed;
+      }
+    }
+
+    if (Object.keys(set).length === 0) {
+      return res.status(400).json({ message: "Aucun champ à mettre à jour." });
     }
 
     // A conversation has no single stable id: Meta's list keys an Instagram
@@ -94,35 +141,32 @@ router.put("/", protect, async (req, res) => {
     })
       .sort({ updatedAt: -1 })
       .lean();
-    const payload = {
-      conversationId: canonical,
-      classification: String(classification),
-      appointmentAt: appointment,
-      classifiedBy: req.user._id,
-    };
+
+    set.conversationId = canonical;
+    set.classifiedBy = req.user._id;
+
     let result;
     if (rows.length === 0) {
       result = await Classification.create({
-        ...payload,
+        ...set,
         platform: String(platform),
       });
     } else {
-      const keep =
-        rows.find((r) => r.conversationId === canonical) || rows[0];
+      const keep = rows.find((r) => r.conversationId === canonical) || rows[0];
       const dropIds = rows.filter((r) => r._id !== keep._id).map((r) => r._id);
       if (dropIds.length > 0) {
         await Classification.deleteMany({ _id: { $in: dropIds } });
       }
       result = await Classification.findByIdAndUpdate(
         keep._id,
-        { $set: payload },
-        { new: true },
+        { $set: set },
+        { new: true, runValidators: true },
       );
     }
 
-    // Maturity reads the classification, so cached lead insights are stale,
-    // and so is the Leads sheet (its "Étape" and "Maturité" columns).
-    // Required lazily: both are optional to this route.
+    // Maturity reads the stage, the priority flag and the RDV date, so cached
+    // lead insights are stale, and so is the Leads sheet. Required lazily:
+    // both are optional to this route.
     try {
       const { clearInsightsCache } = require("./leadInsights");
       if (typeof clearInsightsCache === "function") clearInsightsCache();
@@ -136,10 +180,15 @@ router.put("/", protect, async (req, res) => {
       console.error("Leads cache clear failed:", err.message);
     }
 
-    return res.json({ success: true, classification: result });
+    return res.json({
+      success: true,
+      classification: result,
+      dossier: publicDossier(result),
+      conversationId: canonical,
+    });
   } catch (error) {
     console.error("Classification update error:", error.message);
-    return res.status(500).json({ message: "Failed to update classification" });
+    return res.status(500).json({ message: "Impossible de mettre à jour le dossier." });
   }
 });
 

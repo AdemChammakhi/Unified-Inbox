@@ -44,22 +44,27 @@ const PLATFORM_LABELS = {
   tiktok: "TikTok",
 };
 
-const CLASSIFICATION_LABELS = {
-  non_classifie: "Non classifié",
-  cible: "Cible",
-  hors_cible: "Hors cible",
-  suivi: "Suivi",
-  priorite: "Priorité",
-  rdv: "RDV",
-};
+// Pipeline stages and typologies: labels from the shared constants
+const {
+  STAGE_LABEL,
+  DEFAULT_STAGE,
+  TYPOLOGY_LABEL,
+} = require("../constants/pipeline");
 
-// Same colors the app uses, as ARGB for Excel cell fills
-const CLASSIFICATION_FILLS = {
-  cible: "FF5FBF8A",
-  hors_cible: "FFE2685F",
-  suivi: "FF5B9BD9",
-  priorite: "FFE3A63C",
-  rdv: "FFA98BD6",
+// Same colors the app uses (client/src/constants/pipeline.js), as ARGB fills.
+// "Nouveau lead" keeps the plain cell.
+const STAGE_FILLS = {
+  a_contacter: "FFE3A63C",
+  contact_etabli: "FF5B9BD9",
+  qualifie: "FF5FBF8A",
+  offre_envoyee: "FF4EC3C3",
+  en_reflexion: "FFA98BD6",
+  relance: "FFD98CB3",
+  reservation: "FF3FA37A",
+  paiement: "FF2E8B57",
+  dossier_confirme: "FF1F7A4F",
+  depart: "FF16633F",
+  perdu: "FFE2685F",
 };
 
 // Pale fills for the "Maturité" cell, read with the default dark text
@@ -481,7 +486,9 @@ async function buildProspectRows({ platform, since }) {
 
   const [classifications, locks, repliers, freins] = await Promise.all([
     Classification.find({ conversationId: { $in: allConvIds } })
-      .select("conversationId platform classification appointmentAt updatedAt")
+      .select(
+        "conversationId platform stage typologie invoiceRef isPriority appointmentAt updatedAt",
+      )
       .lean(),
     ConversationLock.find({ conversationId: { $in: allConvIds } })
       .populate("lockedBy", "firstName lastName")
@@ -522,8 +529,12 @@ async function buildProspectRows({ platform, since }) {
   const rows = [...prospects.values()].map((p) => {
     const cls = newestOf(classByConv, p, "updatedAt");
     const lock = newestOf(lockByConv, p, "lockedAt");
-    const classification = cls?.classification || "non_classifie";
-    const rdvAt = classification === "rdv" ? cls?.appointmentAt || null : null;
+    const classification = cls?.stage || DEFAULT_STAGE;
+    const typologie = cls?.typologie || "";
+    const invoiceRef = cls?.invoiceRef || "";
+    const isPriority = cls?.isPriority === true;
+    // The RDV date is independent of the stage
+    const rdvAt = cls?.appointmentAt || null;
     // "Commercial en charge": the agent CURRENTLY holding the lead — the
     // newest lock across the person's keys. A lock whose user was deleted
     // populates to null and does not count. Without a lock, whoever sent the
@@ -541,7 +552,8 @@ async function buildProspectRows({ platform, since }) {
       messagesOut: p.allOut ?? p.messagesOut,
       lastIncomingAt: p.allLastIncomingAt ?? p.lastIncomingAt,
       lastOutgoingAt: p.allLastOutgoingAt ?? p.lastOutgoingAt,
-      classification,
+      stage: classification,
+      isPriority,
       appointmentAt: rdvAt,
       frein,
       now,
@@ -558,7 +570,11 @@ async function buildProspectRows({ platform, since }) {
       firstContact: p.firstContact,
       lastContact: p.lastContact,
       classification,
-      classificationLabel: CLASSIFICATION_LABELS[classification],
+      classificationLabel: STAGE_LABEL[classification] || classification,
+      typologie,
+      typologieLabel: TYPOLOGY_LABEL[typologie] || "",
+      invoiceRef,
+      isPriority,
       maturity: maturity.label,
       maturityLevel: maturity.level,
       maturityReason: maturity.reason,
@@ -588,9 +604,12 @@ const HEADERS = [
   "Premier contact",
   "Dernier contact",
   "Étape",
+  "Typologie",
+  "Prioritaire",
   "Maturité",
   "Motif / frein",
   "RDV le",
+  "Réf. facture",
   "Commercial en charge",
   "Messages reçus",
   "Messages envoyés",
@@ -598,7 +617,7 @@ const HEADERS = [
 ];
 
 // Column widths, in HEADERS order — keep the two arrays the same length
-const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 13, 10, 28, 17, 20, 9, 9, 46];
+const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 11, 10, 28, 17, 16, 20, 9, 9, 46];
 
 // 1-based XLSX column numbers, derived so an inserted column cannot shift them
 const CLASS_COL = HEADERS.indexOf("Étape") + 1;
@@ -614,9 +633,12 @@ function rowValues(r) {
     fmtDate(r.firstContact),
     fmtDate(r.lastContact),
     r.classificationLabel,
+    r.typologieLabel || "",
+    r.isPriority ? "Oui" : "",
     r.maturity || "",
     r.frein || "",
     fmtDate(r.rdvAt),
+    r.invoiceRef || "",
     r.agent,
     r.messagesIn,
     r.messagesOut,
@@ -701,7 +723,7 @@ async function toXlsx(rows, meta) {
 
   for (const r of rows) {
     const row = ws.addRow(rowValues(r));
-    const fill = CLASSIFICATION_FILLS[r.classification];
+    const fill = STAGE_FILLS[r.classification];
     if (fill) {
       const cell = row.getCell(CLASS_COL);
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };

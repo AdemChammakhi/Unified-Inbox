@@ -11,6 +11,7 @@ import {
   MATURITY,
   MATURITY_RANK,
 } from "../constants/leadQualification";
+import { STAGE_LABELS, STAGE_COLORS, STAGES } from "../constants/pipeline";
 import { RefreshCw, X } from "lucide-react";
 
 /**
@@ -27,23 +28,9 @@ import { RefreshCw, X } from "lucide-react";
  * and `freinCode`.
  */
 
-const CLASSIFICATION_LABELS = {
-  non_classifie: "Non classifié",
-  cible: "Cible",
-  hors_cible: "Hors cible",
-  suivi: "Suivi",
-  priorite: "Priorité",
-  rdv: "RDV",
-};
-
-const CLASSIFICATION_COLORS = {
-  non_classifie: "#6E7A96",
-  cible: "#5FBF8A",
-  hors_cible: "#E2685F",
-  suivi: "#5B9BD9",
-  priorite: "#E3A63C",
-  rdv: "#A98BD6",
-};
+// Pipeline stages and typologies come from the shared constants
+const CLASSIFICATION_LABELS = STAGE_LABELS;
+const CLASSIFICATION_COLORS = STAGE_COLORS;
 
 const PLATFORM_LABELS = {
   instagram: "Instagram",
@@ -61,10 +48,13 @@ const COLUMNS = [
   { key: "email", label: "Email", type: "text", width: 190 },
   { key: "firstContact", label: "Premier contact", type: "date", width: 140 },
   { key: "lastContact", label: "Dernier contact", type: "date", width: 140 },
-  { key: "classification", label: "Étape", type: "select", width: 120 },
+  { key: "classification", label: "Étape", type: "select", width: 140 },
+  { key: "typologie", label: "Typologie", type: "select", width: 150 },
+  { key: "isPriority", label: "Prioritaire", type: "select", width: 100 },
   { key: "maturity", label: "Maturité", type: "select", width: 118 },
   { key: "frein", label: "Motif / frein", type: "select", width: 180 },
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
+  { key: "invoiceRef", label: "Réf. facture", type: "text", width: 130 },
   { key: "agent", label: "Commercial", type: "select", width: 150 },
   { key: "messagesIn", label: "Reçus", type: "number", width: 78 },
   { key: "messagesOut", label: "Envoyés", type: "number", width: 84 },
@@ -104,6 +94,8 @@ const cellText = (row, key) => {
     return (level && MATURITY[level].label) || String(row.maturity || "");
   }
   if (key === "frein") return String(row.frein || "");
+  if (key === "typologie") return String(row.typologieLabel || "");
+  if (key === "isPriority") return row.isPriority ? "Oui" : "";
   const v = row[key];
   if (v === null || v === undefined) return "";
   if (key === "platform") return PLATFORM_LABELS[v] || v;
@@ -186,7 +178,12 @@ const Leads = () => {
     const build = (key) => [...present(key)].sort();
     return {
       platform: build("platform"),
-      classification: build("classification"),
+      classification: orderedLike(
+        present("classification"),
+        STAGES.map((s) => s.label),
+      ),
+      typologie: build("typologie"),
+      isPriority: build("isPriority"),
       maturity: orderedLike(present("maturity"), MATURITY_ORDER),
       frein: orderedLike(present("frein"), FREIN_ORDER),
       agent: build("agent"),
@@ -414,7 +411,7 @@ const Leads = () => {
                       if (c.key === "classification") {
                         const color =
                           CLASSIFICATION_COLORS[r.classification] ||
-                          CLASSIFICATION_COLORS.non_classifie;
+                          CLASSIFICATION_COLORS.nouveau_lead;
                         return (
                           <td key={c.key} style={styles.td}>
                             <span

@@ -174,12 +174,13 @@ router.get("/appointments", protect, async (req, res) => {
 
     const [bookedInRange, upcomingDocs, pastCount, totalCount] =
       await Promise.all([
+        // The RDV date is independent of the pipeline stage: an appointment
+        // exists whenever appointmentAt is set.
         Classification.countDocuments({
-          classification: "rdv",
-          createdAt: { $gte: since },
+          appointmentAt: { $ne: null },
+          updatedAt: { $gte: since },
         }),
         Classification.find({
-          classification: "rdv",
           appointmentAt: { $gte: now },
         })
           .sort({ appointmentAt: 1 })
@@ -187,10 +188,9 @@ router.get("/appointments", protect, async (req, res) => {
           .populate("classifiedBy", "firstName lastName")
           .lean(),
         Classification.countDocuments({
-          classification: "rdv",
-          appointmentAt: { $lt: now },
+          appointmentAt: { $ne: null, $lt: now },
         }),
-        Classification.countDocuments({ classification: "rdv" }),
+        Classification.countDocuments({ appointmentAt: { $ne: null } }),
       ]);
 
     // "Today" in the server's local timezone — the agency books in its own
