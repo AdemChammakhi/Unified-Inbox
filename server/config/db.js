@@ -14,6 +14,15 @@ const connectDB = async () => {
         }
       })
       .catch((e) => console.error("[Startup] Classification key migration failed:", e.message));
+    // Idempotent: insert the embedded agencies/partners directory when
+    // missing; never overwrites rows edited from the UI.
+    require("../db/seedPartners")()
+      .then((r) => {
+        if (r.inserted > 0) {
+          console.log(`[Startup] Partners directory seeded: ${r.inserted} new / ${r.loaded}`);
+        }
+      })
+      .catch((e) => console.error("[Startup] Partners seed failed:", e.message));
   } catch (error) {
     console.error(`Error: ${error.message}`);
     process.exit(1);

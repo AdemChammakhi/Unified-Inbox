@@ -15,6 +15,7 @@ import Inbox from "./pages/Inbox";
 import Support from "./pages/Support";
 import Leads from "./pages/Leads";
 import Accounts from "./pages/Accounts";
+import Partners from "./pages/Partners";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { useAuth } from "./context/AuthContext";
 
@@ -58,6 +59,15 @@ function App() {
             element={
               <ProtectedRoute>
                 <Leads />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/partenaires"
+            element={
+              <ProtectedRoute>
+                <Partners />
               </ProtectedRoute>
             }
           />

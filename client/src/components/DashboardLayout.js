@@ -14,6 +14,7 @@ import {
   LifeBuoy,
   Table2,
   Users,
+  MapPin,
 } from "lucide-react";
 
 const DashboardLayout = ({ children, noPadding = false }) => {
@@ -82,6 +83,17 @@ const DashboardLayout = ({ children, noPadding = false }) => {
               {!collapsed && <span>Leads</span>}
             </Link>
           )}
+
+          {/* Directory of MEDTOUR agencies and B2B partners — every role,
+              agents use it to orient a customer to the nearest office. */}
+          <Link
+            to="/partenaires"
+            className={`sidebar-link${location.pathname === "/partenaires" ? " active" : ""}`}
+            title="Agences & partenaires"
+          >
+            <MapPin size={18} className="sidebar-link-icon" />
+            {!collapsed && <span>Agences & partenaires</span>}
+          </Link>
 
           {/* Account management — administrators only */}
           {user?.role === "admin" && (

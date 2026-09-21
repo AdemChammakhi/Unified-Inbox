@@ -1,0 +1,1011 @@
+[
+  {
+    "seedKey": "xlsx-2026-09-002",
+    "kind": "partenaire",
+    "name": "AHRAM VOYAGES",
+    "contactName": "Najoua Ben Ali",
+    "phones": [
+      "98407489"
+    ],
+    "city": "Ariana",
+    "governorate": "Ariana",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-003",
+    "kind": "partenaire",
+    "name": "SECOND CHANCE TRAVEL",
+    "contactName": "Ahmed Yeferni",
+    "phones": [
+      "53680808"
+    ],
+    "city": "Ariana",
+    "governorate": "Ariana",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-004",
+    "kind": "agence",
+    "name": "VAGA TOUR",
+    "contactName": "Jihen",
+    "phones": [
+      "20081250"
+    ],
+    "city": "Béja",
+    "governorate": "Béja",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-005",
+    "kind": "agence",
+    "name": "NORD SUD",
+    "contactName": "Bchaier",
+    "phones": [
+      "26889898"
+    ],
+    "city": "Béja",
+    "governorate": "Béja",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-006",
+    "kind": "agence",
+    "name": "VAGA TOUR",
+    "contactName": "Ahlem",
+    "phones": [
+      "55136001"
+    ],
+    "city": "Béja",
+    "governorate": "Béja",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-007",
+    "kind": "partenaire",
+    "name": "TRAVEL ABROAD",
+    "contactName": "Chedi Ayadhi/ Zied",
+    "phones": [
+      "21879060"
+    ],
+    "city": "Ben Arous",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-008",
+    "kind": "partenaire",
+    "name": "BENEGERDEN VOYAGES",
+    "contactName": "Fawzia",
+    "phones": [
+      "97561005"
+    ],
+    "city": "Ben Gardane",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-009",
+    "kind": "partenaire",
+    "name": "AL WAFED MOUBRAK",
+    "contactName": "Iheb",
+    "phones": [
+      "26960860"
+    ],
+    "city": "Ben Gardane",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-010",
+    "kind": "agence",
+    "name": "MEDTOUR BIZERTE",
+    "contactName": "Slim Arfaoui",
+    "phones": [
+      "22421200"
+    ],
+    "city": "Bizerte",
+    "governorate": "Bizerte",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-011",
+    "kind": "agence",
+    "name": "MAMOUN TRAVEL",
+    "contactName": "Omar Mamoun",
+    "phones": [
+      "98532464"
+    ],
+    "city": "Djerba",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-012",
+    "kind": "partenaire",
+    "name": "WALYMEL TRAVEL",
+    "contactName": "Salim Khalfallah",
+    "phones": [
+      "27171043"
+    ],
+    "city": "Djerba",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-013",
+    "kind": "partenaire",
+    "name": "MAYSEEN TRAVEL",
+    "contactName": "Riadh",
+    "phones": [
+      "29830993"
+    ],
+    "city": "Djerba",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-014",
+    "kind": "partenaire",
+    "name": "ELBACHA SAHARA TRAVEL",
+    "contactName": "Hosni Belhabib",
+    "phones": [
+      "26946592"
+    ],
+    "city": "Douz",
+    "governorate": "Kébili",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-015",
+    "kind": "partenaire",
+    "name": "ELBACHA SAHARA TRAVEL",
+    "contactName": "Hosni El Habib",
+    "phones": [
+      "26946592"
+    ],
+    "city": "Douz",
+    "governorate": "Kébili",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-016",
+    "kind": "partenaire",
+    "name": "MAAMOUN TRAVEL AGENCY",
+    "contactName": "Omar",
+    "phones": [
+      "98532464"
+    ],
+    "city": "Douz",
+    "governorate": "Kébili",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-017",
+    "kind": "partenaire",
+    "name": "HOUSEM VOYAGES",
+    "contactName": "Sana Charebti",
+    "phones": [
+      "23753505"
+    ],
+    "city": "El Hamma",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-018",
+    "kind": "partenaire",
+    "name": "QOUBAA VOYAGES",
+    "contactName": "Tarek Habli",
+    "phones": [
+      "55524355"
+    ],
+    "city": "El Hamma",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-019",
+    "kind": "agence",
+    "name": "KOUBAA VOYAGE",
+    "contactName": "Tarek",
+    "phones": [
+      "55524355"
+    ],
+    "city": "El Hamma",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-020",
+    "kind": "partenaire",
+    "name": "SOLEIL VOYAGES",
+    "contactName": "Fatiha Tamime",
+    "phones": [
+      "26392129",
+      "71481042"
+    ],
+    "city": "Ezzahra",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-021",
+    "kind": "partenaire",
+    "name": "UNITOUR",
+    "contactName": "Lotfi Lakhal",
+    "phones": [
+      "20341404"
+    ],
+    "city": "Ezzahra",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-022",
+    "kind": "agence",
+    "name": "MEDTOUR GABES",
+    "contactName": "Manel",
+    "phones": [
+      "22878454"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-023",
+    "kind": "partenaire",
+    "name": "ZAHRET HKALIJ",
+    "contactName": "Khedri Ala",
+    "phones": [],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-024",
+    "kind": "partenaire",
+    "name": "W9AYET VOYAGES",
+    "contactName": "Riadh Werfelli",
+    "phones": [
+      "98143965"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-025",
+    "kind": "partenaire",
+    "name": "RAWAFED TOUR",
+    "contactName": "Ghada",
+    "phones": [
+      "29656361"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-026",
+    "kind": "partenaire",
+    "name": "MARGOUM TOUR",
+    "contactName": "Jihed Jridi",
+    "phones": [
+      "22019121"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-027",
+    "kind": "partenaire",
+    "name": "KENZ TOUR",
+    "contactName": "Safa Romdhane",
+    "phones": [
+      "98145057"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-028",
+    "kind": "partenaire",
+    "name": "HAFEDH TRAVEL",
+    "contactName": "Leila Moumni",
+    "phones": [
+      "24831120"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-029",
+    "kind": "partenaire",
+    "name": "EVERLINE TRAVEL",
+    "contactName": "Abir Hamrouni",
+    "phones": [
+      "92118578"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-030",
+    "kind": "partenaire",
+    "name": "STA TRAVEL",
+    "contactName": "Med Abdelbaki",
+    "phones": [
+      "23992394"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-031",
+    "kind": "partenaire",
+    "name": "NOVA TOUR GABES",
+    "contactName": "Sefeddine Mohamed",
+    "phones": [
+      "22331036"
+    ],
+    "city": "Gabès",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-032",
+    "kind": "partenaire",
+    "name": "TUNISIAN CONGRES & EVENTS",
+    "contactName": "Adnene Sellami",
+    "phones": [
+      "24345799"
+    ],
+    "city": "Hammam Lif",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-033",
+    "kind": "partenaire",
+    "name": "TRACE TRAVEL",
+    "contactName": "Fakhreddine Chouikhi",
+    "phones": [
+      "29010911",
+      "25075320"
+    ],
+    "city": "Hammam Lif",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-034",
+    "kind": "agence",
+    "name": "MEDTOUR LTS",
+    "contactName": "Mme Warda",
+    "phones": [
+      "92340363"
+    ],
+    "city": "Hammamet",
+    "governorate": "Nabeul",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-035",
+    "kind": "agence",
+    "name": "PEDIA TRAVEL",
+    "contactName": "Malek",
+    "phones": [
+      "28333662"
+    ],
+    "city": "Jendouba",
+    "governorate": "Jendouba",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-036",
+    "kind": "agence",
+    "name": "GOLDEN PALM'S",
+    "contactName": "Si Faouzi Bougila",
+    "phones": [
+      "24237046",
+      "29404037"
+    ],
+    "city": "Kairouan",
+    "governorate": "Kairouan",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-037",
+    "kind": "partenaire",
+    "name": "WALID AVS",
+    "contactName": "Kef",
+    "phones": [
+      "96320143"
+    ],
+    "city": "Kef",
+    "governorate": "Kef",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-038",
+    "kind": "partenaire",
+    "name": "SAF SAF VOYAGES",
+    "contactName": "Hatem Rebai",
+    "phones": [
+      "23189158"
+    ],
+    "city": "La Marsa",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-039",
+    "kind": "partenaire",
+    "name": "SB TRAVEL",
+    "contactName": "Sana Boussetta",
+    "phones": [
+      "58893131"
+    ],
+    "city": "La Soukra",
+    "governorate": "Ariana",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-040",
+    "kind": "partenaire",
+    "name": "EL MANSOUR TRAVEL AND TOURS",
+    "contactName": "Tarek Cherif",
+    "phones": [
+      "98308274"
+    ],
+    "city": "Mahdia",
+    "governorate": "Mahdia",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-041",
+    "kind": "partenaire",
+    "name": "BEST TRAVEL",
+    "contactName": "Afef Nkhili",
+    "phones": [
+      "97819337"
+    ],
+    "city": "Mahdia",
+    "governorate": "Mahdia",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-042",
+    "kind": "partenaire",
+    "name": "TRAVELCIA",
+    "contactName": "Sonia",
+    "phones": [
+      "28060944"
+    ],
+    "city": "Mahdia",
+    "governorate": "Mahdia",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-043",
+    "kind": "partenaire",
+    "name": "OXYVIA TRAVEL",
+    "contactName": "Ali Khazraoui",
+    "phones": [
+      "54840140"
+    ],
+    "city": "Mareth",
+    "governorate": "Gabès",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-044",
+    "kind": "agence",
+    "name": "YOU GO TRAVEL MEDNINE",
+    "contactName": "Med Ben Jemaa",
+    "phones": [],
+    "city": "Médenine",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-045",
+    "kind": "partenaire",
+    "name": "CORNA VOYAGE",
+    "contactName": "Messaoud Bessisa",
+    "phones": [
+      "75649440"
+    ],
+    "city": "Médenine",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-046",
+    "kind": "partenaire",
+    "name": "ALMAZAR TRAVEL",
+    "contactName": "Nouha Hadded",
+    "phones": [
+      "23493493"
+    ],
+    "city": "Médenine",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-047",
+    "kind": "partenaire",
+    "name": "NIMOU TRAVEL",
+    "contactName": "Nedra",
+    "phones": [
+      "53828326"
+    ],
+    "city": "Médenine",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-048",
+    "kind": "partenaire",
+    "name": "TALBI TRAVEL AGENCY",
+    "contactName": "Samira Talbi",
+    "phones": [
+      "98313205"
+    ],
+    "city": "Mégrine",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-049",
+    "kind": "partenaire",
+    "name": "TRAVEL OMEGA EVENTS",
+    "contactName": "Imed Bouslama",
+    "phones": [
+      "29373072"
+    ],
+    "city": "Mégrine",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-050",
+    "kind": "partenaire",
+    "name": "TOURISME & LOISIRS NOUR",
+    "contactName": "Raouia Bahri Kassab",
+    "phones": [
+      "58401951"
+    ],
+    "city": "Monastir",
+    "governorate": "Monastir",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-051",
+    "kind": "agence",
+    "name": "MEDTOUR NABEUL",
+    "contactName": "Fadhila",
+    "phones": [
+      "20341867"
+    ],
+    "city": "Nabeul",
+    "governorate": "Nabeul",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-052",
+    "kind": "partenaire",
+    "name": "RAHMA VOYAGES ET LOISIRS",
+    "contactName": "Fatma Sassi",
+    "phones": [
+      "98901005"
+    ],
+    "city": "Nabeul",
+    "governorate": "Nabeul",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-053",
+    "kind": "partenaire",
+    "name": "SOLID'AIR TRAVEL AGENCY",
+    "contactName": "Imen Mechri",
+    "phones": [
+      "24925928"
+    ],
+    "city": "Nabeul",
+    "governorate": "Nabeul",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-054",
+    "kind": "partenaire",
+    "name": "ALLIN TRAVEL TUNISIA",
+    "contactName": "Mouna Hedfi/Aymen",
+    "phones": [
+      "52951859",
+      "22200090"
+    ],
+    "city": "Radès",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-055",
+    "kind": "partenaire",
+    "name": "CANARIES VOYAGES",
+    "contactName": "Mounir Harakati",
+    "phones": [
+      "98312011"
+    ],
+    "city": "Radès",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-056",
+    "kind": "agence",
+    "name": "MABROUK VOYAGE",
+    "contactName": "Aam Hamadi",
+    "phones": [
+      "21242328"
+    ],
+    "city": "Ras Jebel",
+    "governorate": "Bizerte",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-057",
+    "kind": "agence",
+    "name": "SYFAX TRAVEL",
+    "contactName": "Jaber Ben Attouch",
+    "phones": [
+      "58420100"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-058",
+    "kind": "partenaire",
+    "name": "FERSI VOYAGES",
+    "contactName": "Med Amine Fesri",
+    "phones": [
+      "96110985",
+      "23134781"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-059",
+    "kind": "partenaire",
+    "name": "VIKA TRAVEL",
+    "contactName": "Said Baklouti",
+    "phones": [
+      "98749201"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-060",
+    "kind": "partenaire",
+    "name": "AFRICANA VOYAGES",
+    "contactName": "Nozha Bellaj/ Sabria 95999997",
+    "phones": [
+      "95994000"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-061",
+    "kind": "partenaire",
+    "name": "AL MAKAM VOYAGES",
+    "contactName": "Naim Chaari",
+    "phones": [
+      "99398000"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-062",
+    "kind": "partenaire",
+    "name": "ARENA TRAVEL",
+    "contactName": "Alaeddine Sallemi",
+    "phones": [
+      "20596000"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-063",
+    "kind": "partenaire",
+    "name": "AZUR VOYAGES",
+    "contactName": "Emna Loukil",
+    "phones": [
+      "53271000"
+    ],
+    "city": "Sfax",
+    "governorate": "Sfax",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-064",
+    "kind": "agence",
+    "name": "AALA VOYAGE",
+    "contactName": "Si Mansour Abdouli",
+    "phones": [
+      "56248000"
+    ],
+    "city": "Sidi Bouzid",
+    "governorate": "Sidi Bouzid",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-065",
+    "kind": "agence",
+    "name": "You Go travel MEGRINE",
+    "contactName": "Sonia",
+    "phones": [
+      "58141412"
+    ],
+    "city": "Sidi Rezig, Mégrine",
+    "governorate": "Ben Arous",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-066",
+    "kind": "partenaire",
+    "name": "OZONE VOYAGES",
+    "contactName": "Khaled Marzouki",
+    "phones": [
+      "26262121"
+    ],
+    "city": "Sousse",
+    "governorate": "Sousse",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-067",
+    "kind": "partenaire",
+    "name": "VALISE VOYAGE",
+    "contactName": "Abdelnaceur",
+    "phones": [
+      "52409067"
+    ],
+    "city": "Sousse",
+    "governorate": "Sousse",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-068",
+    "kind": "agence",
+    "name": "VAGA TOUR TABARKA",
+    "contactName": "Jihen",
+    "phones": [
+      "25081250"
+    ],
+    "city": "Tabarka",
+    "governorate": "Jendouba",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-069",
+    "kind": "agence",
+    "name": "MEDTOUR TATAOUINE",
+    "contactName": "Med Zakaria",
+    "phones": [
+      "505055757"
+    ],
+    "city": "Tataouine",
+    "governorate": "Tataouine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-070",
+    "kind": "partenaire",
+    "name": "BEN'S TOURS",
+    "contactName": "Mehdi Nemri",
+    "phones": [
+      "98177966"
+    ],
+    "city": "Tataouine",
+    "governorate": "Tataouine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-071",
+    "kind": "partenaire",
+    "name": "AFRICA COULEURS",
+    "contactName": "Said Bouzbida",
+    "phones": [
+      "56100441"
+    ],
+    "city": "Tataouine",
+    "governorate": "Tataouine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-072",
+    "kind": "partenaire",
+    "name": "GET WAY TRAVEL",
+    "contactName": "Youssef Smida",
+    "phones": [
+      "97010010"
+    ],
+    "city": "Tataouine",
+    "governorate": "Tataouine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-073",
+    "kind": "partenaire",
+    "name": "ROYAL WINGS",
+    "contactName": "Zohra Chatti",
+    "phones": [
+      "98293377"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-074",
+    "kind": "partenaire",
+    "name": "VOYAGEAIR",
+    "contactName": "Ali Hanfi",
+    "phones": [
+      "20554533"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-075",
+    "kind": "partenaire",
+    "name": "ESCAPE TRAVEL",
+    "contactName": "Amina Nouha Kzedri",
+    "phones": [
+      "28555300"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-076",
+    "kind": "partenaire",
+    "name": "KHALDOUN VOYAGES",
+    "contactName": "Jameleddine Trojette",
+    "phones": [
+      "20308019"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-077",
+    "kind": "partenaire",
+    "name": "ASFAR EL HANA",
+    "contactName": "Abdelatif Chokri Trabelsi",
+    "phones": [
+      "99735571"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-078",
+    "kind": "partenaire",
+    "name": "SYRINE TOURS",
+    "contactName": "Mehdi Cheniti",
+    "phones": [
+      "22320320"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-079",
+    "kind": "partenaire",
+    "name": "YOU GO TRAVEL",
+    "contactName": "Naceur Ben Jemaa",
+    "phones": [
+      "58755755"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-080",
+    "kind": "partenaire",
+    "name": "REZGUI VOYAGES ET LOISIRS",
+    "contactName": "Mohamed Rezgui",
+    "phones": [
+      "97939718"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-081",
+    "kind": "partenaire",
+    "name": "WAEL VOYAGES",
+    "contactName": "Amel",
+    "phones": [
+      "24308804"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-082",
+    "kind": "partenaire",
+    "name": "KHALDOUN VOYAGES",
+    "contactName": "Hana",
+    "phones": [
+      "28511006"
+    ],
+    "city": "Tunis",
+    "governorate": "Tunis",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-083",
+    "kind": "agence",
+    "name": "MEDTOUR LTS",
+    "contactName": "Mme Warda",
+    "phones": [
+      "92340363"
+    ],
+    "city": "Zaghouan",
+    "governorate": "Zaghouan",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-084",
+    "kind": "partenaire",
+    "name": "MAJUS TRAVEL",
+    "contactName": "Tareb Ben Said",
+    "phones": [
+      "25429629"
+    ],
+    "city": "Zarzis",
+    "governorate": "Médenine",
+    "address": ""
+  },
+  {
+    "seedKey": "xlsx-2026-09-085",
+    "kind": "partenaire",
+    "name": "RAINBOW TRAVEL",
+    "contactName": "Amal Ben Abdennour",
+    "phones": [
+      "24149305"
+    ],
+    "city": "Zarzis",
+    "governorate": "Médenine",
+    "address": ""
+  }
+]
