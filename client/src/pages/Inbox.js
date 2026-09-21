@@ -21,6 +21,7 @@ import EmailBody from "../components/EmailBody";
 import MaturityChip from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
 import DossierPanel from "../components/DossierPanel";
+import TemplatesPanel from "../components/TemplatesPanel";
 import {
   STAGES,
   STAGE_LABELS,
@@ -136,6 +137,18 @@ const Inbox = () => {
   // customerId -> { stage, typologie, invoiceRef, isPriority, appointmentAt }
   const [dossiers, setDossiers] = useState({});
   const [dossierOpen, setDossierOpen] = useState(false);
+  // Canned replies beside the discussion; stays open across conversations.
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const replyFieldRef = useRef(null);
+
+  // Grow the composer with its content (templates arrive without a change
+  // event) and shrink it back after a send.
+  useEffect(() => {
+    const el = replyFieldRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [replyText]);
   // { conversationId, value } while the agent is picking an RDV date
   const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
@@ -1781,6 +1794,17 @@ const Inbox = () => {
                     >
                       📁 Dossier
                     </button>
+                    <button
+                      className="inbox-tab-btn"
+                      style={{
+                        ...styles.rdvCancel,
+                        ...(templatesOpen ? styles.dossierBtnOn : {}),
+                      }}
+                      title="Modèles de messages : réponses prêtes à insérer"
+                      onClick={() => setTemplatesOpen((v) => !v)}
+                    >
+                      📝 Modèles
+                    </button>
                     {/* Lead maturity (reason in the tooltip) and main frein */}
                     <MaturityChip maturity={selectedInsight?.maturity} />
                     <span
@@ -1915,6 +1939,10 @@ const Inbox = () => {
                   />
                 )}
 
+                {/* Thread (messages + composer) with the templates column
+                    beside it when open */}
+                <div style={styles.threadRow}>
+                <div style={styles.threadMain}>
                 <div className="inbox-msg-scroll" style={styles.messageList}>
                   {selectedConv._hasMoreMessages && activeTab !== "email" && (
                     <button
@@ -2234,14 +2262,26 @@ const Inbox = () => {
                         >
                           {uploadingFile ? "…" : <Paperclip size={16} />}
                         </button>
-                        <input
-                          type="text"
+                        {/* Textarea so inserted templates keep their line
+                            breaks: Enter sends, Shift+Enter adds a line */}
+                        <textarea
+                          ref={replyFieldRef}
                           className="inbox-reply-field"
                           value={replyText}
-                          onChange={(e) => setReplyText(e.target.value)}
+                          rows={1}
+                          onChange={(e) => {
+                            setReplyText(e.target.value);
+                            e.target.style.height = "auto";
+                            e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+                          }}
                           placeholder="Type a message…"
                           style={styles.replyInput}
-                          onKeyPress={(e) => e.key === "Enter" && sendReply()}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              sendReply();
+                            }
+                          }}
                         />
                         <button
                           className="inbox-send-action"
@@ -2259,6 +2299,22 @@ const Inbox = () => {
                     </div>
                   );
                 })()}
+                </div>
+                {templatesOpen && (
+                  <TemplatesPanel
+                    platform={activeTab}
+                    customerName={selectedConv.participants?.[0]?.name || ""}
+                    onInsert={(text) => {
+                      setReplyText((prev) => {
+                        const cur = prev.trimEnd();
+                        return cur ? `${cur}\n${text}` : text;
+                      });
+                      setTimeout(() => replyFieldRef.current?.focus(), 0);
+                    }}
+                    onClose={() => setTemplatesOpen(false)}
+                  />
+                )}
+                </div>
               </>
             ) : (
               <div style={styles.noConv}>
@@ -2730,11 +2786,27 @@ const styles = {
     borderRadius: "10px",
     border: "1px solid var(--border-primary)",
     fontSize: "13px",
+    lineHeight: "18px",
     outline: "none",
     backgroundColor: "var(--bg-card)",
     color: "var(--text-primary)",
     fontFamily: "'Hanken Grotesk', sans-serif",
-    transition: "all 0.25s ease",
+    transition: "border-color 0.25s ease, box-shadow 0.25s ease",
+    resize: "none",
+    maxHeight: 160,
+    overflowY: "auto",
+  },
+  threadRow: {
+    flex: 1,
+    display: "flex",
+    minHeight: 0,
+  },
+  threadMain: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+    minHeight: 0,
   },
   sendBtn: {
     width: "40px",

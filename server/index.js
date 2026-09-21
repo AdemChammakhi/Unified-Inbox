@@ -164,6 +164,7 @@ app.use("/api/exports", exportLimiter, require("./routes/exports"));
 app.use("/api/leads", apiLimiter, require("./routes/leads"));
 app.use("/api/lead-insights", apiLimiter, require("./routes/leadInsights"));
 app.use("/api/partners", apiLimiter, require("./routes/partners"));
+app.use("/api/message-templates", apiLimiter, require("./routes/messageTemplates"));
 app.use(
   "/api/dossier-documents",
   apiLimiter,
