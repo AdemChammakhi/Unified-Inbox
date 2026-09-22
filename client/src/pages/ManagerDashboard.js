@@ -40,6 +40,7 @@ import {
   STAGE_LABELS,
   STAGE_COLORS,
   DEFAULT_STAGE,
+  TYPOLOGIES,
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
 import { useLeadInsights } from "../hooks/useLeadInsights";
@@ -239,6 +240,8 @@ const ManagerDashboard = () => {
   const [dossiers, setDossiers] = useState({});
   const [dossierOpen, setDossierOpen] = useState(false);
   const [classFilter, setClassFilter] = useState("all");
+  // "all" | "none" (not yet recorded) | a typologie key
+  const [typologyFilter, setTypologyFilter] = useState("all");
   const [sortMode, setSortMode] = useState(readSortMode);
   const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
@@ -821,6 +824,12 @@ const ManagerDashboard = () => {
         return cls === classFilter;
       });
     }
+    if (typologyFilter !== "all") {
+      const wanted = typologyFilter === "none" ? "" : typologyFilter;
+      filtered = filtered.filter(
+        (conv) => (lookupBy(dossiers, conv)?.typologie || "") === wanted,
+      );
+    }
     if (searchDebounced.trim()) {
       const q = searchDebounced.toLowerCase();
       filtered = filtered.filter((conv) => {
@@ -846,6 +855,8 @@ const ManagerDashboard = () => {
     recentConversations,
     classifications,
     classFilter,
+    dossiers,
+    typologyFilter,
     searchDebounced,
     sortMode,
     getInsight,
@@ -1601,6 +1612,57 @@ const ManagerDashboard = () => {
                   ))}
                 </div>
 
+                {/* Typologie filter — eight values plus "not recorded" */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 14px",
+                    borderBottom: "1px solid var(--border-primary)",
+                    backgroundColor: "var(--bg-nav)",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.6,
+                      color: "var(--text-faint)",
+                    }}
+                  >
+                    Typologie :
+                  </span>
+                  <select
+                    className="mgr-class-dropdown"
+                    value={typologyFilter}
+                    onChange={(e) => setTypologyFilter(e.target.value)}
+                    style={{
+                      flex: 1,
+                      padding: "3px 6px",
+                      border: "1px solid var(--border-primary)",
+                      borderRadius: "4px",
+                      fontSize: "10px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      backgroundColor: "var(--bg-secondary)",
+                      outline: "none",
+                      fontFamily: "'Hanken Grotesk', sans-serif",
+                      color:
+                        typologyFilter === "all"
+                          ? "var(--text-primary)"
+                          : "var(--accent)",
+                    }}
+                  >
+                    <option value="all">Toutes les typologies</option>
+                    <option value="none">Non renseignée</option>
+                    {TYPOLOGIES.map((t) => (
+                      <option key={t.key} value={t.key}>{t.label}</option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Conversation Items */}
                 <div
                   className="mgr-conv-scroll"
@@ -1814,6 +1876,14 @@ const ManagerDashboard = () => {
                                   ?.map((p) => p.name)
                                   .join(", ") || "Unknown"}
                               </strong>
+                              {lookupBy(dossiers, conv)?.typologie && (
+                                <span
+                                  style={mgrChip("var(--accent)")}
+                                  title="Typologie de la demande"
+                                >
+                                  {TYPOLOGY_LABELS[lookupBy(dossiers, conv).typologie]}
+                                </span>
+                              )}
                               {lookupBy(locks, conv) && (
                                 <span
                                   style={{
@@ -2051,14 +2121,44 @@ const ManagerDashboard = () => {
                             <option key={s.key} value={s.key}>{s.label}</option>
                           ))}
                         </select>
+                        {/* Typologie of the request, beside the stage */}
+                        <select
+                          value={lookupBy(dossiers, selectedConv)?.typologie || ""}
+                          onChange={(e) =>
+                            updateClassification(selectedConv.id, {
+                              typologie: e.target.value,
+                            }).catch(() => {})
+                          }
+                          className="mgr-class-dropdown"
+                          title="Typologie de la demande"
+                          style={{
+                            padding: "2px 6px",
+                            border: "1px solid var(--border-primary)",
+                            borderRadius: "4px",
+                            fontSize: "9px",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            backgroundColor: "var(--bg-secondary)",
+                            outline: "none",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.3px",
+                            fontFamily: "'Hanken Grotesk', sans-serif",
+                            color: lookupBy(dossiers, selectedConv)?.typologie
+                              ? "var(--accent)"
+                              : "var(--text-muted)",
+                            borderColor: lookupBy(dossiers, selectedConv)?.typologie
+                              ? "var(--accent)"
+                              : "var(--border-primary)",
+                          }}
+                        >
+                          <option value="">Typologie ?</option>
+                          {TYPOLOGIES.map((t) => (
+                            <option key={t.key} value={t.key}>{t.label}</option>
+                          ))}
+                        </select>
                         {lookupBy(dossiers, selectedConv)?.isPriority && (
                           <span style={mgrChip("#E3A63C")} title="Dossier prioritaire">
                             ★ Prioritaire
-                          </span>
-                        )}
-                        {lookupBy(dossiers, selectedConv)?.typologie && (
-                          <span style={mgrChip("var(--text-secondary)")}>
-                            {TYPOLOGY_LABELS[lookupBy(dossiers, selectedConv).typologie]}
                           </span>
                         )}
                         {lookupBy(appointments, selectedConv) && (

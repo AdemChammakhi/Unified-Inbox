@@ -27,6 +27,7 @@ import {
   STAGE_LABELS,
   STAGE_COLORS,
   DEFAULT_STAGE,
+  TYPOLOGIES,
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
 import { useLeadInsights } from "../hooks/useLeadInsights";
@@ -152,6 +153,8 @@ const Inbox = () => {
   // { conversationId, value } while the agent is picking an RDV date
   const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
+  // "all" | "none" (not yet recorded) | a typologie key
+  const [typologyFilter, setTypologyFilter] = useState("all");
   const [sortMode, setSortMode] = useState(readSortMode);
   const [locks, setLocks] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({
@@ -764,6 +767,12 @@ const Inbox = () => {
         return cls === classFilter;
       });
     }
+    if (typologyFilter !== "all") {
+      const wanted = typologyFilter === "none" ? "" : typologyFilter;
+      filtered = filtered.filter(
+        (conv) => (lookupBy(dossiers, conv)?.typologie || "") === wanted,
+      );
+    }
     // Search filter
     if (searchDebounced.trim()) {
       const q = searchDebounced.toLowerCase();
@@ -815,6 +824,8 @@ const Inbox = () => {
     recentConversations,
     classifications,
     classFilter,
+    dossiers,
+    typologyFilter,
     searchDebounced,
     sortMode,
     getInsight,
@@ -1416,6 +1427,26 @@ const Inbox = () => {
                   <option key={s.key} value={s.key}>{s.label}</option>
                 ))}
               </select>
+              <span style={styles.sortLabel}>Typologie :</span>
+              <select
+                className="inbox-class-dropdown"
+                value={typologyFilter}
+                onChange={(e) => setTypologyFilter(e.target.value)}
+                style={{
+                  ...styles.classSelect,
+                  flex: 1,
+                  color:
+                    typologyFilter === "all"
+                      ? "var(--text-primary)"
+                      : "var(--accent)",
+                }}
+              >
+                <option value="all">Toutes les typologies</option>
+                <option value="none">Non renseignée</option>
+                {TYPOLOGIES.map((t) => (
+                  <option key={t.key} value={t.key}>{t.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Conversation Items */}
@@ -1609,9 +1640,19 @@ const Inbox = () => {
                             }}
                           />
                         </div>
-                        {lookupBy(appointments, conv) && (
-                          <div style={styles.rdvRowDate}>
-                            📅 {formatAppointment(lookupBy(appointments, conv))}
+                        {(lookupBy(dossiers, conv)?.typologie ||
+                          lookupBy(appointments, conv)) && (
+                          <div style={styles.rowTags}>
+                            {lookupBy(dossiers, conv)?.typologie && (
+                              <span style={styles.rowTypology}>
+                                {TYPOLOGY_LABELS[lookupBy(dossiers, conv).typologie]}
+                              </span>
+                            )}
+                            {lookupBy(appointments, conv) && (
+                              <span style={styles.rdvRowDate}>
+                                📅 {formatAppointment(lookupBy(appointments, conv))}
+                              </span>
+                            )}
                           </div>
                         )}
                         <p
@@ -1737,15 +1778,39 @@ const Inbox = () => {
                         <option key={s.key} value={s.key}>{s.label}</option>
                       ))}
                     </select>
-                    {/* Priority and typologie, when set (edited in the panel) */}
+                    {/* Typologie of the request, beside the stage: what
+                        the customer wants is recorded as early as the
+                        stage is, not hidden in the dossier panel */}
+                    <select
+                      value={lookupBy(dossiers, selectedConv)?.typologie || ""}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) =>
+                        updateClassification(selectedConv.id, {
+                          typologie: e.target.value,
+                        })
+                      }
+                      className="inbox-class-dropdown"
+                      title="Typologie de la demande"
+                      style={{
+                        ...styles.classSelect,
+                        maxWidth: 140,
+                        color: lookupBy(dossiers, selectedConv)?.typologie
+                          ? "var(--accent)"
+                          : "var(--text-muted)",
+                        borderColor: lookupBy(dossiers, selectedConv)?.typologie
+                          ? "var(--accent)"
+                          : "var(--border-primary)",
+                      }}
+                    >
+                      <option value="">Typologie ?</option>
+                      {TYPOLOGIES.map((t) => (
+                        <option key={t.key} value={t.key}>{t.label}</option>
+                      ))}
+                    </select>
+                    {/* Priority, when set (edited in the panel) */}
                     {lookupBy(dossiers, selectedConv)?.isPriority && (
                       <span style={styles.priorityChip} title="Dossier prioritaire">
                         ★ Prioritaire
-                      </span>
-                    )}
-                    {lookupBy(dossiers, selectedConv)?.typologie && (
-                      <span style={styles.typologyChip}>
-                        {TYPOLOGY_LABELS[lookupBy(dossiers, selectedConv).typologie]}
                       </span>
                     )}
                     {/* Booked appointment, once set; the date is independent
@@ -2920,11 +2985,27 @@ const styles = {
     borderColor: "var(--accent)",
     backgroundColor: "var(--accent-bg)",
   },
+  rowTags: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 3,
+  },
+  rowTypology: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: "var(--accent)",
+    backgroundColor: "var(--accent-glow)",
+    border: "1px solid var(--accent)55",
+    borderRadius: 5,
+    padding: "1px 6px",
+    whiteSpace: "nowrap",
+  },
   rdvRowDate: {
     fontSize: 10.5,
     fontWeight: 700,
     color: CLASSIFICATION_COLORS.rdv,
-    marginTop: 2,
     fontFamily: "'Space Grotesk', sans-serif",
   },
   rdvBar: {
