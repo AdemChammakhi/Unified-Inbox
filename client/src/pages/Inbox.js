@@ -1870,23 +1870,10 @@ const Inbox = () => {
                     >
                       📝 Modèles
                     </button>
-                    {/* Lead maturity (reason in the tooltip) and main frein */}
+                    {/* Lead maturity (reason in the tooltip). The motif /
+                        frein is recorded in the bar above the composer —
+                        one control, not two. */}
                     <MaturityChip maturity={selectedInsight?.maturity} />
-                    <span
-                      title={
-                        freinLockedTo
-                          ? `Conversation assignée à ${freinLockedTo} : seul cet agent peut qualifier l’échange.`
-                          : undefined
-                      }
-                    >
-                      <FreinSelector
-                        key={`${activeTab}:${selectedConv.id}`}
-                        value={selectedInsight?.frein || null}
-                        onSave={saveSelectedFrein}
-                        disabled={Boolean(freinLockedTo)}
-                        compact
-                      />
-                    </span>
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"
@@ -2257,6 +2244,45 @@ const Inbox = () => {
                   <div ref={messagesEndRef} />
                 </div>
 
+                {/* The one place to record the motif / frein of the exchange.
+                    Red and mandatory once an agent has replied without
+                    qualifying (not dismissible, it settles once saved);
+                    neutral otherwise. Sits above the lock banner so admins
+                    and managers can qualify an assigned thread; an agent on
+                    a colleague's thread sees it disabled. */}
+                <div
+                  style={
+                    selectedInsight?.needsQualification
+                      ? styles.qualifyBar
+                      : styles.freinBar
+                  }
+                  role={selectedInsight?.needsQualification ? "status" : undefined}
+                  title={
+                    freinLockedTo
+                      ? `Conversation assignée à ${freinLockedTo} : seul cet agent peut qualifier l’échange.`
+                      : undefined
+                  }
+                >
+                  <span
+                    style={
+                      selectedInsight?.needsQualification
+                        ? styles.qualifyBarText
+                        : styles.freinBarText
+                    }
+                  >
+                    {selectedInsight?.needsQualification
+                      ? "Qualification requise : indiquez le motif ou le frein principal de cet échange."
+                      : "Motif / frein de l’échange"}
+                  </span>
+                  <FreinSelector
+                    key={`qualify:${activeTab}:${selectedConv.id}`}
+                    value={selectedInsight?.frein || null}
+                    onSave={saveSelectedFrein}
+                    required={Boolean(selectedInsight?.needsQualification)}
+                    disabled={Boolean(freinLockedTo)}
+                  />
+                </div>
+
                 {/* Reply Box */}
                 {(() => {
                   const lock = lookupBy(locks, selectedConv);
@@ -2274,21 +2300,6 @@ const Inbox = () => {
                   }
                   return (
                     <div>
-                      {/* Not dismissible: it goes away once a frein is saved */}
-                      {selectedInsight?.needsQualification && (
-                        <div style={styles.qualifyBar} role="status">
-                          <span style={styles.qualifyBarText}>
-                            Qualification requise : indiquez le motif ou le
-                            frein principal de cet échange.
-                          </span>
-                          <FreinSelector
-                            key={`qualify:${activeTab}:${selectedConv.id}`}
-                            value={selectedInsight.frein || null}
-                            onSave={saveSelectedFrein}
-                            required
-                          />
-                        </div>
-                      )}
                       {pendingAttachment && (
                         <div style={styles.attachChipRow}>
                           <span style={styles.attachChip}>
@@ -2726,6 +2737,25 @@ const styles = {
     fontSize: "12px",
     fontWeight: 600,
     color: "var(--text-primary)",
+    lineHeight: 1.4,
+  },
+  // Same bar once the motif is recorded (or before any reply): quiet
+  freinBar: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: "8px 12px",
+    padding: "8px 20px",
+    borderTop: "1px solid var(--border-primary)",
+    borderLeft: "3px solid var(--border-primary)",
+    backgroundColor: "var(--bg-secondary)",
+  },
+  freinBarText: {
+    flex: "1 1 240px",
+    minWidth: 0,
+    fontSize: "11.5px",
+    fontWeight: 600,
+    color: "var(--text-muted)",
     lineHeight: 1.4,
   },
   messageView: {
