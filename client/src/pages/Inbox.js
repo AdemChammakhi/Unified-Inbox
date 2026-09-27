@@ -20,6 +20,7 @@ import PlatformIcon from "../components/PlatformIcon";
 import EmailBody from "../components/EmailBody";
 import MaturityChip from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
+import CommentField from "../components/CommentField";
 import DossierPanel from "../components/DossierPanel";
 import TemplatesPanel from "../components/TemplatesPanel";
 import {
@@ -76,6 +77,29 @@ const formatAppointment = (value) => {
     hour: "2-digit",
     minute: "2-digit",
   });
+};
+
+/**
+ * Size the composer to its content, up to COMPOSER_MAX. scrollHeight leaves
+ * the borders out, so they are added back: without them the field is two
+ * pixels short and shows a scrollbar on a single line. The scrollbar only
+ * appears once the text outgrows the cap.
+ */
+const COMPOSER_MAX = 160;
+const fitComposer = (el) => {
+  if (!el) return;
+  // Empty is one line, whatever the width: Chrome counts a wrapped
+  // placeholder in scrollHeight, and the column may still be laying out.
+  if (!el.value) {
+    el.style.height = "";
+    el.style.overflowY = "hidden";
+    return;
+  }
+  el.style.height = "auto";
+  const borders = el.offsetHeight - el.clientHeight;
+  const wanted = el.scrollHeight + borders;
+  el.style.height = `${Math.min(wanted, COMPOSER_MAX)}px`;
+  el.style.overflowY = wanted > COMPOSER_MAX ? "auto" : "hidden";
 };
 
 /** Value for <input type="datetime-local">, which needs local time, no zone. */
@@ -144,12 +168,23 @@ const Inbox = () => {
 
   // Grow the composer with its content (templates arrive without a change
   // event) and shrink it back after a send.
+  // Also on selection (the field only exists once a conversation is open)
+  // and when the templates column changes the width; measured again on the
+  // next frame, once that layout has settled.
   useEffect(() => {
-    const el = replyFieldRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-  }, [replyText]);
+    fitComposer(replyFieldRef.current);
+    const frame = requestAnimationFrame(() =>
+      fitComposer(replyFieldRef.current),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [replyText, selectedConv?.id, activeTab, templatesOpen]);
+
+  // The wrapping depends on the width, so follow the window too.
+  useEffect(() => {
+    const onResize = () => fitComposer(replyFieldRef.current);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   // { conversationId, value } while the agent is picking an RDV date
   const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
@@ -2274,13 +2309,27 @@ const Inbox = () => {
                       ? "Qualification requise : indiquez le motif ou le frein principal de cet échange."
                       : "Motif / frein de l’échange"}
                   </span>
-                  <FreinSelector
-                    key={`qualify:${activeTab}:${selectedConv.id}`}
-                    value={selectedInsight?.frein || null}
-                    onSave={saveSelectedFrein}
-                    required={Boolean(selectedInsight?.needsQualification)}
-                    disabled={Boolean(freinLockedTo)}
-                  />
+                  {/* Motif and comment travel together: the pair wraps under
+                      the label when the thread is narrow, never apart */}
+                  <div style={styles.qualifyControls}>
+                    <FreinSelector
+                      key={`qualify:${activeTab}:${selectedConv.id}`}
+                      value={selectedInsight?.frein || null}
+                      onSave={saveSelectedFrein}
+                      required={Boolean(selectedInsight?.needsQualification)}
+                      disabled={Boolean(freinLockedTo)}
+                    />
+                    {/* Free comment on the discussion, kept on the customer's
+                        dossier (same record as the typologie) */}
+                    <CommentField
+                      key={`comment:${activeTab}:${selectedConv.id}`}
+                      value={lookupBy(dossiers, selectedConv)?.comment || ""}
+                      onSave={(comment) =>
+                        updateClassification(selectedConv.id, { comment })
+                      }
+                      disabled={Boolean(freinLockedTo)}
+                    />
+                  </div>
                 </div>
 
                 {/* Reply Box */}
@@ -2347,8 +2396,7 @@ const Inbox = () => {
                           rows={1}
                           onChange={(e) => {
                             setReplyText(e.target.value);
-                            e.target.style.height = "auto";
-                            e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+                            fitComposer(e.target);
                           }}
                           placeholder="Type a message…"
                           style={styles.replyInput}
@@ -2739,6 +2787,13 @@ const styles = {
     color: "var(--text-primary)",
     lineHeight: 1.4,
   },
+  qualifyControls: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "8px 12px",
+    flex: "2 1 420px",
+    minWidth: 0,
+  },
   // Same bar once the motif is recorded (or before any reply): quiet
   freinBar: {
     display: "flex",
@@ -2889,7 +2944,9 @@ const styles = {
     transition: "border-color 0.25s ease, box-shadow 0.25s ease",
     resize: "none",
     maxHeight: 160,
-    overflowY: "auto",
+    // fitComposer switches this to "auto" once the text outgrows the cap
+    overflowY: "hidden",
+    boxSizing: "border-box",
   },
   threadRow: {
     flex: 1,

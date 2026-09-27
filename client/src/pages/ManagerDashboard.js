@@ -34,6 +34,7 @@ import ProspectExport from "../components/ProspectExport";
 import EmailBody from "../components/EmailBody";
 import MaturityChip from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
+import CommentField from "../components/CommentField";
 import DossierPanel from "../components/DossierPanel";
 import {
   STAGES,
@@ -2299,6 +2300,14 @@ const ManagerDashboard = () => {
                             )}
                             onSave={(code, note) =>
                               saveFrein(selectedConv, code, note)
+                            }
+                            compact
+                          />
+                          <CommentField
+                            key={`comment:${activeTab}:${selectedConv.id}`}
+                            value={lookupBy(dossiers, selectedConv)?.comment || ""}
+                            onSave={(comment) =>
+                              updateClassification(selectedConv.id, { comment })
                             }
                             compact
                           />

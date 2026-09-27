@@ -53,6 +53,7 @@ const COLUMNS = [
   { key: "isPriority", label: "Prioritaire", type: "select", width: 100 },
   { key: "maturity", label: "Maturité", type: "select", width: 118 },
   { key: "frein", label: "Motif / frein", type: "select", width: 180 },
+  { key: "comment", label: "Commentaire", type: "text", width: 240 },
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
   { key: "invoiceRef", label: "Réf. facture", type: "text", width: 130 },
   { key: "agent", label: "Commercial", type: "select", width: 150 },

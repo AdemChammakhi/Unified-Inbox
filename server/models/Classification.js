@@ -56,6 +56,25 @@ const classificationSchema = new mongoose.Schema(
       default: false,
     },
     /**
+     * Free comment an agent keeps on the discussion, shown next to the
+     * motif / frein. One per customer, overwritten on save.
+     */
+    comment: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 1000,
+    },
+    commentBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    commentAt: {
+      type: Date,
+      default: null,
+    },
+    /**
      * When the appointment (RDV) is booked. Independent of the stage: it can
      * be set at any point of the pipeline and cleared with null. Feeds the
      * agenda and the "Chaud" maturity rule.

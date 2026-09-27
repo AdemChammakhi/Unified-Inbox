@@ -538,7 +538,7 @@ async function buildProspectRows({ platform, since }) {
   const [classifications, locks, repliers, freins] = await Promise.all([
     Classification.find({ conversationId: { $in: allConvIds } })
       .select(
-        "conversationId platform stage typologie invoiceRef isPriority appointmentAt updatedAt",
+        "conversationId platform stage typologie invoiceRef isPriority appointmentAt comment updatedAt",
       )
       .lean(),
     ConversationLock.find({ conversationId: { $in: allConvIds } })
@@ -583,6 +583,8 @@ async function buildProspectRows({ platform, since }) {
     const classification = cls?.stage || DEFAULT_STAGE;
     const typologie = cls?.typologie || "";
     const invoiceRef = cls?.invoiceRef || "";
+    // One line in a cell: the comment may carry line breaks
+    const comment = String(cls?.comment || "").replace(/\s+/g, " ").trim();
     const isPriority = cls?.isPriority === true;
     // The RDV date is independent of the stage
     const rdvAt = cls?.appointmentAt || null;
@@ -631,6 +633,7 @@ async function buildProspectRows({ platform, since }) {
       maturityReason: maturity.reason,
       frein: freinLabel(frein),
       freinCode: frein?.code || "",
+      comment,
       rdvAt,
       agent,
       messagesIn: p.messagesIn,
@@ -659,6 +662,7 @@ const HEADERS = [
   "Prioritaire",
   "Maturité",
   "Motif / frein",
+  "Commentaire",
   "RDV le",
   "Réf. facture",
   "Commercial en charge",
@@ -668,7 +672,7 @@ const HEADERS = [
 ];
 
 // Column widths, in HEADERS order — keep the two arrays the same length
-const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 11, 10, 28, 17, 16, 20, 9, 9, 46];
+const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 11, 10, 28, 40, 17, 16, 20, 9, 9, 46];
 
 // 1-based XLSX column numbers, derived so an inserted column cannot shift them
 const CLASS_COL = HEADERS.indexOf("Étape") + 1;
@@ -688,6 +692,7 @@ function rowValues(r) {
     r.isPriority ? "Oui" : "",
     r.maturity || "",
     r.frein || "",
+    r.comment || "",
     fmtDate(r.rdvAt),
     r.invoiceRef || "",
     r.agent,

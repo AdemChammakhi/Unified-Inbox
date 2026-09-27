@@ -28,7 +28,11 @@ const publicDossier = (c) => ({
   invoiceRef: c.invoiceRef || "",
   isPriority: c.isPriority === true,
   appointmentAt: c.appointmentAt || null,
+  comment: c.comment || "",
+  commentAt: c.commentAt || null,
 });
+
+const COMMENT_MAX = 1000;
 
 // GET /api/classifications?platform=instagram
 router.get("/", protect, async (req, res) => {
@@ -37,7 +41,9 @@ router.get("/", protect, async (req, res) => {
     const safePlatform = platform ? sanitizePlatform(platform) : null;
     const filter = safePlatform ? { platform: safePlatform } : {};
     const rows = await Classification.find(filter)
-      .select("conversationId stage typologie invoiceRef isPriority appointmentAt")
+      .select(
+        "conversationId stage typologie invoiceRef isPriority appointmentAt comment commentAt",
+      )
       .lean();
 
     const classifications = {};
@@ -105,6 +111,23 @@ router.put("/", protect, async (req, res) => {
 
     if (body.isPriority !== undefined) {
       set.isPriority = body.isPriority === true || body.isPriority === "true";
+    }
+
+    if (body.comment !== undefined) {
+      if (body.comment !== null && typeof body.comment !== "string") {
+        return res.status(400).json({ message: "Commentaire invalide." });
+      }
+      const comment = String(body.comment || "")
+        .replace(/\r\n?/g, "\n")
+        .trim();
+      if (comment.length > COMMENT_MAX) {
+        return res.status(400).json({
+          message: `Commentaire trop long (${COMMENT_MAX} caractères maximum).`,
+        });
+      }
+      set.comment = comment;
+      set.commentBy = comment ? req.user._id : null;
+      set.commentAt = comment ? new Date() : null;
     }
 
     if (body.appointmentAt !== undefined) {
