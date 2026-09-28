@@ -21,6 +21,7 @@ import EmailBody from "../components/EmailBody";
 import MaturityChip from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
 import CommentField from "../components/CommentField";
+import RdvForm from "../components/RdvForm";
 import DossierPanel from "../components/DossierPanel";
 import TemplatesPanel from "../components/TemplatesPanel";
 import {
@@ -1855,7 +1856,16 @@ const Inbox = () => {
                         <button
                           className="inbox-rdv-chip"
                           style={styles.rdvChip}
-                          title="Change the appointment"
+                          title={
+                            [
+                              lookupBy(dossiers, selectedConv)?.appointmentAgencyName ||
+                                lookupBy(dossiers, selectedConv)?.appointmentPlace,
+                              lookupBy(dossiers, selectedConv)?.appointmentAgent &&
+                                `avec ${lookupBy(dossiers, selectedConv).appointmentAgent}`,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || "Modifier le rendez-vous"
+                          }
                           onClick={() =>
                             setRdvDraft({
                               conversationId: selectedConv.id,
@@ -1866,6 +1876,8 @@ const Inbox = () => {
                           }
                         >
                           📅 {formatAppointment(lookupBy(appointments, selectedConv))}
+                          {lookupBy(dossiers, selectedConv)?.appointmentPlace &&
+                            ` · ${lookupBy(dossiers, selectedConv).appointmentPlace}`}
                         </button>
                       )}
                     {!lookupBy(appointments, selectedConv) && !rdvDraft && (
@@ -1954,57 +1966,18 @@ const Inbox = () => {
                   </div>
                 </div>
 
-                {/* RDV date picker — shown while booking or changing */}
+                {/* Booking or changing the RDV: date, place, agency and the
+                    agent receiving the customer, saved together */}
                 {rdvDraft?.conversationId === selectedConv.id && (
                   <div style={styles.rdvBar}>
-                    <span style={styles.rdvBarLabel}>
-                      📅 Date du rendez-vous
-                    </span>
-                    <input
-                      type="datetime-local"
-                      className="inbox-rdv-input"
-                      style={styles.rdvInput}
-                      value={rdvDraft.value}
-                      autoFocus
-                      onChange={(e) =>
-                        setRdvDraft((prev) => ({
-                          ...prev,
-                          value: e.target.value,
-                        }))
+                    <RdvForm
+                      key={`rdv:${activeTab}:${selectedConv.id}`}
+                      dossier={lookupBy(dossiers, selectedConv)}
+                      onSave={(patch) =>
+                        updateClassification(selectedConv.id, patch)
                       }
+                      onCancel={() => setRdvDraft(null)}
                     />
-                    <button
-                      className="inbox-send-action"
-                      style={styles.rdvSave}
-                      disabled={!rdvDraft.value}
-                      onClick={() =>
-                        updateClassification(selectedConv.id, {
-                          appointmentAt: new Date(rdvDraft.value).toISOString(),
-                        })
-                      }
-                    >
-                      Confirmer
-                    </button>
-                    {lookupBy(appointments, selectedConv) && (
-                      <button
-                        className="inbox-tab-btn"
-                        style={styles.rdvCancel}
-                        onClick={() =>
-                          updateClassification(selectedConv.id, {
-                            appointmentAt: null,
-                          })
-                        }
-                      >
-                        Retirer le RDV
-                      </button>
-                    )}
-                    <button
-                      className="inbox-tab-btn"
-                      style={styles.rdvCancel}
-                      onClick={() => setRdvDraft(null)}
-                    >
-                      Annuler
-                    </button>
                   </div>
                 )}
 

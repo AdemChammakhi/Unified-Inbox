@@ -1,14 +1,16 @@
 import React from "react";
+import { MapPin, UserRound } from "lucide-react";
 import PlatformIcon from "./PlatformIcon";
 
 /**
  * AppointmentsPanel — the RDV agenda.
  *
- * Conversations classified "RDV" carry the date the appointment was booked
- * for, so unlike the other classifications this one has a future: the useful
- * view is not "how many did we tag" but "who are we seeing, and when".
- * Counts summarise the load; the list is ordered soonest-first so the top row
- * is always the next thing the team has to honour.
+ * A dossier carries the date its appointment is booked for, so the useful
+ * view is not "how many did we book" but "who are we seeing, when, where and
+ * with whom". Counts summarise the load; the list is ordered soonest-first
+ * so the top row is always the next thing the team has to honour. Each row
+ * shows the place and agency and the agent receiving the customer, when the
+ * booking recorded them.
  *
  * Data: GET /api/analytics/appointments → { todayCount, next7DaysCount, … }
  */
@@ -49,7 +51,7 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
     <div className="chart-card" style={{ marginTop: 16 }}>
       <div className="chart-card-title">📅 Rendez-vous</div>
       <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--text-faint)" }}>
-        Conversations classées RDV{rangeLabel}, avec la date convenue.
+        Rendez-vous fixés{rangeLabel} : date, lieu, agence et agent responsable.
       </p>
 
       {/* Summary counts */}
@@ -84,7 +86,7 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
         <div style={styles.empty}>
           Aucun rendez-vous à venir.
           <br />
-          Classez une conversation en “RDV” pour fixer une date.
+          Fixez-en un depuis une conversation, avec le bouton « 📅 RDV ».
         </div>
       ) : (
         <div style={styles.list}>
@@ -103,6 +105,23 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={styles.name}>{a.name || "Client"}</div>
                 <div style={styles.when}>{formatWhen(a.appointmentAt)}</div>
+                {(a.agency || a.place) && (
+                  <div style={styles.detail}>
+                    <MapPin size={11} style={styles.detailIcon} />
+                    <span style={styles.detailText}>
+                      {a.agency || a.place}
+                      {a.agency && a.place && !a.agency.includes(a.place)
+                        ? ` · ${a.place}`
+                        : ""}
+                    </span>
+                  </div>
+                )}
+                {a.agent && (
+                  <div style={styles.detail}>
+                    <UserRound size={11} style={styles.detailIcon} />
+                    <span style={styles.detailText}>{a.agent}</span>
+                  </div>
+                )}
                 {a.bookedBy && (
                   <div style={styles.by}>pris par {a.bookedBy}</div>
                 )}
@@ -190,6 +209,21 @@ const styles = {
     fontFamily: "'Space Grotesk', sans-serif",
   },
   by: { fontSize: 11, color: "var(--text-dim)" },
+  detail: {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    minWidth: 0,
+    marginTop: 1,
+  },
+  detailIcon: { color: RDV_COLOR, flexShrink: 0 },
+  detailText: {
+    fontSize: 12,
+    color: "var(--text-secondary)",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   countdownChip: {
     fontSize: 10.5,
     fontWeight: 700,

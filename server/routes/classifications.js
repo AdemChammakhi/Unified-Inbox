@@ -1,6 +1,8 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const router = express.Router();
 const Classification = require("../models/Classification");
+const Partner = require("../models/Partner");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 const {
@@ -28,11 +30,29 @@ const publicDossier = (c) => ({
   invoiceRef: c.invoiceRef || "",
   isPriority: c.isPriority === true,
   appointmentAt: c.appointmentAt || null,
+  appointmentPlace: c.appointmentPlace || "",
+  appointmentAgencyId: c.appointmentAgency ? String(c.appointmentAgency) : "",
+  appointmentAgencyName: c.appointmentAgencyName || "",
+  appointmentAgent: c.appointmentAgent || "",
   comment: c.comment || "",
   commentAt: c.commentAt || null,
 });
 
 const COMMENT_MAX = 1000;
+const PLACE_MAX = 60;
+const AGENT_MAX = 120;
+
+const oneLine = (v, max) =>
+  String(v || "").replace(/\s+/g, " ").trim().slice(0, max);
+
+/** "MEDTOUR Sousse", or "Agence X — Sousse" when the name does not say where. */
+const agencyLabel = (p) => {
+  const name = oneLine(p.name, 120);
+  const city = oneLine(p.city, 60);
+  return city && !name.toLowerCase().includes(city.toLowerCase())
+    ? `${name} — ${city}`
+    : name;
+};
 
 // GET /api/classifications?platform=instagram
 router.get("/", protect, async (req, res) => {
@@ -42,7 +62,7 @@ router.get("/", protect, async (req, res) => {
     const filter = safePlatform ? { platform: safePlatform } : {};
     const rows = await Classification.find(filter)
       .select(
-        "conversationId stage typologie invoiceRef isPriority appointmentAt comment commentAt",
+        "conversationId stage typologie invoiceRef isPriority appointmentAt appointmentPlace appointmentAgency appointmentAgencyName appointmentAgent comment commentAt",
       )
       .lean();
 
@@ -66,7 +86,9 @@ router.get("/", protect, async (req, res) => {
 // PUT /api/classifications
 // Body: { conversationId, participantId?, platform, and any of:
 //   classification (stage code) | stage, typologie, invoiceRef, isPriority,
-//   appointmentAt (ISO date, or null to clear) }
+//   comment, appointmentAt (ISO date, or null to clear the whole RDV),
+//   appointmentPlace (gouvernorat), appointmentAgencyId (partners directory
+//   id, or null), appointmentAgent (free text) }
 router.put("/", protect, async (req, res) => {
   try {
     const conversationId = sanitizeId(req.body.conversationId);
@@ -139,6 +161,56 @@ router.put("/", protect, async (req, res) => {
           return res.status(400).json({ message: "Date de rendez-vous invalide." });
         }
         set.appointmentAt = parsed;
+      }
+    }
+
+    // Where the appointment takes place and who receives the customer.
+    // Removing the date removes them too: they describe that appointment.
+    if (set.appointmentAt === null) {
+      set.appointmentPlace = "";
+      set.appointmentAgency = null;
+      set.appointmentAgencyName = "";
+      set.appointmentAgent = "";
+    } else {
+      if (body.appointmentPlace !== undefined) {
+        if (body.appointmentPlace !== null && typeof body.appointmentPlace !== "string") {
+          return res.status(400).json({ message: "Lieu du rendez-vous invalide." });
+        }
+        set.appointmentPlace = oneLine(body.appointmentPlace, PLACE_MAX);
+      }
+
+      if (body.appointmentAgencyId !== undefined) {
+        const id = body.appointmentAgencyId;
+        if (id === null || id === "") {
+          set.appointmentAgency = null;
+          set.appointmentAgencyName = "";
+        } else {
+          if (typeof id !== "string" || !mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: "Agence invalide." });
+          }
+          const partner = await Partner.findById(id)
+            .select("name city governorate")
+            .lean();
+          if (!partner) {
+            return res.status(400).json({
+              message: "Agence introuvable dans l'annuaire.",
+            });
+          }
+          set.appointmentAgency = partner._id;
+          set.appointmentAgencyName = agencyLabel(partner);
+          // The agency settles the place: a Sousse agency is in Sousse
+          // whatever was picked before it.
+          if (partner.governorate) {
+            set.appointmentPlace = oneLine(partner.governorate, PLACE_MAX);
+          }
+        }
+      }
+
+      if (body.appointmentAgent !== undefined) {
+        if (body.appointmentAgent !== null && typeof body.appointmentAgent !== "string") {
+          return res.status(400).json({ message: "Agent responsable invalide." });
+        }
+        set.appointmentAgent = oneLine(body.appointmentAgent, AGENT_MAX);
       }
     }
 

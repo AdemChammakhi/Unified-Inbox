@@ -236,6 +236,9 @@ router.get("/appointments", protect, async (req, res) => {
           ? `+${d.conversationId}`
           : `Client ${String(d.conversationId).slice(-4)}`),
       appointmentAt: d.appointmentAt,
+      place: d.appointmentPlace || "",
+      agency: d.appointmentAgencyName || "",
+      agent: d.appointmentAgent || "",
       bookedBy: d.classifiedBy
         ? `${d.classifiedBy.firstName || ""} ${d.classifiedBy.lastName || ""}`.trim()
         : null,

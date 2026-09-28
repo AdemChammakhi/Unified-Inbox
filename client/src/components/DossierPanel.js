@@ -1,28 +1,23 @@
 import React, { useEffect, useState } from "react";
-import { Star, CalendarDays, FileText, X } from "lucide-react";
+import { Star, CalendarDays, FileText } from "lucide-react";
 import { TYPOLOGIES } from "../constants/pipeline";
 import DossierDocuments from "./DossierDocuments";
+import RdvForm from "./RdvForm";
 
 /**
  * DossierPanel — the customer's file, beyond the pipeline stage: typologie
- * of the request, priority flag, RDV date, invoice reference and attached
- * documents. Every field saves on its own; the parent persists through
- * PUT /api/classifications and passes the stored values back as `dossier`.
+ * of the request, priority flag, the appointment (RdvForm), invoice
+ * reference and attached documents. Every field saves on its own; the
+ * parent persists through PUT /api/classifications and passes the stored
+ * values back as `dossier`.
  *
  * Props:
- *   dossier    { typologie, isPriority, invoiceRef, appointmentAt } | undefined
+ *   dossier    { typologie, isPriority, invoiceRef, appointmentAt,
+ *                appointmentPlace, appointmentAgencyId, appointmentAgent }
  *   onSave     (patch) => Promise   — patch holds only the changed field(s)
  *   platform, customerId            — for the documents list
  *   canEdit    boolean
  */
-
-const toLocalInput = (value) => {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
 
 const formatRdv = (value) => {
   if (!value) return "";
@@ -40,14 +35,12 @@ const formatRdv = (value) => {
 const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true }) => {
   const d = dossier || {};
   const [invoice, setInvoice] = useState(d.invoiceRef || "");
-  const [rdv, setRdv] = useState(toLocalInput(d.appointmentAt));
   const [saving, setSaving] = useState("");
   const [error, setError] = useState(null);
 
   useEffect(() => {
     setInvoice(d.invoiceRef || "");
-    setRdv(toLocalInput(d.appointmentAt));
-  }, [d.invoiceRef, d.appointmentAt]);
+  }, [d.invoiceRef]);
 
   const save = async (field, patch) => {
     setSaving(field);
@@ -108,47 +101,6 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
           </span>
         </label>
 
-        <label style={styles.field}>
-          <span style={styles.label}>
-            <CalendarDays size={12} /> Rendez-vous
-          </span>
-          <span style={styles.inline}>
-            <input
-              type="datetime-local"
-              style={{ ...styles.input, flex: 1, colorScheme: "dark light" }}
-              value={rdv}
-              disabled={!canEdit || busy("appointmentAt")}
-              onChange={(e) => setRdv(e.target.value)}
-            />
-            {canEdit && rdv && rdv !== toLocalInput(d.appointmentAt) && (
-              <button
-                className="inbox-send-action"
-                style={styles.smallBtn}
-                disabled={busy("appointmentAt")}
-                onClick={() =>
-                  save("appointmentAt", { appointmentAt: new Date(rdv).toISOString() })
-                }
-              >
-                Confirmer
-              </button>
-            )}
-            {canEdit && d.appointmentAt && (
-              <button
-                className="inbox-tab-btn"
-                style={styles.iconBtn}
-                title="Retirer le rendez-vous"
-                disabled={busy("appointmentAt")}
-                onClick={() => save("appointmentAt", { appointmentAt: null })}
-              >
-                <X size={13} />
-              </button>
-            )}
-          </span>
-          {d.appointmentAt && (
-            <span style={styles.hint}>Fixé le {formatRdv(d.appointmentAt)}</span>
-          )}
-        </label>
-
         <label style={{ ...styles.field, justifyContent: "flex-end" }}>
           <span style={styles.label}>Priorité</span>
           <button
@@ -169,6 +121,17 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
       </div>
 
       {error && <div style={styles.error} role="alert">{error}</div>}
+
+      {/* The appointment: date, place, agency and agent, saved together */}
+      <div style={styles.rdv}>
+        <div style={styles.label}>
+          <CalendarDays size={12} /> Rendez-vous
+          {d.appointmentAt && (
+            <span style={styles.rdvHint}>· fixé le {formatRdv(d.appointmentAt)}</span>
+          )}
+        </div>
+        <RdvForm dossier={d} onSave={onSave} canEdit={canEdit} />
+      </div>
 
       <div style={styles.docs}>
         <div style={styles.label}>
@@ -236,6 +199,20 @@ const styles = {
     display: "inline-flex",
   },
   hint: { fontSize: 11, color: "var(--text-muted)" },
+  rdv: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    paddingTop: 10,
+    borderTop: "1px solid var(--border-primary)",
+  },
+  rdvHint: {
+    fontSize: 11,
+    fontWeight: 500,
+    textTransform: "none",
+    letterSpacing: 0,
+    color: "var(--text-muted)",
+  },
   toggle: {
     display: "inline-flex",
     alignItems: "center",

@@ -83,6 +83,36 @@ const classificationSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /**
+     * Where the appointment takes place and who receives the customer.
+     * Place is a gouvernorat, the agency an entry of the partners directory
+     * (its name is kept beside the reference so the agenda still reads once
+     * the entry is renamed or deactivated), the agent free text — not
+     * necessarily a CRM user. All four are cleared with the date.
+     */
+    appointmentPlace: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 60,
+    },
+    appointmentAgency: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Partner",
+      default: null,
+    },
+    appointmentAgencyName: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 200,
+    },
+    appointmentAgent: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 120,
+    },
     classifiedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
