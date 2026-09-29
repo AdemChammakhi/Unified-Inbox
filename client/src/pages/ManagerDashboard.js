@@ -32,7 +32,7 @@ import AdAttribution from "../components/AdAttribution";
 import AppointmentsPanel from "../components/AppointmentsPanel";
 import ProspectExport from "../components/ProspectExport";
 import EmailBody from "../components/EmailBody";
-import MaturityChip from "../components/MaturityChip";
+import MaturityChip, { AwaitingReplyBadge } from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
 import CommentField from "../components/CommentField";
 import DossierPanel from "../components/DossierPanel";
@@ -45,7 +45,11 @@ import {
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
 import { useLeadInsights } from "../hooks/useLeadInsights";
-import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
+import {
+  SORT_MODES,
+  UNKNOWN_MATURITY_RANK,
+  maturitySortRank,
+} from "../constants/leadQualification";
 import {
   BarChart,
   Bar,
@@ -181,14 +185,11 @@ const freinAuthorTitle = (frein) => {
   return parts.length ? `Renseigné ${parts.join(" ")}` : "Motif renseigné";
 };
 
-// Unknown maturity sorts after froid; no insight at all sorts last.
-const UNKNOWN_MATURITY_RANK = 3;
-const NO_INSIGHT_RANK = 4;
-const maturityRank = (insight) => {
-  if (!insight) return NO_INSIGHT_RANK;
-  const rank = MATURITY_RANK[insight.maturity?.level];
-  return rank === undefined ? UNKNOWN_MATURITY_RANK : rank;
-};
+// Prospects waiting for an answer first, then hottest first. Unknown
+// maturity sorts after every level; no insight at all sorts last.
+const NO_INSIGHT_RANK = UNKNOWN_MATURITY_RANK + 1;
+const maturityRank = (insight) =>
+  insight ? maturitySortRank(insight.maturity) : NO_INSIGHT_RANK;
 
 /**
  * Reorder a newest-first list by the chosen mode. The sort is stable and
@@ -1961,6 +1962,9 @@ const ManagerDashboard = () => {
                                     flexShrink: 0,
                                   }}
                                 >
+                                  {insight.maturity?.awaitingReply && (
+                                    <AwaitingReplyBadge compact />
+                                  )}
                                   {insight.needsQualification && (
                                     <span
                                       title="Motif ou frein principal non renseigné"
@@ -2256,7 +2260,7 @@ const ManagerDashboard = () => {
                           minWidth: 0,
                         }}
                       >
-                        <MaturityChip maturity={selectedInsight?.maturity} />
+                        <MaturityChip maturity={selectedInsight?.maturity} showReason />
                         {selectedInsight && (
                           <span
                             style={{

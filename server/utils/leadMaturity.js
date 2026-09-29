@@ -1,36 +1,71 @@
 /**
  * leadMaturity.js — how warm a lead is, derived at read time.
  *
- *   Chaud  confirmed need, near project, strong intent
- *   Tiède  real interest, decision pending for a specific reason
- *   Froid  low interest, distant project, too little information, or silent
+ * The rule management settled on (29 Sept 2026): a prospect who is answering
+ * is Chaud, and only time cools a lead.
  *
- * Nothing is stored: the level is recomputed from dates, message counts, the
- * classification and the recorded frein every time it is read. Pure function,
- * no database access; `now` is injectable so the rules can be tested.
+ *   Chaud  the prospect wrote recently, or is waiting for our answer, or the
+ *          dossier says so (a booking stage, a visit to the agency, an RDV,
+ *          the priority flag)
+ *   Tiède  we answered last and the prospect has been quiet for a few days,
+ *          or the stage says nobody can reach them
+ *   Froid  silent for SILENT_DAYS, or never wrote
+ *   Gagné  the trip took place (stage "Départ"): a customer, not a lead
+ *   Perdu  stage "Perdu"
+ *
+ * The number of messages decides nothing: a first message is as hot as the
+ * tenth. The frein does not move the level either — it rides in the reason
+ * as the explanation.
+ *
+ * `awaitingReply` says the prospect wrote last and nobody has answered
+ * since. It is reported whatever the level: an unanswered message keeps a
+ * lead Chaud until the silence threshold, and is still flagged after it.
+ *
+ * Nothing is stored: the level is recomputed from dates, the dossier and the
+ * recorded frein every time it is read. Pure function, no database access;
+ * `now` is injectable so the rules can be tested.
  */
 
 "use strict";
 
 const { freinLabel } = require("./leadFrein");
-const { ENGAGED_STAGES, STAGE_LABEL } = require("../constants/pipeline");
+const {
+  ENGAGED_STAGES,
+  AGENCY_VISIT_STAGE,
+  UNREACHABLE_STAGE,
+  STAGE_LABEL,
+} = require("../constants/pipeline");
 
 const THRESHOLDS = Object.freeze({
+  /** The prospect wrote within this many days: Chaud. */
   HOT_RECENT_DAYS: 3,
-  HOT_MIN_INCOMING: 3,
+  /** Same, once the lead is qualified or holds an offer: a longer think. */
+  HOT_ADVANCED_DAYS: 7,
+  /** Quiet for this long: Froid. */
   SILENT_DAYS: 14,
-  MIN_INCOMING_FOR_INTEREST: 2,
-  RDV_GRACE_DAYS: 1,
+  /** A past RDV still counts this long, while its outcome gets recorded. */
+  RDV_GRACE_DAYS: 3,
 });
+
+/** Stages whose prospects are given HOT_ADVANCED_DAYS. */
+const ADVANCED_STAGES = new Set(["qualifie", "offre_envoyee"]);
 
 const LEVELS = Object.freeze({
   chaud: "Chaud",
   tiede: "Tiède",
   froid: "Froid",
+  gagne: "Gagné",
+  perdu: "Perdu",
 });
 
-/** Sort order, hottest first. */
-const LEVEL_RANK = Object.freeze({ chaud: 0, tiede: 1, froid: 2 });
+/** Sort order, hottest first; closed dossiers last. */
+const LEVEL_RANK = Object.freeze({
+  chaud: 0,
+  tiede: 1,
+  froid: 2,
+  gagne: 3,
+  perdu: 4,
+});
 
 const DAY_MS = 86400000;
 
@@ -46,20 +81,9 @@ function toTime(value) {
   return Number.isFinite(t) ? t : null;
 }
 
-function daysSince(value, nowMs) {
-  const t = toTime(value);
-  if (t === null) return null;
-  return Math.floor((nowMs - t) / DAY_MS);
-}
-
 function count(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-}
-
-/** "1 message" / "3 messages" (French: 0 and 1 are singular). */
-function plural(n, singular, pluralForm) {
-  return `${n} ${n > 1 ? pluralForm : singular}`;
 }
 
 function activity(days) {
@@ -68,85 +92,110 @@ function activity(days) {
   return `il y a ${days} j`;
 }
 
-function result(level, reason) {
-  return { level, label: LEVELS[level], reason };
-}
-
 /**
  * @param {object} p
  * @param {number} p.messagesIn        messages received from the prospect
- * @param {number} p.messagesOut       replies sent to the prospect
- * @param {Date|string|null} p.lastIncomingAt
- * @param {Date|string|null} [p.lastOutgoingAt]  accepted for callers; no rule uses it yet
+ * @param {Date|string|null} p.lastIncomingAt  newest message FROM the prospect
+ * @param {Date|string|null} [p.lastOutgoingAt] newest delivered reply TO them
  * @param {string|null} p.stage          Pipeline stage code (server/constants/pipeline.js)
  * @param {boolean} [p.isPriority]       Agent's urgency flag
  * @param {Date|string|null} p.appointmentAt  RDV date, independent of the stage
  * @param {{code: string, note?: string}|null} p.frein
  * @param {Date|number} [p.now]
- * @returns {{level: "chaud"|"tiede"|"froid", label: string, reason: string}}
+ * @returns {{level: "chaud"|"tiede"|"froid"|"gagne"|"perdu", label: string,
+ *            reason: string, awaitingReply: boolean}}
  */
 function computeMaturity(p = {}) {
   const nowMs = toTime(p.now) ?? Date.now();
   const messagesIn = count(p.messagesIn);
-  const messagesOut = count(p.messagesOut);
   const stage = typeof p.stage === "string" ? p.stage : "";
+  const lastIn = toTime(p.lastIncomingAt);
+  const lastOut = toTime(p.lastOutgoingAt);
 
-  // 1. Lost: nothing else matters
-  if (stage === "perdu") return result("froid", "Perdu");
+  // The prospect wrote last and nobody has answered since
+  const awaitingReply =
+    messagesIn > 0 && lastIn !== null && (lastOut === null || lastIn > lastOut);
 
-  // 2. The customer has committed (booking, payment, confirmed, departed)
+  const frein = freinLabel(p.frein);
+  const because = (reason) => (frein ? `${reason} · Frein : ${frein}` : reason);
+  const out = (level, reason) => ({
+    level,
+    label: LEVELS[level],
+    reason,
+    awaitingReply,
+  });
+
+  // 1. Closed dossiers are not leads any more
+  if (stage === "perdu") return out("perdu", because("Dossier perdu"));
+  if (stage === "depart") return out("gagne", "Départ effectué");
+
+  // 2. The customer has committed (booking, payment, confirmed dossier)
   if (ENGAGED_STAGES.has(stage)) {
-    return result("chaud", STAGE_LABEL[stage] || "Dossier engagé");
+    return out("chaud", because(STAGE_LABEL[stage] || "Dossier engagé"));
   }
 
-  // 3. Appointment booked and not long past
+  // 3. An appointment, coming or just held
   const at = toTime(p.appointmentAt);
   if (at !== null && at >= nowMs - THRESHOLDS.RDV_GRACE_DAYS * DAY_MS) {
-    return result("chaud", `RDV le ${ddmm.format(new Date(at))}`);
-  }
-
-  // 4. The prospect never wrote
-  if (messagesIn === 0) return result("froid", "Aucun message du prospect");
-
-  // 5. The prospect went quiet
-  const silentFor = daysSince(p.lastIncomingAt, nowMs);
-  if (silentFor !== null && silentFor >= THRESHOLDS.SILENT_DAYS) {
-    return result("froid", `Silencieux depuis ${silentFor} j`);
-  }
-
-  // 6. An agent flagged it
-  if (p.isPriority === true) return result("chaud", "Marqué prioritaire");
-
-  // 6. A named obstacle: interest is real, the decision is pending
-  const frein = freinLabel(p.frein);
-  if (frein) return result("tiede", `Frein : ${frein}`);
-
-  // 7. A live conversation with enough substance
-  if (
-    messagesIn >= THRESHOLDS.HOT_MIN_INCOMING &&
-    messagesOut >= 1 &&
-    silentFor !== null &&
-    silentFor <= THRESHOLDS.HOT_RECENT_DAYS
-  ) {
-    return result(
+    const day = ddmm.format(new Date(at));
+    return out(
       "chaud",
-      `${plural(messagesIn, "message reçu", "messages reçus")}, actif ${activity(silentFor)}`,
+      because(at >= nowMs ? `RDV le ${day}` : `RDV du ${day}, suite à donner`),
     );
   }
 
-  // 8. Not enough to go on
-  if (messagesIn < THRESHOLDS.MIN_INCOMING_FOR_INTEREST) {
-    return result(
-      "froid",
-      `Informations insuffisantes (${plural(messagesIn, "message", "messages")})`,
-    );
+  // 4. The customer is expected at the agency
+  if (stage === AGENCY_VISIT_STAGE) {
+    return out("chaud", because("Déplacement agence"));
   }
 
-  // 9. Everything else is an exchange in progress
-  return result(
-    "tiede",
-    `Échange en cours (${plural(messagesIn, "message reçu", "messages reçus")})`,
-  );
+  // 5. Nobody can reach the customer: Tiède at once, Froid once the silence
+  //    threshold passes — unless they wrote again and wait for our answer,
+  //    which makes them reachable, and Chaud. The clock is their last
+  //    message, or our last attempt when they never wrote.
+  if (stage === UNREACHABLE_STAGE) {
+    const clock = lastIn ?? lastOut;
+    const quiet =
+      clock === null ? null : Math.max(0, Math.floor((nowMs - clock) / DAY_MS));
+    if (quiet !== null && quiet >= THRESHOLDS.SILENT_DAYS) {
+      return out("froid", because(`Client injoignable depuis ${quiet} j`));
+    }
+    if (awaitingReply) {
+      return out(
+        "chaud",
+        because(`À répondre — le client a réécrit ${activity(quiet)}`),
+      );
+    }
+    return out("tiede", because("Client injoignable"));
+  }
+
+  // 6. An agent's judgement is never overruled by a clock
+  if (p.isPriority === true) return out("chaud", because("Marqué prioritaire"));
+
+  // 7. Nothing from the prospect to measure
+  if (messagesIn === 0) return out("froid", "Aucun message du prospect");
+  if (lastIn === null) return out("tiede", because("Échange en cours"));
+
+  // 8. Time since the prospect last wrote is the whole rule from here on
+  const silentFor = Math.max(0, Math.floor((nowMs - lastIn) / DAY_MS));
+
+  if (silentFor >= THRESHOLDS.SILENT_DAYS) {
+    return out("froid", because(`Silencieux depuis ${silentFor} j`));
+  }
+  // They are waiting on us: the lead has not cooled, we are late
+  if (awaitingReply) {
+    return out(
+      "chaud",
+      because(`À répondre — message reçu ${activity(silentFor)}`),
+    );
+  }
+  const hotDays = ADVANCED_STAGES.has(stage)
+    ? THRESHOLDS.HOT_ADVANCED_DAYS
+    : THRESHOLDS.HOT_RECENT_DAYS;
+  if (silentFor <= hotDays) {
+    return out("chaud", because(`Prospect actif ${activity(silentFor)}`));
+  }
+  return out("tiede", because(`Sans nouvelles depuis ${silentFor} j`));
 }
 
 module.exports = {

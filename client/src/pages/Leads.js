@@ -52,6 +52,7 @@ const COLUMNS = [
   { key: "typologie", label: "Typologie", type: "select", width: 150 },
   { key: "isPriority", label: "Prioritaire", type: "select", width: 100 },
   { key: "maturity", label: "Maturité", type: "select", width: 118 },
+  { key: "awaitingReply", label: "À répondre", type: "select", width: 110 },
   { key: "frein", label: "Motif / frein", type: "select", width: 180 },
   { key: "comment", label: "Commentaire", type: "text", width: 240 },
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
@@ -80,7 +81,7 @@ const FREIN_LABELS = Object.fromEntries(FREINS.map((f) => [f.code, f.label]));
 /** Filter value that selects the rows with no frein recorded yet. */
 const FREIN_NONE = "__none__";
 
-/** chaud / tiede / froid, from the level or, failing that, the label. */
+/** chaud / tiede / froid / gagne / perdu, from the level or the label. */
 const maturityLevelOf = (row) => {
   if (row.maturityLevel && MATURITY[row.maturityLevel]) return row.maturityLevel;
   if (!row.maturity) return null;
@@ -97,6 +98,7 @@ const cellText = (row, key) => {
   if (key === "frein") return String(row.frein || "");
   if (key === "typologie") return String(row.typologieLabel || "");
   if (key === "isPriority") return row.isPriority ? "Oui" : "";
+  if (key === "awaitingReply") return row.awaitingReply ? "Oui" : "";
   const v = row[key];
   if (v === null || v === undefined) return "";
   if (key === "platform") return PLATFORM_LABELS[v] || v;
@@ -201,6 +203,7 @@ const Leads = () => {
       typologie: build("typologie"),
       isPriority: build("isPriority"),
       maturity: orderedLike(present("maturity"), MATURITY_ORDER),
+      awaitingReply: build("awaitingReply"),
       frein: orderedLike(present("frein"), FREIN_ORDER),
       agent: build("agent"),
       // Offer "Non renseigné" only when some row actually lacks a frein.
@@ -238,15 +241,19 @@ const Leads = () => {
     return [...out].sort((a, b) => {
       const col = COLUMNS.find((c) => c.key === key);
       if (key === "maturity") {
-        // Ascending = hottest first (Chaud, Tiède, Froid). Rows without a
-        // level stay last either way; ties put the most messages received
-        // first.
+        // Ascending = hottest first (Chaud, Tiède, Froid, then the closed
+        // dossiers Gagné and Perdu). Rows without a level stay last either
+        // way; ties put the prospects waiting for an answer first, then the
+        // most messages received.
         const la = maturityLevelOf(a);
         const lb = maturityLevelOf(b);
         if (la !== lb) {
           if (!la) return 1;
           if (!lb) return -1;
           return (MATURITY_RANK[la] - MATURITY_RANK[lb]) * mul;
+        }
+        if (Boolean(a.awaitingReply) !== Boolean(b.awaitingReply)) {
+          return a.awaitingReply ? -1 : 1;
         }
         return Number(b.messagesIn || 0) - Number(a.messagesIn || 0);
       }

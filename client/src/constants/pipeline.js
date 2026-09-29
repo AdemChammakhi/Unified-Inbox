@@ -7,14 +7,18 @@ export const STAGES = [
   { key: "nouveau_lead", label: "Nouveau lead", color: "#6E7A96" },
   { key: "a_contacter", label: "À contacter", color: "#E3A63C" },
   { key: "contact_etabli", label: "Contact établi", color: "#5B9BD9" },
+  { key: "qualification_en_cours", label: "Qualification en cours", color: "#8FCFA8" },
   { key: "qualifie", label: "Qualifié", color: "#5FBF8A" },
   { key: "offre_envoyee", label: "Offre envoyée", color: "#4EC3C3" },
   { key: "en_reflexion", label: "En réflexion", color: "#A98BD6" },
   { key: "relance", label: "Relance", color: "#D98CB3" },
+  { key: "deplacement_agence", label: "Déplacement agence", color: "#E8833A" },
   { key: "reservation", label: "Réservation", color: "#3FA37A" },
   { key: "paiement", label: "Paiement", color: "#2E8B57" },
   { key: "dossier_confirme", label: "Dossier confirmé", color: "#1F7A4F" },
   { key: "depart", label: "Départ", color: "#16633F" },
+  // Outside the line: on hold, then lost
+  { key: "client_injoignable", label: "Client injoignable", color: "#8C97AD" },
   { key: "perdu", label: "Perdu", color: "#E2685F" },
 ];
 

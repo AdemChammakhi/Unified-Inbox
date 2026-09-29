@@ -18,7 +18,7 @@ import { useAuth } from "../context/AuthContext";
 import { Search, RefreshCw, Send, Paperclip } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
 import EmailBody from "../components/EmailBody";
-import MaturityChip from "../components/MaturityChip";
+import MaturityChip, { AwaitingReplyBadge } from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
 import CommentField from "../components/CommentField";
 import RdvForm from "../components/RdvForm";
@@ -33,7 +33,7 @@ import {
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
 import { useLeadInsights } from "../hooks/useLeadInsights";
-import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
+import { SORT_MODES, maturitySortRank } from "../constants/leadQualification";
 
 // Conversation list ordering, remembered per browser.
 const SORT_STORAGE_KEY = "inbox.sortMode";
@@ -843,9 +843,8 @@ const Inbox = () => {
         conv,
         index,
         insight,
-        rank: byMaturity
-          ? (MATURITY_RANK[insight?.maturity?.level] ?? 3)
-          : 0,
+        // Prospects waiting for an answer first, then hottest first
+        rank: byMaturity ? maturitySortRank(insight?.maturity) : 0,
         received: Number(insight?.messagesIn) || 0,
       };
     });
@@ -1726,6 +1725,9 @@ const Inbox = () => {
                           </small>
                           {insight && (
                             <span style={styles.convInsights}>
+                              {insight.maturity?.awaitingReply && (
+                                <AwaitingReplyBadge compact />
+                              )}
                               {insight.needsQualification && (
                                 <span
                                   style={styles.qualifyMarker}
@@ -1917,10 +1919,11 @@ const Inbox = () => {
                     >
                       📝 Modèles
                     </button>
-                    {/* Lead maturity (reason in the tooltip). The motif /
-                        frein is recorded in the bar above the composer —
-                        one control, not two. */}
-                    <MaturityChip maturity={selectedInsight?.maturity} />
+                    {/* Lead maturity with its reason written out ("Chaud ·
+                        À répondre — message reçu hier"). The motif / frein
+                        is recorded in the bar above the composer — one
+                        control, not two. */}
+                    <MaturityChip maturity={selectedInsight?.maturity} showReason />
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"

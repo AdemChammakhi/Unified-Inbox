@@ -56,10 +56,13 @@ const {
 const STAGE_FILLS = {
   a_contacter: "FFE3A63C",
   contact_etabli: "FF5B9BD9",
+  qualification_en_cours: "FF8FCFA8",
   qualifie: "FF5FBF8A",
   offre_envoyee: "FF4EC3C3",
   en_reflexion: "FFA98BD6",
   relance: "FFD98CB3",
+  deplacement_agence: "FFE8833A",
+  client_injoignable: "FF8C97AD",
   reservation: "FF3FA37A",
   paiement: "FF2E8B57",
   dossier_confirme: "FF1F7A4F",
@@ -72,6 +75,8 @@ const MATURITY_FILLS = {
   chaud: "FFF8D7D3",
   tiede: "FFFBEBC8",
   froid: "FFD6E6F5",
+  gagne: "FFD5EFE3",
+  perdu: "FFE3E5EA",
 };
 
 /** Shown when neither a lock nor a CRM reply names anyone. */
@@ -631,6 +636,8 @@ async function buildProspectRows({ platform, since }) {
       maturity: maturity.label,
       maturityLevel: maturity.level,
       maturityReason: maturity.reason,
+      // The prospect wrote last and nobody has answered since
+      awaitingReply: maturity.awaitingReply === true,
       frein: freinLabel(frein),
       freinCode: frein?.code || "",
       comment,
@@ -661,6 +668,7 @@ const HEADERS = [
   "Typologie",
   "Prioritaire",
   "Maturité",
+  "À répondre",
   "Motif / frein",
   "Commentaire",
   "RDV le",
@@ -672,7 +680,7 @@ const HEADERS = [
 ];
 
 // Column widths, in HEADERS order — keep the two arrays the same length
-const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 11, 10, 28, 40, 17, 16, 20, 9, 9, 46];
+const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 11, 10, 11, 28, 40, 17, 16, 20, 9, 9, 46];
 
 // 1-based XLSX column numbers, derived so an inserted column cannot shift them
 const CLASS_COL = HEADERS.indexOf("Étape") + 1;
@@ -691,6 +699,7 @@ function rowValues(r) {
     r.typologieLabel || "",
     r.isPriority ? "Oui" : "",
     r.maturity || "",
+    r.awaitingReply ? "Oui" : "",
     r.frein || "",
     r.comment || "",
     fmtDate(r.rdvAt),
