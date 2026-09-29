@@ -7,8 +7,8 @@
  * that sit outside the line: "Client injoignable", a dossier on hold because
  * nobody can reach the customer, and "Perdu", the terminal stage that makes
  * loss analysis possible (see docs/PLAN-PILOTAGE-COMMERCIAL.md §2.2).
- * "Qualification en cours", "Déplacement agence" and "Client injoignable"
- * were added on 29 Sept 2026 at management's request. TYPOLOGIES is the
+ * "En cours" (code qualification_en_cours), "Déplacement agence" and
+ * "Client injoignable" were added on 29 Sept 2026 at management's request. TYPOLOGIES is the
  * nature of the request. Both replace the free-text era: values are codes,
  * labels are French.
  */
@@ -19,7 +19,8 @@ const STAGES = Object.freeze([
   { key: "nouveau_lead", label: "Nouveau lead", ordinal: 1 },
   { key: "a_contacter", label: "À contacter", ordinal: 2 },
   { key: "contact_etabli", label: "Contact établi", ordinal: 3 },
-  { key: "qualification_en_cours", label: "Qualification en cours", ordinal: 4 },
+  // Shown as "En cours" (management's wording); the code keeps its full name
+  { key: "qualification_en_cours", label: "En cours", ordinal: 4 },
   { key: "qualifie", label: "Qualifié", ordinal: 5 },
   { key: "offre_envoyee", label: "Offre envoyée", ordinal: 6 },
   { key: "en_reflexion", label: "En réflexion", ordinal: 7 },
