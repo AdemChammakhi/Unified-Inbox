@@ -61,7 +61,10 @@ function buildOnce(key, platform, since) {
 }
 
 // GET /api/leads?platform=all|<platform>&range=<days|all>
-router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
+// Every role reads the sheet: agents come here after the inbox to find the
+// prospects they follow and their numbers. Only the file export
+// (routes/exports.js) stays with admins and managers.
+router.get("/", protect, authorize("admin", "manager", "marketing"), async (req, res) => {
   try {
     const platform =
       req.query.platform && req.query.platform !== "all"

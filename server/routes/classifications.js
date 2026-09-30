@@ -28,6 +28,7 @@ const publicDossier = (c) => ({
   stage: c.stage || DEFAULT_STAGE,
   typologie: c.typologie || "",
   invoiceRef: c.invoiceRef || "",
+  phone: c.phone || "",
   isPriority: c.isPriority === true,
   appointmentAt: c.appointmentAt || null,
   appointmentPlace: c.appointmentPlace || "",
@@ -62,7 +63,7 @@ router.get("/", protect, async (req, res) => {
     const filter = safePlatform ? { platform: safePlatform } : {};
     const rows = await Classification.find(filter)
       .select(
-        "conversationId stage typologie invoiceRef isPriority appointmentAt appointmentPlace appointmentAgency appointmentAgencyName appointmentAgent comment commentAt",
+        "conversationId stage typologie invoiceRef phone isPriority appointmentAt appointmentPlace appointmentAgency appointmentAgencyName appointmentAgent comment commentAt",
       )
       .lean();
 
@@ -129,6 +130,25 @@ router.put("/", protect, async (req, res) => {
         return res.status(400).json({ message: "Référence de facture invalide." });
       }
       set.invoiceRef = String(body.invoiceRef || "").trim().slice(0, 60);
+    }
+
+    if (body.phone !== undefined) {
+      if (body.phone !== null && typeof body.phone !== "string") {
+        return res.status(400).json({ message: "Numéro de téléphone invalide." });
+      }
+      // Digits, "+", and the usual separators; anything else is noise
+      const phone = String(body.phone || "")
+        .replace(/[^\d+\s().-]/g, "")
+        .replace(/\(\s*\)/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 30);
+      if (phone && phone.replace(/\D/g, "").length < 6) {
+        return res.status(400).json({
+          message: "Numéro de téléphone trop court (6 chiffres minimum).",
+        });
+      }
+      set.phone = phone;
     }
 
     if (body.isPriority !== undefined) {

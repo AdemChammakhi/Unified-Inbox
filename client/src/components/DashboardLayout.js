@@ -72,18 +72,17 @@ const DashboardLayout = ({ children, noPadding = false }) => {
             {!collapsed && <span>Dashboard</span>}
           </Link>
 
-          {/* The prospect sheet — admins and managers only, it is the whole
-              customer base in one table. */}
-          {(user?.role === "admin" || user?.role === "manager") && (
-            <Link
-              to="/leads"
-              className={`sidebar-link${location.pathname === "/leads" ? " active" : ""}`}
-              title="Leads"
-            >
-              <Table2 size={18} className="sidebar-link-icon" />
-              {!collapsed && <span>Leads</span>}
-            </Link>
-          )}
+          {/* The prospect sheet — every role: agents come here after the
+              inbox to find the prospects they follow and their numbers.
+              The file export on that page stays with admins and managers. */}
+          <Link
+            to="/leads"
+            className={`sidebar-link${location.pathname === "/leads" ? " active" : ""}`}
+            title="Leads"
+          >
+            <Table2 size={18} className="sidebar-link-icon" />
+            {!collapsed && <span>Leads</span>}
+          </Link>
 
           {/* Directory of MEDTOUR agencies and B2B partners — every role,
               agents use it to orient a customer to the nearest office. */}

@@ -35,12 +35,16 @@ const formatRdv = (value) => {
 const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true }) => {
   const d = dossier || {};
   const [invoice, setInvoice] = useState(d.invoiceRef || "");
+  const [phone, setPhone] = useState(d.phone || "");
   const [saving, setSaving] = useState("");
   const [error, setError] = useState(null);
 
   useEffect(() => {
     setInvoice(d.invoiceRef || "");
   }, [d.invoiceRef]);
+  useEffect(() => {
+    setPhone(d.phone || "");
+  }, [d.phone]);
 
   const save = async (field, patch) => {
     setSaving(field);
@@ -96,6 +100,40 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
                 onClick={() => save("invoiceRef", { invoiceRef: invoice.trim() })}
               >
                 {busy("invoiceRef") ? "…" : "Enregistrer"}
+              </button>
+            )}
+          </span>
+        </label>
+
+        {/* The prospect's number, recorded from the conversation: WhatsApp
+            leads already are their number, the other platforms have none */}
+        <label style={styles.field}>
+          <span style={styles.label}>Téléphone</span>
+          <span style={styles.inline}>
+            <input
+              style={{ ...styles.input, flex: 1 }}
+              type="tel"
+              value={phone}
+              maxLength={30}
+              placeholder={
+                platform === "whatsapp" && customerId
+                  ? `+${customerId} (WhatsApp)`
+                  : "ex. +216 98 000 000"
+              }
+              disabled={!canEdit || busy("phone")}
+              onChange={(e) => setPhone(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save("phone", { phone: phone.trim() });
+              }}
+            />
+            {canEdit && phone.trim() !== (d.phone || "") && (
+              <button
+                className="inbox-send-action"
+                style={styles.smallBtn}
+                disabled={busy("phone")}
+                onClick={() => save("phone", { phone: phone.trim() })}
+              >
+                {busy("phone") ? "…" : "Enregistrer"}
               </button>
             )}
           </span>

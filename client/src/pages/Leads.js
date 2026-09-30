@@ -12,7 +12,8 @@ import {
   MATURITY_RANK,
 } from "../constants/leadQualification";
 import { STAGE_LABELS, STAGE_COLORS, STAGES } from "../constants/pipeline";
-import { RefreshCw, X } from "lucide-react";
+import { copyText } from "../constants/templates";
+import { RefreshCw, X, UserRound, Phone, Copy, Check } from "lucide-react";
 
 /**
  * Leads — the prospect sheet, in the app.
@@ -143,6 +144,11 @@ const Leads = () => {
   const [range, setRange] = useState(30);
   const [filters, setFilters] = useState({});
   const [sort, setSort] = useState({ key: "lastContact", dir: "desc" });
+  // "Mes leads": the rows whose Commercial en charge is the signed-in user
+  const [mine, setMine] = useState(false);
+  const myName = `${user?.firstName || ""} ${user?.lastName || ""}`.trim();
+  // Phone just copied, for the short "Copié" confirmation on that row
+  const [copiedKey, setCopiedKey] = useState(null);
 
   // One request at a time: switching the period cancels the previous fetch
   // so an older, slower answer cannot land on top of the newer one, and the
@@ -213,9 +219,9 @@ const Leads = () => {
 
   const filtered = useMemo(() => {
     const active = Object.entries(filters).filter(([, v]) => v !== "" && v != null);
-    let out = rows;
+    let out = mine ? rows.filter((row) => row.agent === myName) : rows;
     if (active.length > 0) {
-      out = rows.filter((row) =>
+      out = out.filter((row) =>
         active.every(([key, value]) => {
           const col = COLUMNS.find((c) => c.key === key);
           if (col?.type === "select") {
@@ -270,7 +276,15 @@ const Leads = () => {
       }
       return cellText(a, key).localeCompare(cellText(b, key), "fr") * mul;
     });
-  }, [rows, filters, sort]);
+  }, [rows, filters, sort, mine, myName]);
+
+  const copyPhone = async (row) => {
+    const ok = await copyText(row.phone);
+    if (!ok) return;
+    const key = `${row.platform}:${row.phone}`;
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
+  };
 
   const setFilter = (key, value) =>
     setFilters((prev) => ({ ...prev, [key]: value }));
@@ -288,10 +302,19 @@ const Leads = () => {
               {loading
                 ? "Chargement…"
                 : `${filtered.length} prospect${filtered.length > 1 ? "s" : ""}` +
-                  (activeCount > 0 ? ` sur ${rows.length}` : "")}
+                  (activeCount > 0 || mine ? ` sur ${rows.length}` : "")}
             </p>
           </div>
           <div style={styles.headerRight}>
+            <button
+              className="support-btn"
+              style={{ ...styles.ghost, ...(mine ? styles.ghostOn : {}) }}
+              onClick={() => setMine((v) => !v)}
+              title="Les prospects dont vous êtes le commercial en charge"
+              aria-pressed={mine}
+            >
+              <UserRound size={13} /> Mes leads
+            </button>
             {activeCount > 0 && (
               <button
                 className="support-btn"
@@ -473,6 +496,36 @@ const Leads = () => {
                           </td>
                         );
                       }
+                      if (c.key === "phone" && r.phone) {
+                        const copied = copiedKey === `${r.platform}:${r.phone}`;
+                        return (
+                          <td key={c.key} style={styles.td} title={r.phone}>
+                            <span style={styles.phoneCell}>
+                              <a
+                                href={`tel:${r.phone.replace(/[^\d+]/g, "")}`}
+                                style={styles.phoneLink}
+                                title="Appeler"
+                              >
+                                <Phone size={12} /> {r.phone}
+                              </a>
+                              <button
+                                type="button"
+                                className="support-btn"
+                                style={styles.copyBtn}
+                                onClick={() => copyPhone(r)}
+                                title="Copier le numéro"
+                                aria-label="Copier le numéro"
+                              >
+                                {copied ? (
+                                  <Check size={12} style={{ color: "var(--success)" }} />
+                                ) : (
+                                  <Copy size={12} />
+                                )}
+                              </button>
+                            </span>
+                          </td>
+                        );
+                      }
                       const isNum = c.type === "number";
                       return (
                         <td
@@ -631,6 +684,30 @@ const styles = {
     fontVariantNumeric: "tabular-nums",
   },
   tdWrap: { color: "var(--text-secondary)" },
+  ghostOn: {
+    color: "var(--accent)",
+    borderColor: "var(--accent)",
+    backgroundColor: "var(--accent-glow)",
+  },
+  phoneCell: { display: "inline-flex", alignItems: "center", gap: 6 },
+  phoneLink: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    color: "var(--text-primary)",
+    textDecoration: "none",
+    fontFamily: "'Space Grotesk', sans-serif",
+    fontVariantNumeric: "tabular-nums",
+  },
+  copyBtn: {
+    display: "inline-flex",
+    padding: 3,
+    borderRadius: 5,
+    border: "1px solid var(--border-primary)",
+    background: "transparent",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+  },
   platformCell: { display: "inline-flex", alignItems: "center", gap: 6 },
   classChip: {
     display: "inline-block",

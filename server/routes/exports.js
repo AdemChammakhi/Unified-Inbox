@@ -543,7 +543,7 @@ async function buildProspectRows({ platform, since }) {
   const [classifications, locks, repliers, freins] = await Promise.all([
     Classification.find({ conversationId: { $in: allConvIds } })
       .select(
-        "conversationId platform stage typologie invoiceRef isPriority appointmentAt comment updatedAt",
+        "conversationId platform stage typologie invoiceRef phone isPriority appointmentAt comment updatedAt",
       )
       .lean(),
     ConversationLock.find({ conversationId: { $in: allConvIds } })
@@ -623,7 +623,9 @@ async function buildProspectRows({ platform, since }) {
         ? `${PLATFORM_LABELS[p.platform] || p.platform} — Pub: ${p.adTitle}`
         : PLATFORM_LABELS[p.platform] || p.platform,
       name: p.name || fallbackName(p.platform, p.personId),
-      phone: p.platform === "whatsapp" ? `+${p.personId}` : "",
+      // WhatsApp leads are their number; the others carry the number the
+      // agent recorded on the dossier, when there is one
+      phone: p.platform === "whatsapp" ? `+${p.personId}` : cls?.phone || "",
       email: p.platform === "email" ? p.personId : "",
       firstContact: p.firstContact,
       lastContact: p.lastContact,

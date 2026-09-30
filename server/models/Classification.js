@@ -50,6 +50,18 @@ const classificationSchema = new mongoose.Schema(
       trim: true,
       maxlength: 60,
     },
+    /**
+     * The prospect's phone number as the agent recorded it from the
+     * conversation. WhatsApp leads carry their number as their id; this is
+     * for the Facebook, Instagram and email ones, so the follow-up can be
+     * made by phone.
+     */
+    phone: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 30,
+    },
     /** Urgency marker, independent of the stage. */
     isPriority: {
       type: Boolean,
