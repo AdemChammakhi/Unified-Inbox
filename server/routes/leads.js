@@ -60,10 +60,27 @@ function buildOnce(key, platform, since) {
   return tracked;
 }
 
+/**
+ * What a user may see of a built sheet. Admins and managers get every row;
+ * an agent (`marketing`) gets HIS leads only — the rows whose "Commercial en
+ * charge" he is (he holds the conversation, or sent its latest CRM reply).
+ * Enforced here, not in the page: the cache holds the whole sheet, so the
+ * cut is made per request and nothing else leaves the server.
+ */
+function scopedFor(user, payload) {
+  if (user.role !== "marketing") return { ...payload, scope: "all" };
+  const me = String(user._id);
+  return {
+    ...payload,
+    rows: payload.rows.filter((row) => row.agentId === me),
+    scope: "mine",
+  };
+}
+
 // GET /api/leads?platform=all|<platform>&range=<days|all>
-// Every role reads the sheet: agents come here after the inbox to find the
-// prospects they follow and their numbers. Only the file export
-// (routes/exports.js) stays with admins and managers.
+// Every role reads the sheet, each within its scope (see scopedFor): agents
+// come here after the inbox to find the prospects they follow and their
+// numbers. The file export (routes/exports.js) stays with admins and managers.
 router.get("/", protect, authorize("admin", "manager", "marketing"), async (req, res) => {
   try {
     const platform =
@@ -88,7 +105,10 @@ router.get("/", protect, authorize("admin", "manager", "marketing"), async (req,
     const key = `${platform || "all"}:${rangeDays || "all"}`;
     const hit = _cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
-      return res.json({ rows: hit.rows, truncated: hit.truncated, cached: true });
+      return res.json({
+        ...scopedFor(req.user, { rows: hit.rows, truncated: hit.truncated }),
+        cached: true,
+      });
     }
 
     const since = rangeDays
@@ -102,7 +122,7 @@ router.get("/", protect, authorize("admin", "manager", "marketing"), async (req,
       if (_cache.size > 20) _cache.delete(_cache.keys().next().value);
     }
 
-    return res.json({ ...payload, cached: false });
+    return res.json({ ...scopedFor(req.user, payload), cached: false });
   } catch (err) {
     console.error("[Leads] failed:", err.message);
     return res.status(500).json({ message: "Impossible de charger les leads" });

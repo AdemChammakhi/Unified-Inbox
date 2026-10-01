@@ -144,8 +144,12 @@ const Leads = () => {
   const [range, setRange] = useState(30);
   const [filters, setFilters] = useState({});
   const [sort, setSort] = useState({ key: "lastContact", dir: "desc" });
-  // "Mes leads": the rows whose Commercial en charge is the signed-in user
+  // An agent only ever receives his own leads (the server cuts the sheet,
+  // routes/leads.js scopedFor); admins and managers get everything and can
+  // narrow it with the "Mes leads" toggle.
+  const ownOnly = user?.role === "marketing";
   const [mine, setMine] = useState(false);
+  const myId = user?._id ? String(user._id) : "";
   const myName = `${user?.firstName || ""} ${user?.lastName || ""}`.trim();
   // Phone just copied, for the short "Copié" confirmation on that row
   const [copiedKey, setCopiedKey] = useState(null);
@@ -219,7 +223,12 @@ const Leads = () => {
 
   const filtered = useMemo(() => {
     const active = Object.entries(filters).filter(([, v]) => v !== "" && v != null);
-    let out = mine ? rows.filter((row) => row.agent === myName) : rows;
+    // By id; the name only stands in for a sheet built before ids were sent
+    let out = mine
+      ? rows.filter((row) =>
+          row.agentId ? row.agentId === myId : row.agent === myName,
+        )
+      : rows;
     if (active.length > 0) {
       out = out.filter((row) =>
         active.every(([key, value]) => {
@@ -276,7 +285,7 @@ const Leads = () => {
       }
       return cellText(a, key).localeCompare(cellText(b, key), "fr") * mul;
     });
-  }, [rows, filters, sort, mine, myName]);
+  }, [rows, filters, sort, mine, myId, myName]);
 
   const copyPhone = async (row) => {
     const ok = await copyText(row.phone);
@@ -297,24 +306,27 @@ const Leads = () => {
 
         <div style={styles.header}>
           <div>
-            <h2 style={styles.title}>Leads</h2>
+            <h2 style={styles.title}>{ownOnly ? "Mes leads" : "Leads"}</h2>
             <p style={styles.sub}>
               {loading
                 ? "Chargement…"
                 : `${filtered.length} prospect${filtered.length > 1 ? "s" : ""}` +
-                  (activeCount > 0 || mine ? ` sur ${rows.length}` : "")}
+                  (activeCount > 0 || mine ? ` sur ${rows.length}` : "") +
+                  (ownOnly ? " dont vous êtes le commercial en charge" : "")}
             </p>
           </div>
           <div style={styles.headerRight}>
-            <button
-              className="support-btn"
-              style={{ ...styles.ghost, ...(mine ? styles.ghostOn : {}) }}
-              onClick={() => setMine((v) => !v)}
-              title="Les prospects dont vous êtes le commercial en charge"
-              aria-pressed={mine}
-            >
-              <UserRound size={13} /> Mes leads
-            </button>
+            {!ownOnly && (
+              <button
+                className="support-btn"
+                style={{ ...styles.ghost, ...(mine ? styles.ghostOn : {}) }}
+                onClick={() => setMine((v) => !v)}
+                title="Les prospects dont vous êtes le commercial en charge"
+                aria-pressed={mine}
+              >
+                <UserRound size={13} /> Mes leads
+              </button>
+            )}
             {activeCount > 0 && (
               <button
                 className="support-btn"
@@ -430,7 +442,9 @@ const Leads = () => {
                 <tr>
                   <td colSpan={COLUMNS.length} style={styles.empty}>
                     {rows.length === 0
-                      ? "Aucun prospect sur cette période."
+                      ? ownOnly
+                        ? "Aucun prospect ne vous est attribué sur cette période. Un prospect devient le vôtre dès que vous lui répondez depuis l’inbox."
+                        : "Aucun prospect sur cette période."
                       : "Aucun prospect ne correspond à ces filtres."}
                   </td>
                 </tr>

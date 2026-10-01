@@ -597,10 +597,17 @@ async function buildProspectRows({ platform, since }) {
     // newest lock across the person's keys. A lock whose user was deleted
     // populates to null and does not count. Without a lock, whoever sent the
     // newest delivered CRM reply stands in; with neither, nobody is named.
-    const agent =
-      fullName(lock?.lockedBy) ||
-      (p.replierId && replierName.get(p.replierId)) ||
-      UNASSIGNED;
+    // The same person as an id, so the Leads API can hand an agent his own
+    // rows without comparing names (two users may share one).
+    const holder = fullName(lock?.lockedBy) ? lock.lockedBy : null;
+    const replier =
+      !holder && p.replierId && replierName.get(p.replierId) ? p.replierId : null;
+    const agent = holder
+      ? fullName(holder)
+      : replier
+        ? replierName.get(replier)
+        : UNASSIGNED;
+    const agentId = holder ? String(holder._id) : replier ? String(replier) : null;
 
     const frein = freins.get(`${p.platform}:${p.personId}`) || null;
     // Full-history activity when the widening pass supplied it, else the
@@ -645,6 +652,7 @@ async function buildProspectRows({ platform, since }) {
       comment,
       rdvAt,
       agent,
+      agentId,
       messagesIn: p.messagesIn,
       messagesOut: p.messagesOut,
       lastMessage: cutText(p.lastMessage || "", 160),

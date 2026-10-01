@@ -28,6 +28,7 @@ export const DEFAULT_STAGE = "nouveau_lead";
 
 export const TYPOLOGIES = [
   { key: "omra", label: "Omra" },
+  { key: "omra_a_la_carte", label: "Omra à la carte" },
   { key: "visa", label: "Visa" },
   { key: "billetterie", label: "Billetterie" },
   { key: "hotels_sejours", label: "Hôtels / Séjours" },

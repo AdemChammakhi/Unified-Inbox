@@ -49,6 +49,7 @@ const UNREACHABLE_STAGE = "client_injoignable";
 
 const TYPOLOGIES = Object.freeze([
   { key: "omra", label: "Omra" },
+  { key: "omra_a_la_carte", label: "Omra à la carte" },
   { key: "visa", label: "Visa" },
   { key: "billetterie", label: "Billetterie" },
   { key: "hotels_sejours", label: "Hôtels / Séjours" },
