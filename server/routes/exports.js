@@ -649,6 +649,10 @@ async function buildProspectRows({ platform, since }) {
       awaitingReply: maturity.awaitingReply === true,
       frein: freinLabel(frein),
       freinCode: frein?.code || "",
+      freinNote: frein?.note || "",
+      // The customer id the dossier is keyed by (§6): what the Leads page
+      // sends back when an admin or manager corrects a row
+      customerId: p.personId,
       comment,
       rdvAt,
       agent,

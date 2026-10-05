@@ -6,14 +6,22 @@ import { useAuth } from "../context/AuthContext";
 import PlatformIcon from "../components/PlatformIcon";
 import ProspectExport from "../components/ProspectExport";
 import MaturityChip from "../components/MaturityChip";
+import FreinSelector from "../components/FreinSelector";
+import CommentField from "../components/CommentField";
 import {
   FREINS,
   MATURITY,
   MATURITY_RANK,
 } from "../constants/leadQualification";
-import { STAGE_LABELS, STAGE_COLORS, STAGES } from "../constants/pipeline";
+import {
+  STAGE_LABELS,
+  STAGE_COLORS,
+  STAGES,
+  TYPOLOGIES,
+  TYPOLOGY_LABELS,
+} from "../constants/pipeline";
 import { copyText } from "../constants/templates";
-import { RefreshCw, X, UserRound, Phone, Copy, Check } from "lucide-react";
+import { RefreshCw, X, UserRound, Phone, Copy, Check, Star } from "lucide-react";
 
 /**
  * Leads — the prospect sheet, in the app.
@@ -153,18 +161,27 @@ const Leads = () => {
   const myName = `${user?.firstName || ""} ${user?.lastName || ""}`.trim();
   // Phone just copied, for the short "Copié" confirmation on that row
   const [copiedKey, setCopiedKey] = useState(null);
+  // Corrections from the sheet (admins and managers): stage, typologie,
+  // priority, motif and comment, saved on the customer's dossier. None of
+  // them moves the lead: "Commercial en charge" comes from the conversation
+  // lock and the latest reply, never from who edited the dossier.
+  const canEdit = user?.role === "admin" || user?.role === "manager";
+  const [editError, setEditError] = useState("");
 
   // One request at a time: switching the period cancels the previous fetch
   // so an older, slower answer cannot land on top of the newer one, and the
   // rows already on screen stay visible while the next period loads.
   const abortRef = useRef(null);
 
-  const load = useCallback(async () => {
+  // `silent` refreshes the rows behind the table instead of replacing it
+  // with "Chargement…" — used after a correction, when the sheet is
+  // rebuilt only to recompute the maturity.
+  const load = useCallback(async (opts) => {
     if (!user?.token) return;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-    setLoading(true);
+    if (!(opts && opts.silent === true)) setLoading(true);
     setError("");
     try {
       const res = await axios.get("/api/leads", {
@@ -295,6 +312,68 @@ const Leads = () => {
     setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
   };
 
+  // One row per person: platform + customer id identifies it across sorts
+  const rowKey = (r) => `${r.platform}:${r.customerId || r.name}`;
+  const patchRow = (r, changes) =>
+    setRows((prev) =>
+      prev.map((x) => (rowKey(x) === rowKey(r) ? { ...x, ...changes } : x)),
+    );
+  const showEditError = (err) => {
+    setEditError(
+      err?.response?.data?.message || "Enregistrement impossible. Réessayez.",
+    );
+    setTimeout(() => setEditError(""), 5000);
+  };
+
+  /** Stage, typologie, priority or comment, through the dossier API. */
+  const saveDossier = async (r, patch) => {
+    try {
+      const res = await axios.put(
+        "/api/classifications",
+        { conversationId: r.customerId, platform: r.platform, ...patch },
+        { headers: { Authorization: `Bearer ${user?.token}` } },
+      );
+      const d = res.data?.dossier || {};
+      patchRow(r, {
+        classification: d.stage,
+        classificationLabel: STAGE_LABELS[d.stage] || d.stage,
+        typologie: d.typologie || "",
+        typologieLabel: TYPOLOGY_LABELS[d.typologie] || "",
+        isPriority: d.isPriority === true,
+        comment: d.comment || "",
+        invoiceRef: d.invoiceRef || "",
+        rdvAt: d.appointmentAt || null,
+      });
+      // The stage and the flag feed the maturity: rebuild quietly
+      if (patch.stage !== undefined || patch.isPriority !== undefined) {
+        load({ silent: true });
+      }
+    } catch (err) {
+      showEditError(err);
+      throw err;
+    }
+  };
+
+  /** The motif / frein lives with the lead insights, not the dossier. */
+  const saveFrein = async (r, code, note) => {
+    try {
+      const res = await axios.put(
+        "/api/lead-insights/frein",
+        { platform: r.platform, customerId: r.customerId, code, note },
+        { headers: { Authorization: `Bearer ${user?.token}` } },
+      );
+      const f = res.data?.frein || {};
+      patchRow(r, {
+        frein: f.label || "",
+        freinCode: f.code || "",
+        freinNote: f.note || "",
+      });
+    } catch (err) {
+      showEditError(err);
+      throw err;
+    }
+  };
+
   const setFilter = (key, value) =>
     setFilters((prev) => ({ ...prev, [key]: value }));
   const activeCount = Object.values(filters).filter((v) => v !== "" && v != null).length;
@@ -366,6 +445,11 @@ const Leads = () => {
         </div>
 
         {error && <div style={styles.error}>{error}</div>}
+        {editError && (
+          <div style={styles.error} role="alert">
+            {editError}
+          </div>
+        )}
         {truncated && (
           <div style={styles.warn}>
             ⚠ Beaucoup de messages sur cette période : « Premier contact » et les
@@ -451,7 +535,7 @@ const Leads = () => {
               ) : (
                 filtered.map((r, i) => (
                   <tr
-                    key={`${r.platform}-${r.name}-${i}`}
+                    key={rowKey(r)}
                     style={{
                       backgroundColor:
                         i % 2 ? "var(--bg-hover)" : "transparent",
@@ -474,17 +558,105 @@ const Leads = () => {
                           CLASSIFICATION_COLORS.nouveau_lead;
                         return (
                           <td key={c.key} style={styles.td}>
-                            <span
+                            {canEdit && r.customerId ? (
+                              <select
+                                value={r.classification || "nouveau_lead"}
+                                onChange={(e) =>
+                                  saveDossier(r, { stage: e.target.value }).catch(() => {})
+                                }
+                                title="Changer l’étape — le commercial en charge ne change pas"
+                                style={{
+                                  ...styles.classChip,
+                                  ...styles.cellSelect,
+                                  color,
+                                  borderColor: `${color}66`,
+                                  backgroundColor: `${color}1a`,
+                                }}
+                              >
+                                {STAGES.map((s) => (
+                                  <option key={s.key} value={s.key}>{s.label}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span
+                                style={{
+                                  ...styles.classChip,
+                                  color,
+                                  borderColor: `${color}66`,
+                                  backgroundColor: `${color}1a`,
+                                }}
+                              >
+                                {CLASSIFICATION_LABELS[r.classification] ||
+                                  r.classification}
+                              </span>
+                            )}
+                          </td>
+                        );
+                      }
+                      if (canEdit && r.customerId && c.key === "typologie") {
+                        return (
+                          <td key={c.key} style={styles.td}>
+                            <select
+                              value={r.typologie || ""}
+                              onChange={(e) =>
+                                saveDossier(r, { typologie: e.target.value }).catch(() => {})
+                              }
+                              title="Typologie de la demande"
+                              style={styles.plainSelect}
+                            >
+                              <option value="">—</option>
+                              {TYPOLOGIES.map((t) => (
+                                <option key={t.key} value={t.key}>{t.label}</option>
+                              ))}
+                            </select>
+                          </td>
+                        );
+                      }
+                      if (canEdit && r.customerId && c.key === "isPriority") {
+                        return (
+                          <td key={c.key} style={styles.td}>
+                            <button
+                              type="button"
+                              className="support-btn"
+                              aria-pressed={Boolean(r.isPriority)}
+                              title={r.isPriority ? "Retirer la priorité" : "Marquer prioritaire"}
+                              onClick={() =>
+                                saveDossier(r, { isPriority: !r.isPriority }).catch(() => {})
+                              }
                               style={{
-                                ...styles.classChip,
-                                color,
-                                borderColor: `${color}66`,
-                                backgroundColor: `${color}1a`,
+                                ...styles.starBtn,
+                                ...(r.isPriority ? styles.starOn : {}),
                               }}
                             >
-                              {CLASSIFICATION_LABELS[r.classification] ||
-                                r.classification}
-                            </span>
+                              <Star size={12} fill={r.isPriority ? "currentColor" : "none"} />
+                              {r.isPriority ? "Oui" : "—"}
+                            </button>
+                          </td>
+                        );
+                      }
+                      if (canEdit && r.customerId && c.key === "frein") {
+                        return (
+                          <td key={c.key} style={styles.td}>
+                            <FreinSelector
+                              value={
+                                r.freinCode
+                                  ? { code: r.freinCode, note: r.freinNote || "", label: r.frein }
+                                  : null
+                              }
+                              onSave={(code, note) => saveFrein(r, code, note)}
+                              compact
+                            />
+                          </td>
+                        );
+                      }
+                      if (canEdit && r.customerId && c.key === "comment") {
+                        return (
+                          <td key={c.key} style={{ ...styles.td, overflow: "visible" }}>
+                            <CommentField
+                              value={r.comment || ""}
+                              onSave={(comment) => saveDossier(r, { comment })}
+                              compact
+                            />
                           </td>
                         );
                       }
@@ -702,6 +874,44 @@ const styles = {
     color: "var(--accent)",
     borderColor: "var(--accent)",
     backgroundColor: "var(--accent-glow)",
+  },
+  // Corrections in the cells (admins and managers)
+  cellSelect: {
+    cursor: "pointer",
+    outline: "none",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+    maxWidth: "100%",
+  },
+  plainSelect: {
+    padding: "3px 6px",
+    borderRadius: 6,
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-card)",
+    color: "var(--text-primary)",
+    fontSize: 12,
+    cursor: "pointer",
+    outline: "none",
+    maxWidth: "100%",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  starBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "3px 8px",
+    borderRadius: 6,
+    border: "1px solid var(--border-primary)",
+    background: "transparent",
+    color: "var(--text-muted)",
+    fontSize: 12,
+    cursor: "pointer",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  starOn: {
+    color: "#E3A63C",
+    borderColor: "#E3A63C88",
+    backgroundColor: "#E3A63C1a",
+    fontWeight: 700,
   },
   phoneCell: { display: "inline-flex", alignItems: "center", gap: 6 },
   phoneLink: {
