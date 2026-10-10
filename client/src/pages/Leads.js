@@ -167,6 +167,20 @@ const Leads = () => {
   // lock and the latest reply, never from who edited the dossier.
   const canEdit = user?.role === "admin" || user?.role === "manager";
   const [editError, setEditError] = useState("");
+  // Reassigning a discussion (admin only): the "Commercial" cell becomes a
+  // picker. It moves the conversation lock to the chosen agent, who then
+  // replies to it as usual; the previous agent can no longer answer it.
+  const canAssign = user?.role === "admin";
+  const [agents, setAgents] = useState([]);
+  useEffect(() => {
+    if (!canAssign || !user?.token) return;
+    axios
+      .get("/api/locks/agents", {
+        headers: { Authorization: `Bearer ${user.token}` },
+      })
+      .then((res) => setAgents(res.data?.agents || []))
+      .catch(() => setAgents([]));
+  }, [canAssign, user?.token]);
 
   // One request at a time: switching the period cancels the previous fetch
   // so an older, slower answer cannot land on top of the newer one, and the
@@ -351,6 +365,37 @@ const Leads = () => {
     } catch (err) {
       showEditError(err);
       throw err;
+    }
+  };
+
+  /** Give the discussion to another agent (or release it with ""). */
+  const assignAgent = async (r, agentId) => {
+    const target = agents.find((a) => a._id === agentId);
+    const label = target ? target.name : "personne (discussion libérée)";
+    if (
+      !window.confirm(
+        `Attribuer la discussion avec ${r.name} à ${label} ?\n` +
+          (r.agentId
+            ? `${r.agent} ne pourra plus y répondre.`
+            : "Elle n’était attribuée à personne."),
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await axios.put(
+        "/api/locks/assign",
+        { platform: r.platform, customerId: r.customerId, agentId: agentId || null },
+        { headers: { Authorization: `Bearer ${user?.token}` } },
+      );
+      patchRow(r, {
+        agentId: res.data?.agentId || null,
+        agent: res.data?.agent || "Non attribué",
+      });
+      // A released discussion falls back to its latest replier: rebuild
+      load({ silent: true });
+    } catch (err) {
+      showEditError(err);
     }
   };
 
@@ -646,6 +691,33 @@ const Leads = () => {
                               onSave={(code, note) => saveFrein(r, code, note)}
                               compact
                             />
+                          </td>
+                        );
+                      }
+                      if (canAssign && r.customerId && c.key === "agent" && agents.length > 0) {
+                        const known = agents.some((a) => a._id === r.agentId);
+                        return (
+                          <td key={c.key} style={styles.td}>
+                            <select
+                              value={r.agentId || ""}
+                              onChange={(e) => assignAgent(r, e.target.value)}
+                              title="Réattribuer la discussion — le nouvel agent y répond normalement"
+                              style={{
+                                ...styles.plainSelect,
+                                ...(r.agentId ? {} : { color: "var(--text-muted)" }),
+                              }}
+                            >
+                              <option value="">Non attribué</option>
+                              {r.agentId && !known && (
+                                <option value={r.agentId}>{r.agent}</option>
+                              )}
+                              {agents.map((a) => (
+                                <option key={a._id} value={a._id}>
+                                  {a.name}
+                                  {a.role !== "marketing" ? ` (${a.role})` : ""}
+                                </option>
+                              ))}
+                            </select>
                           </td>
                         );
                       }
