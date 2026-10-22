@@ -34,7 +34,8 @@ const {
 } = require("../utils/leadFrein");
 const { THRESHOLDS, computeMaturity } = require("../utils/leadMaturity");
 
-const PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email"]);
+// "telephone": incoming-call leads, so their frein can be recorded from Leads
+const PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email", "telephone"]);
 const MAX_ITEMS = 200;
 const MAX_ID_LENGTH = 512;
 

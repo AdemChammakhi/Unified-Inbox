@@ -27,7 +27,7 @@ const platformIdentitySchema = new mongoose.Schema(
   {
     platform: {
       type: String,
-      enum: ["facebook", "instagram", "whatsapp", "email", "tiktok"],
+      enum: ["facebook", "instagram", "whatsapp", "email", "tiktok", "telephone"],
       required: true,
     },
     /** Platform-native user/sender ID (PSID, IGSID, phone number, email, …). */

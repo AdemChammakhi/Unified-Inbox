@@ -19,6 +19,8 @@ const VALID_PLATFORMS = new Set([
   "email",
   "messenger",
   "tiktok",
+  // Leads recorded from an incoming phone call (models/IncomingCall.js)
+  "telephone",
 ]);
 
 /**

@@ -18,6 +18,10 @@ const router = express.Router();
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
 const { buildProspectRows } = require("./exports");
+const IncomingCall = require("../models/IncomingCall");
+const Classification = require("../models/Classification");
+const ConversationLock = require("../models/ConversationLock");
+const { isTypology, TYPOLOGY_KEYS } = require("../constants/pipeline");
 
 const CACHE_TTL_MS = 30 * 1000;
 const _cache = new Map(); // "<platform>:<range>" -> { at, rows }
@@ -126,6 +130,141 @@ router.get("/", protect, authorize("admin", "manager", "marketing"), async (req,
   } catch (err) {
     console.error("[Leads] failed:", err.message);
     return res.status(500).json({ message: "Impossible de charger les leads" });
+  }
+});
+
+const oneLine = (v, max) =>
+  typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
+
+/**
+ * Digits of a phone number as dialled. A Tunisian local number (8 digits)
+ * gets the 216 country code, so "98 123 456" and "+216 98 123 456" are the
+ * same caller.
+ */
+function phoneDigits(raw) {
+  let digits = String(raw || "").replace(/\D/g, "");
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.length === 8) digits = `216${digits}`;
+  return digits;
+}
+
+/** "+216 98 123 456" for a Tunisian number, "+<digits>" otherwise. */
+function phoneDisplay(digits) {
+  const m = /^216(\d{2})(\d{3})(\d{3})$/.exec(digits);
+  return m ? `+216 ${m[1]} ${m[2]} ${m[3]}` : `+${digits}`;
+}
+
+// POST /api/leads/incoming-call
+// { name, phone, email?, typologie?, pax?, comment? }
+// Records a prospect who called the agency, so phone leads are followed in
+// the same sheet as the others. Every role may record one; the agent who
+// records it is put in charge (the conversation lock), so it lands in his
+// "Mes leads". A number already recorded is the same lead: the call is
+// counted on it, its fields are completed, and its agent is kept.
+router.post("/incoming-call", protect, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const name = oneLine(body.name, 120);
+    if (!name) {
+      return res.status(400).json({ message: "Le nom du prospect est obligatoire." });
+    }
+    if (typeof body.phone !== "string") {
+      return res.status(400).json({ message: "Le numéro de téléphone est obligatoire." });
+    }
+    const digits = phoneDigits(body.phone);
+    if (digits.length < 8 || digits.length > 15) {
+      return res.status(400).json({ message: "Numéro de téléphone invalide." });
+    }
+    const email = oneLine(body.email, 160).toLowerCase();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: "Adresse email invalide." });
+    }
+    const typologie = body.typologie === undefined || body.typologie === null ? "" : body.typologie;
+    if (typologie !== "" && !isTypology(typologie)) {
+      return res.status(400).json({
+        message: `Typologie invalide. Valeurs possibles : ${TYPOLOGY_KEYS.join(", ")}`,
+      });
+    }
+    let pax = null;
+    if (body.pax !== undefined && body.pax !== null && body.pax !== "") {
+      pax = typeof body.pax === "string" ? Number(body.pax.trim()) : body.pax;
+      if (!Number.isInteger(pax) || pax < 1 || pax > 999) {
+        return res.status(400).json({ message: "Nombre de PAX invalide (un entier entre 1 et 999)." });
+      }
+    }
+    if (body.comment !== undefined && body.comment !== null && typeof body.comment !== "string") {
+      return res.status(400).json({ message: "Commentaire invalide." });
+    }
+    const comment = String(body.comment || "").replace(/\r\n?/g, "\n").trim().slice(0, 1000);
+
+    const customerId = `appel-${digits}`;
+    const now = new Date();
+    const existing = await IncomingCall.findOne({ customerId }).lean();
+    const call = await IncomingCall.findOneAndUpdate(
+      { customerId },
+      existing
+        ? {
+            $set: { name, lastCallAt: now, ...(email ? { email } : {}) },
+            $inc: { callCount: 1 },
+          }
+        : {
+            $setOnInsert: {
+              customerId,
+              name,
+              phone: phoneDisplay(digits),
+              email,
+              firstCallAt: now,
+              lastCallAt: now,
+              callCount: 1,
+              createdBy: req.user._id,
+            },
+          },
+      { upsert: true, new: true },
+    ).lean();
+
+    // Dossier: a new lead starts at "Contact établi" — the agent has just
+    // spoken to the customer. On a repeat call only the fields given are set.
+    const set = { classifiedBy: req.user._id };
+    if (typologie) set.typologie = typologie;
+    if (pax !== null) set.pax = pax;
+    if (comment) {
+      set.comment = comment;
+      set.commentBy = req.user._id;
+      set.commentAt = now;
+    }
+    await Classification.updateOne(
+      { conversationId: customerId, platform: "telephone" },
+      { $set: set, $setOnInsert: { stage: "contact_etabli" } },
+      { upsert: true, runValidators: true },
+    );
+
+    // In charge: the recording agent, unless someone already holds the lead
+    const held = await ConversationLock.findOne({ conversationId: customerId, platform: "telephone" })
+      .populate("lockedBy", "firstName lastName")
+      .lean();
+    if (!held) {
+      await ConversationLock.updateOne(
+        { conversationId: customerId, platform: "telephone" },
+        { $setOnInsert: { lockedBy: req.user._id, lockedAt: now } },
+        { upsert: true },
+      );
+    }
+
+    clearLeadsCache();
+    return res.status(existing ? 200 : 201).json({
+      created: !existing,
+      customerId,
+      name: call.name,
+      phone: call.phone,
+      callCount: call.callCount,
+      heldBy:
+        held && held.lockedBy
+          ? `${held.lockedBy.firstName || ""} ${held.lockedBy.lastName || ""}`.trim()
+          : null,
+    });
+  } catch (err) {
+    console.error("[Leads] incoming call failed:", err.message);
+    return res.status(500).json({ message: "Impossible d'enregistrer l'appel." });
   }
 });
 

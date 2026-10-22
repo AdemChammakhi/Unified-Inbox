@@ -29,6 +29,7 @@ const publicDossier = (c) => ({
   typologie: c.typologie || "",
   invoiceRef: c.invoiceRef || "",
   phone: c.phone || "",
+  pax: Number.isInteger(c.pax) ? c.pax : null,
   isPriority: c.isPriority === true,
   appointmentAt: c.appointmentAt || null,
   appointmentPlace: c.appointmentPlace || "",
@@ -63,7 +64,7 @@ router.get("/", protect, async (req, res) => {
     const filter = safePlatform ? { platform: safePlatform } : {};
     const rows = await Classification.find(filter)
       .select(
-        "conversationId stage typologie invoiceRef phone isPriority appointmentAt appointmentPlace appointmentAgency appointmentAgencyName appointmentAgent comment commentAt",
+        "conversationId stage typologie invoiceRef phone pax isPriorityappointmentAt appointmentPlace appointmentAgency appointmentAgencyName appointmentAgent comment commentAt",
       )
       .lean();
 
@@ -149,6 +150,20 @@ router.put("/", protect, async (req, res) => {
         });
       }
       set.phone = phone;
+    }
+
+    if (body.pax !== undefined) {
+      if (body.pax === null || body.pax === "") {
+        set.pax = null;
+      } else {
+        const pax = typeof body.pax === "string" ? Number(body.pax.trim()) : body.pax;
+        if (!Number.isInteger(pax) || pax < 1 || pax > 999) {
+          return res.status(400).json({
+            message: "Nombre de PAX invalide (un entier entre 1 et 999).",
+          });
+        }
+        set.pax = pax;
+      }
     }
 
     if (body.isPriority !== undefined) {

@@ -29,6 +29,7 @@ const ExcelJS = require("exceljs");
 const Message = require("../models/Message");
 const Classification = require("../models/Classification");
 const ConversationLock = require("../models/ConversationLock");
+const IncomingCall = require("../models/IncomingCall");
 const User = require("../models/User");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
@@ -42,6 +43,7 @@ const PLATFORM_LABELS = {
   email: "Email",
   messenger: "Messenger",
   tiktok: "TikTok",
+  telephone: "Téléphone",
 };
 
 // Pipeline stages and typologies: labels from the shared constants
@@ -172,7 +174,7 @@ function fallbackName(platform, personId) {
  * Build the prospect rows for a platform filter + date range.
  * @returns {Promise<Array<object>>} sorted by last contact, newest first
  */
-async function buildProspectRows({ platform, since }) {
+async function buildMessageRows({ platform, since }) {
   const matchPlatform = platform
     ? { platform }
     : { platform: { $in: ["instagram", "facebook", "whatsapp", "email"] } };
@@ -543,7 +545,7 @@ async function buildProspectRows({ platform, since }) {
   const [classifications, locks, repliers, freins] = await Promise.all([
     Classification.find({ conversationId: { $in: allConvIds } })
       .select(
-        "conversationId platform stage typologie invoiceRef phone isPriority appointmentAt comment updatedAt",
+        "conversationId platform stage typologie invoiceRef phone pax isPriority appointmentAt comment updatedAt",
       )
       .lean(),
     ConversationLock.find({ conversationId: { $in: allConvIds } })
@@ -640,6 +642,7 @@ async function buildProspectRows({ platform, since }) {
       classificationLabel: STAGE_LABEL[classification] || classification,
       typologie,
       typologieLabel: TYPOLOGY_LABEL[typologie] || "",
+      pax: Number.isInteger(cls?.pax) ? cls.pax : null,
       invoiceRef,
       isPriority,
       maturity: maturity.label,
@@ -670,6 +673,134 @@ async function buildProspectRows({ platform, since }) {
   return rows;
 }
 
+const ddmmTunis = new Intl.DateTimeFormat("fr-FR", {
+  timeZone: "Africa/Tunis",
+  day: "2-digit",
+  month: "2-digit",
+});
+
+/**
+ * Leads recorded from an incoming phone call (models/IncomingCall.js). They
+ * have no messages, so they are not found by the message scan: their row is
+ * built from the call record and the same dossier / lock / frein records the
+ * other channels use, keyed by customerId on the "telephone" platform.
+ *
+ * Maturity: the call is the prospect's contact and it was answered, so the
+ * last call stands for both the last incoming and the last outgoing message
+ * — Chaud right after the call, cooling with time like any lead.
+ */
+async function buildCallRows({ since }) {
+  const calls = await IncomingCall.find({})
+    .sort({ lastCallAt: -1 })
+    .limit(5000)
+    .lean();
+  if (calls.length === 0) return [];
+  const ids = calls.map((c) => c.customerId);
+  const creatorIds = [...new Set(calls.map((c) => c.createdBy).filter(Boolean).map(String))];
+  const [classes, locks, creators, freins] = await Promise.all([
+    Classification.find({ platform: "telephone", conversationId: { $in: ids } })
+      .select("conversationId stage typologie invoiceRef pax isPriority appointmentAt comment updatedAt")
+      .lean(),
+    ConversationLock.find({ platform: "telephone", conversationId: { $in: ids } })
+      .populate("lockedBy", "firstName lastName")
+      .lean(),
+    creatorIds.length ? User.find({ _id: { $in: creatorIds } }).select("firstName lastName").lean() : [],
+    getFreins("telephone", ids).catch(() => new Map()),
+  ]);
+  const clsOf = new Map(classes.map((c) => [c.conversationId, c]));
+  const lockOf = new Map(locks.map((l) => [l.conversationId, l]));
+  const creatorOf = new Map(creators.map((u) => [String(u._id), u]));
+  const name = (u) => (u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "");
+  const now = new Date();
+
+  const rows = [];
+  for (const call of calls) {
+    const cls = clsOf.get(call.customerId) || null;
+    const lastContact = new Date(
+      Math.max(
+        new Date(call.lastCallAt || 0).getTime(),
+        new Date(cls?.updatedAt || 0).getTime(),
+      ),
+    );
+    if (since && lastContact < since) continue;
+
+    const stage = cls?.stage || DEFAULT_STAGE;
+    const typologie = cls?.typologie || "";
+    const isPriority = cls?.isPriority === true;
+    const rdvAt = cls?.appointmentAt || null;
+    const frein = freins.get(call.customerId) || null;
+    // In charge: the lock holder (set when the call was recorded, or by an
+    // admin's reassignment); once released, the agent who recorded it.
+    const lock = lockOf.get(call.customerId);
+    const holder = name(lock?.lockedBy) ? lock.lockedBy : null;
+    const creator = call.createdBy ? creatorOf.get(String(call.createdBy)) : null;
+    const owner = holder || creator || null;
+
+    const maturity = computeMaturity({
+      messagesIn: 1,
+      messagesOut: 1,
+      lastIncomingAt: call.lastCallAt,
+      lastOutgoingAt: call.lastCallAt,
+      stage,
+      isPriority,
+      appointmentAt: rdvAt,
+      frein,
+      now,
+    });
+    const repeat = call.callCount > 1 ? ` (${call.callCount} appels)` : "";
+
+    rows.push({
+      platform: "telephone",
+      source: "Appel entrant",
+      name: call.name,
+      phone: call.phone,
+      email: call.email || "",
+      firstContact: call.firstCallAt,
+      lastContact,
+      classification: stage,
+      classificationLabel: STAGE_LABEL[stage] || stage,
+      typologie,
+      typologieLabel: TYPOLOGY_LABEL[typologie] || "",
+      pax: Number.isInteger(cls?.pax) ? cls.pax : null,
+      invoiceRef: cls?.invoiceRef || "",
+      isPriority,
+      maturity: maturity.label,
+      maturityLevel: maturity.level,
+      maturityReason: maturity.reason,
+      awaitingReply: false,
+      frein: freinLabel(frein),
+      freinCode: frein?.code || "",
+      freinNote: frein?.note || "",
+      customerId: call.customerId,
+      comment: String(cls?.comment || "").replace(/\s+/g, " ").trim(),
+      rdvAt,
+      agent: owner ? name(owner) : UNASSIGNED,
+      agentId: owner ? String(owner._id) : null,
+      messagesIn: 0,
+      messagesOut: 0,
+      lastMessage: `Appel entrant du ${ddmmTunis.format(new Date(call.lastCallAt))}${repeat}`,
+    });
+  }
+  return rows;
+}
+
+/**
+ * The prospect sheet: the leads found in the messages plus the leads
+ * recorded from incoming calls, newest contact first.
+ */
+async function buildProspectRows({ platform, since }) {
+  const wantCalls = !platform || platform === "telephone";
+  const wantMessages = !platform || platform !== "telephone";
+  const [messageRows, callRows] = await Promise.all([
+    wantMessages ? buildMessageRows({ platform, since }) : [],
+    wantCalls ? buildCallRows({ since }) : [],
+  ]);
+  const rows = [...messageRows, ...callRows];
+  rows.sort((a, b) => new Date(b.lastContact) - new Date(a.lastContact));
+  rows.truncated = Boolean(messageRows.truncated);
+  return rows;
+}
+
 const HEADERS = [
   "Plateforme",
   "Source",
@@ -680,9 +811,8 @@ const HEADERS = [
   "Dernier contact",
   "Étape",
   "Typologie",
-  "Prioritaire",
+  "Nombre de PAX",
   "Maturité",
-  "À répondre",
   "Motif / frein",
   "Commentaire",
   "RDV le",
@@ -694,7 +824,7 @@ const HEADERS = [
 ];
 
 // Column widths, in HEADERS order — keep the two arrays the same length
-const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 11, 10, 11, 28, 40, 17, 16, 20, 9, 9, 46];
+const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 10, 10, 28, 40, 17, 16, 20, 9, 9, 46];
 
 // 1-based XLSX column numbers, derived so an inserted column cannot shift them
 const CLASS_COL = HEADERS.indexOf("Étape") + 1;
@@ -711,9 +841,8 @@ function rowValues(r) {
     fmtDate(r.lastContact),
     r.classificationLabel,
     r.typologieLabel || "",
-    r.isPriority ? "Oui" : "",
+    Number.isInteger(r.pax) ? r.pax : "",
     r.maturity || "",
-    r.awaitingReply ? "Oui" : "",
     r.frein || "",
     r.comment || "",
     fmtDate(r.rdvAt),

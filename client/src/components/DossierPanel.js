@@ -36,8 +36,14 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
   const d = dossier || {};
   const [invoice, setInvoice] = useState(d.invoiceRef || "");
   const [phone, setPhone] = useState(d.phone || "");
+  const storedPax = Number.isInteger(d.pax) ? String(d.pax) : "";
+  const [pax, setPax] = useState(storedPax);
   const [saving, setSaving] = useState("");
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setPax(storedPax);
+  }, [storedPax]);
 
   useEffect(() => {
     setInvoice(d.invoiceRef || "");
@@ -76,6 +82,36 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
               <option key={t.key} value={t.key}>{t.label}</option>
             ))}
           </select>
+        </label>
+
+        {/* Number of travellers the request is for */}
+        <label style={styles.field}>
+          <span style={styles.label}>Nombre de PAX</span>
+          <span style={styles.inline}>
+            <input
+              style={{ ...styles.input, flex: 1 }}
+              type="number"
+              min={1}
+              max={999}
+              value={pax}
+              placeholder="ex. 4"
+              disabled={!canEdit || busy("pax")}
+              onChange={(e) => setPax(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save("pax", { pax: pax.trim() === "" ? null : Number(pax) });
+              }}
+            />
+            {canEdit && pax.trim() !== storedPax && (
+              <button
+                className="inbox-send-action"
+                style={styles.smallBtn}
+                disabled={busy("pax")}
+                onClick={() => save("pax", { pax: pax.trim() === "" ? null : Number(pax) })}
+              >
+                {busy("pax") ? "…" : "Enregistrer"}
+              </button>
+            )}
+          </span>
         </label>
 
         <label style={styles.field}>

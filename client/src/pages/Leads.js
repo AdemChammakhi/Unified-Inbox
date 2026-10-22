@@ -21,7 +21,51 @@ import {
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
 import { copyText } from "../constants/templates";
-import { RefreshCw, X, UserRound, Phone, Copy, Check, Star } from "lucide-react";
+import { RefreshCw, X, UserRound, Phone, Copy, Check, PhoneIncoming } from "lucide-react";
+
+/**
+ * PAX in a sheet cell: a small number field saved on Enter or when the
+ * cursor leaves it; empty clears it. Follows the stored value after saves.
+ */
+const PaxCell = ({ value, onSave }) => {
+  const stored = Number.isInteger(value) ? String(value) : "";
+  const [text, setText] = useState(stored);
+  useEffect(() => setText(stored), [stored]);
+  const commit = () => {
+    const t = text.trim();
+    if (t === stored) return;
+    onSave(t === "" ? null : Number(t)).catch(() => setText(stored));
+  };
+  return (
+    <input
+      type="number"
+      min={1}
+      max={999}
+      value={text}
+      placeholder="—"
+      title="Nombre de PAX (voyageurs)"
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") setText(stored);
+      }}
+      style={{
+        width: 60,
+        padding: "3px 6px",
+        borderRadius: 6,
+        border: "1px solid var(--border-primary)",
+        backgroundColor: "var(--bg-card)",
+        color: "var(--text-primary)",
+        fontSize: 12,
+        outline: "none",
+        fontFamily: "'Space Grotesk', sans-serif",
+      }}
+    />
+  );
+};
+
+const EMPTY_CALL = { name: "", phone: "", email: "", typologie: "", pax: "", comment: "" };
 
 /**
  * Leads — the prospect sheet, in the app.
@@ -46,6 +90,7 @@ const PLATFORM_LABELS = {
   facebook: "Facebook",
   whatsapp: "WhatsApp",
   email: "Email",
+  telephone: "Téléphone",
 };
 
 /** Column definitions drive the header, the filter row and the body. */
@@ -59,9 +104,8 @@ const COLUMNS = [
   { key: "lastContact", label: "Dernier contact", type: "date", width: 140 },
   { key: "classification", label: "Étape", type: "select", width: 140 },
   { key: "typologie", label: "Typologie", type: "select", width: 150 },
-  { key: "isPriority", label: "Prioritaire", type: "select", width: 100 },
+  { key: "pax", label: "PAX", type: "number", width: 84 },
   { key: "maturity", label: "Maturité", type: "select", width: 118 },
-  { key: "awaitingReply", label: "À répondre", type: "select", width: 110 },
   { key: "frein", label: "Motif / frein", type: "select", width: 180 },
   { key: "comment", label: "Commentaire", type: "text", width: 240 },
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
@@ -106,8 +150,7 @@ const cellText = (row, key) => {
   }
   if (key === "frein") return String(row.frein || "");
   if (key === "typologie") return String(row.typologieLabel || "");
-  if (key === "isPriority") return row.isPriority ? "Oui" : "";
-  if (key === "awaitingReply") return row.awaitingReply ? "Oui" : "";
+  if (key === "pax") return Number.isInteger(row.pax) ? String(row.pax) : "";
   const v = row[key];
   if (v === null || v === undefined) return "";
   if (key === "platform") return PLATFORM_LABELS[v] || v;
@@ -166,7 +209,18 @@ const Leads = () => {
   // them moves the lead: "Commercial en charge" comes from the conversation
   // lock and the latest reply, never from who edited the dossier.
   const canEdit = user?.role === "admin" || user?.role === "manager";
+  // Agents update their own leads here too (management's process note,
+  // 22 Oct 2026: "modifier leur qualification … ajouter des commentaires"
+  // from the Leads page). The server only ever sends an agent his own rows,
+  // and phone leads have no inbox conversation to edit them from.
+  const canEditRow = () => canEdit || user?.role === "marketing";
   const [editError, setEditError] = useState("");
+  // "+ Appel entrant": record a prospect who called (every role); the
+  // recording agent is put in charge of the lead.
+  const [callOpen, setCallOpen] = useState(false);
+  const [callForm, setCallForm] = useState(EMPTY_CALL);
+  const [callSaving, setCallSaving] = useState(false);
+  const [callNotice, setCallNotice] = useState(null); // { type, text }
   // Reassigning a discussion (admin only): the "Commercial" cell becomes a
   // picker. It moves the conversation lock to the chosen agent, who then
   // replies to it as usual; the previous agent can no longer answer it.
@@ -242,9 +296,7 @@ const Leads = () => {
         STAGES.map((s) => s.label),
       ),
       typologie: build("typologie"),
-      isPriority: build("isPriority"),
       maturity: orderedLike(present("maturity"), MATURITY_ORDER),
-      awaitingReply: build("awaitingReply"),
       frein: orderedLike(present("frein"), FREIN_ORDER),
       agent: build("agent"),
       // Offer "Non renseigné" only when some row actually lacks a frein.
@@ -356,6 +408,7 @@ const Leads = () => {
         isPriority: d.isPriority === true,
         comment: d.comment || "",
         invoiceRef: d.invoiceRef || "",
+        pax: Number.isInteger(d.pax) ? d.pax : null,
         rdvAt: d.appointmentAt || null,
       });
       // The stage and the flag feed the maturity: rebuild quietly
@@ -396,6 +449,42 @@ const Leads = () => {
       load({ silent: true });
     } catch (err) {
       showEditError(err);
+    }
+  };
+
+  const setCall = (k) => (e) => setCallForm((f) => ({ ...f, [k]: e.target.value }));
+  const saveCall = async (e) => {
+    e.preventDefault();
+    if (!callForm.name.trim() || !callForm.phone.trim()) {
+      setCallNotice({ type: "error", text: "Le nom et le téléphone sont obligatoires." });
+      return;
+    }
+    setCallSaving(true);
+    setCallNotice(null);
+    try {
+      const res = await axios.post(
+        "/api/leads/incoming-call",
+        { ...callForm, pax: callForm.pax === "" ? null : Number(callForm.pax) },
+        { headers: { Authorization: `Bearer ${user?.token}` } },
+      );
+      const d = res.data || {};
+      setCallNotice({
+        type: "ok",
+        text: d.created
+          ? `« ${d.name} » ajouté aux leads (Appel entrant).`
+          : `${d.phone} était déjà un lead : appel n° ${d.callCount} enregistré` +
+            (d.heldBy ? `, suivi par ${d.heldBy}.` : "."),
+      });
+      setCallForm(EMPTY_CALL);
+      setCallOpen(false);
+      load({ silent: true });
+    } catch (err) {
+      setCallNotice({
+        type: "error",
+        text: err?.response?.data?.message || "Enregistrement impossible. Réessayez.",
+      });
+    } finally {
+      setCallSaving(false);
     }
   };
 
@@ -485,9 +574,75 @@ const Leads = () => {
             >
               <RefreshCw size={13} />
             </button>
+            <button
+              className="support-btn"
+              style={{ ...styles.ghost, ...(callOpen ? styles.ghostOn : {}) }}
+              onClick={() => {
+                setCallOpen((v) => !v);
+                setCallNotice(null);
+              }}
+              title="Enregistrer un prospect qui a appelé l’agence"
+            >
+              <PhoneIncoming size={13} /> + Appel entrant
+            </button>
             <ProspectExport range={range} />
           </div>
         </div>
+
+        {callOpen && (
+          <form onSubmit={saveCall} style={styles.callCard}>
+            <div style={styles.callTitle}>
+              <PhoneIncoming size={14} /> Nouveau lead — appel entrant
+            </div>
+            <div style={styles.callGrid}>
+              <label style={styles.callField}>
+                <span style={styles.callLabel}>Nom du prospect *</span>
+                <input style={styles.callInput} value={callForm.name} onChange={setCall("name")} maxLength={120} required autoFocus />
+              </label>
+              <label style={styles.callField}>
+                <span style={styles.callLabel}>Téléphone *</span>
+                <input style={styles.callInput} type="tel" value={callForm.phone} onChange={setCall("phone")} maxLength={30} placeholder="98 123 456" required />
+              </label>
+              <label style={styles.callField}>
+                <span style={styles.callLabel}>Email</span>
+                <input style={styles.callInput} type="email" value={callForm.email} onChange={setCall("email")} maxLength={160} />
+              </label>
+              <label style={styles.callField}>
+                <span style={styles.callLabel}>Typologie</span>
+                <select style={styles.callInput} value={callForm.typologie} onChange={setCall("typologie")}>
+                  <option value="">— Non renseignée —</option>
+                  {TYPOLOGIES.map((t) => (
+                    <option key={t.key} value={t.key}>{t.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={styles.callField}>
+                <span style={styles.callLabel}>Nombre de PAX</span>
+                <input style={styles.callInput} type="number" min={1} max={999} value={callForm.pax} onChange={setCall("pax")} />
+              </label>
+              <label style={{ ...styles.callField, gridColumn: "1 / -1" }}>
+                <span style={styles.callLabel}>Commentaire</span>
+                <input style={styles.callInput} value={callForm.comment} onChange={setCall("comment")} maxLength={1000} placeholder="Ce que le client demande, quand le rappeler…" />
+              </label>
+            </div>
+            <div style={styles.callActions}>
+              <span style={styles.callHint}>
+                Vous serez le commercial en charge de ce lead. Un numéro déjà enregistré compte un appel de plus sur le même lead.
+              </span>
+              <button type="button" className="support-btn" style={styles.ghost} onClick={() => setCallOpen(false)}>
+                Annuler
+              </button>
+              <button type="submit" className="support-btn" style={styles.callSave} disabled={callSaving}>
+                {callSaving ? "Enregistrement…" : "Enregistrer le lead"}
+              </button>
+            </div>
+          </form>
+        )}
+        {callNotice && (
+          <div style={callNotice.type === "ok" ? styles.okNotice : styles.error} role="status">
+            {callNotice.text}
+          </div>
+        )}
 
         {error && <div style={styles.error}>{error}</div>}
         {editError && (
@@ -603,7 +758,7 @@ const Leads = () => {
                           CLASSIFICATION_COLORS.nouveau_lead;
                         return (
                           <td key={c.key} style={styles.td}>
-                            {canEdit && r.customerId ? (
+                            {canEditRow(r) && r.customerId ? (
                               <select
                                 value={r.classification || "nouveau_lead"}
                                 onChange={(e) =>
@@ -638,7 +793,7 @@ const Leads = () => {
                           </td>
                         );
                       }
-                      if (canEdit && r.customerId && c.key === "typologie") {
+                      if (canEditRow(r) && r.customerId && c.key === "typologie") {
                         return (
                           <td key={c.key} style={styles.td}>
                             <select
@@ -657,29 +812,17 @@ const Leads = () => {
                           </td>
                         );
                       }
-                      if (canEdit && r.customerId && c.key === "isPriority") {
+                      if (canEditRow(r) && r.customerId && c.key === "pax") {
                         return (
                           <td key={c.key} style={styles.td}>
-                            <button
-                              type="button"
-                              className="support-btn"
-                              aria-pressed={Boolean(r.isPriority)}
-                              title={r.isPriority ? "Retirer la priorité" : "Marquer prioritaire"}
-                              onClick={() =>
-                                saveDossier(r, { isPriority: !r.isPriority }).catch(() => {})
-                              }
-                              style={{
-                                ...styles.starBtn,
-                                ...(r.isPriority ? styles.starOn : {}),
-                              }}
-                            >
-                              <Star size={12} fill={r.isPriority ? "currentColor" : "none"} />
-                              {r.isPriority ? "Oui" : "—"}
-                            </button>
+                            <PaxCell
+                              value={r.pax}
+                              onSave={(pax) => saveDossier(r, { pax })}
+                            />
                           </td>
                         );
                       }
-                      if (canEdit && r.customerId && c.key === "frein") {
+                      if (canEditRow(r) && r.customerId && c.key === "frein") {
                         return (
                           <td key={c.key} style={styles.td}>
                             <FreinSelector
@@ -721,7 +864,7 @@ const Leads = () => {
                           </td>
                         );
                       }
-                      if (canEdit && r.customerId && c.key === "comment") {
+                      if (canEditRow(r) && r.customerId && c.key === "comment") {
                         return (
                           <td key={c.key} style={{ ...styles.td, overflow: "visible" }}>
                             <CommentField
@@ -966,24 +1109,76 @@ const styles = {
     maxWidth: "100%",
     fontFamily: "'Hanken Grotesk', sans-serif",
   },
-  starBtn: {
+  // "+ Appel entrant" form
+  callCard: {
+    margin: "12px 26px 0",
+    padding: "14px 16px",
+    borderRadius: 10,
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-card)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  callTitle: {
     display: "inline-flex",
     alignItems: "center",
-    gap: 4,
-    padding: "3px 8px",
-    borderRadius: 6,
+    gap: 6,
+    fontSize: 13,
+    fontWeight: 700,
+    color: "var(--text-primary)",
+  },
+  callGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+    gap: 10,
+  },
+  callField: { display: "flex", flexDirection: "column", gap: 4 },
+  callLabel: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    color: "var(--text-faint)",
+  },
+  callInput: {
+    padding: "7px 10px",
+    borderRadius: 8,
     border: "1px solid var(--border-primary)",
-    background: "transparent",
-    color: "var(--text-muted)",
-    fontSize: 12,
-    cursor: "pointer",
+    backgroundColor: "var(--bg-elevated)",
+    color: "var(--text-primary)",
+    fontSize: 12.5,
+    outline: "none",
     fontFamily: "'Hanken Grotesk', sans-serif",
   },
-  starOn: {
-    color: "#E3A63C",
-    borderColor: "#E3A63C88",
-    backgroundColor: "#E3A63C1a",
+  callActions: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
+  callHint: { flex: "1 1 260px", fontSize: 11.5, color: "var(--text-muted)" },
+  callSave: {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "6px 14px",
+    borderRadius: 8,
+    border: "none",
+    backgroundColor: "var(--accent)",
+    color: "var(--bg-primary)",
     fontWeight: 700,
+    fontSize: 12.5,
+    cursor: "pointer",
+  },
+  okNotice: {
+    margin: "12px 26px 0",
+    padding: "9px 13px",
+    borderRadius: 8,
+    border: "1px solid var(--success)",
+    background: "rgba(95,191,138,0.1)",
+    color: "var(--success)",
+    fontSize: 13,
   },
   phoneCell: { display: "inline-flex", alignItems: "center", gap: 6 },
   phoneLink: {

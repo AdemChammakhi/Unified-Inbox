@@ -23,7 +23,7 @@ const classificationSchema = new mongoose.Schema(
     },
     platform: {
       type: String,
-      enum: ["instagram", "facebook", "whatsapp", "messenger", "email", "tiktok"],
+      enum: ["instagram", "facebook", "whatsapp", "messenger", "email", "tiktok", "telephone"],
       required: true,
     },
     stage: {
@@ -61,6 +61,13 @@ const classificationSchema = new mongoose.Schema(
       default: "",
       trim: true,
       maxlength: 30,
+    },
+    /** Number of travellers (PAX) the request is for; null until known. */
+    pax: {
+      type: Number,
+      default: null,
+      min: 1,
+      max: 999,
     },
     /** Urgency marker, independent of the stage. */
     isPriority: {

@@ -32,7 +32,7 @@ const FREINS = Object.freeze([
 const LABEL_BY_CODE = new Map(FREINS.map((f) => [f.code, f.label]));
 
 /** Platforms a frein can be recorded for (Contact identities we write). */
-const FREIN_PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email"]);
+const FREIN_PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email", "telephone"]);
 
 const NOTE_MAX = 200;
 const HISTORY_MAX = 20;
