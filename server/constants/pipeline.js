@@ -3,14 +3,18 @@
  *
  * Mirrored in client/src/constants/pipeline.js: keep the two in step.
  *
- * STAGES are management's steps ("Nouveau lead → … → Départ") plus two
- * that sit outside the line: "Client injoignable", a dossier on hold because
- * nobody can reach the customer, and "Perdu", the terminal stage that makes
- * loss analysis possible (see docs/PLAN-PILOTAGE-COMMERCIAL.md §2.2).
+ * STAGES are management's steps ("Nouveau lead → … → Départ") plus three
+ * that sit outside the line: "Injoignable", a dossier on hold because
+ * nobody can reach the customer, then "Non intéressé" and "Perdu", the
+ * closing stages that make loss analysis possible (see
+ * docs/PLAN-PILOTAGE-COMMERCIAL.md §2.2).
  * "En cours" (code qualification_en_cours), "Déplacement agence" and
- * "Client injoignable" were added on 29 Sept 2026 at management's request. TYPOLOGIES is the
- * nature of the request. Both replace the free-text era: values are codes,
- * labels are French.
+ * "Injoignable" (client_injoignable) were added on 29 Sept 2026 at
+ * management's request. Labels, the "non_interesse" stage and the typology
+ * labels follow the process document PROC-GRC-V01 (« Processus opérationnel
+ * de gestion des leads », Oct 2026). TYPOLOGIES is the nature of the
+ * request. Both replace the free-text era: values are codes, labels are
+ * French.
  */
 
 "use strict";
@@ -22,15 +26,16 @@ const STAGES = Object.freeze([
   // Shown as "En cours" (management's wording); the code keeps its full name
   { key: "qualification_en_cours", label: "En cours", ordinal: 4 },
   { key: "qualifie", label: "Qualifié", ordinal: 5 },
-  { key: "offre_envoyee", label: "Offre envoyée", ordinal: 6 },
+  { key: "offre_envoyee", label: "Offre envoyée / Devis envoyé", ordinal: 6 },
   { key: "en_reflexion", label: "En réflexion", ordinal: 7 },
-  { key: "relance", label: "Relance", ordinal: 8 },
+  { key: "relance", label: "À rappeler / Relance", ordinal: 8 },
   { key: "deplacement_agence", label: "Déplacement agence", ordinal: 9 },
   { key: "reservation", label: "Réservation", ordinal: 10 },
   { key: "paiement", label: "Paiement", ordinal: 11 },
   { key: "dossier_confirme", label: "Dossier confirmé", ordinal: 12 },
   { key: "depart", label: "Départ", ordinal: 13, isWon: true },
-  { key: "client_injoignable", label: "Client injoignable", ordinal: 90, isOnHold: true },
+  { key: "client_injoignable", label: "Injoignable", ordinal: 90, isOnHold: true },
+  { key: "non_interesse", label: "Non intéressé", ordinal: 95, isLost: true },
   { key: "perdu", label: "Perdu", ordinal: 99, isLost: true },
 ]);
 
@@ -50,13 +55,13 @@ const UNREACHABLE_STAGE = "client_injoignable";
 const TYPOLOGIES = Object.freeze([
   { key: "omra", label: "Omra" },
   { key: "omra_a_la_carte", label: "Omra à la carte" },
+  { key: "voyages_organises", label: "Voyages organisés" },
+  { key: "hotels_sejours", label: "Hôtels en Tunisie" },
   { key: "visa", label: "Visa" },
   { key: "billetterie", label: "Billetterie" },
-  { key: "hotels_sejours", label: "Hôtels / Séjours" },
-  { key: "voyages_organises", label: "Voyages organisés" },
   { key: "transferts", label: "Transferts" },
   { key: "excursions", label: "Excursions / visites" },
-  { key: "autres_services", label: "Autres services" },
+  { key: "autres_services", label: "Autres prestations" },
 ]);
 
 const TYPOLOGY_KEYS = TYPOLOGIES.map((t) => t.key);

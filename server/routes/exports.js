@@ -65,6 +65,7 @@ const STAGE_FILLS = {
   relance: "FFD98CB3",
   deplacement_agence: "FFE8833A",
   client_injoignable: "FF8C97AD",
+  non_interesse: "FFB5675F",
   reservation: "FF3FA37A",
   paiement: "FF2E8B57",
   dossier_confirme: "FF1F7A4F",

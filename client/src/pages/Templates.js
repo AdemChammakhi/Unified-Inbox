@@ -148,8 +148,13 @@ const Templates = () => {
     if (!window.confirm(`Supprimer définitivement « ${t.title} » ?`)) return;
     setNotice(null);
     try {
-      await axios.delete(`/api/message-templates/${t._id}?hard=1`, auth);
-      setNotice({ type: "ok", text: `« ${t.title} » supprimé.` });
+      const res = await axios.delete(`/api/message-templates/${t._id}?hard=1`, auth);
+      setNotice({
+        type: "ok",
+        text: res.data?.kept
+          ? `« ${t.title} » fait partie de la bibliothèque officielle : il reste désactivé plutôt que supprimé.`
+          : `« ${t.title} » supprimé.`,
+      });
       load();
     } catch (err) {
       setNotice({ type: "error", text: err.response?.data?.message || "Suppression impossible." });

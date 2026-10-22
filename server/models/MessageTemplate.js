@@ -27,6 +27,13 @@ const messageTemplateSchema = new mongoose.Schema(
     sortOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
     usageCount: { type: Number, default: 0 },
+    /**
+     * Present only on templates loaded from MEDTOURS' official library
+     * (server/data/messageTemplates.seed.json, db/seedMessageTemplates.js).
+     * No default on purpose: the unique index is sparse, and a stored null
+     * would make the second hand-made template collide.
+     */
+    seedKey: { type: String },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
@@ -34,6 +41,7 @@ const messageTemplateSchema = new mongoose.Schema(
 );
 
 messageTemplateSchema.index({ isActive: 1, category: 1, sortOrder: 1, title: 1 });
+messageTemplateSchema.index({ seedKey: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("MessageTemplate", messageTemplateSchema);
 module.exports.PLATFORMS = PLATFORMS;

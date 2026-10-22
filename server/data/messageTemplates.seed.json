@@ -1,0 +1,331 @@
+[
+  {
+    "seedKey": "lib-1.1-tn",
+    "title": "1.1 Accueil général – Tunisien",
+    "category": "ACC · Accueil",
+    "body": "السلام عليكم، مرحبا بيكم في MEDTOURS 🌷\nشكراً على اهتمامكم بخدماتنا. إحنا على ذمّتكم لأي استفسار بخصوص رحلات العمرة والعروض المتوفّرة.",
+    "sortOrder": 1
+  },
+  {
+    "seedKey": "lib-1.2-fr",
+    "title": "1.2 Accueil général – Français",
+    "category": "ACC · Accueil",
+    "body": "Bonjour et bienvenue chez MEDTOURS.\nNous vous remercions pour votre intérêt. Notre équipe est à votre disposition pour vous renseigner sur nos offres Omra et vous accompagner dans le choix du séjour qui vous convient.",
+    "sortOrder": 2
+  },
+  {
+    "seedKey": "lib-1.3-tn",
+    "title": "1.3 Confirmation de réception d'une demande – Tunisien",
+    "category": "ACC · Accueil",
+    "body": "عسلامة، شكراً على اهتمامكم بـ MEDTOURS. وصلتنا طلبكم، وفريقنا باش يتصل بيكم في أقرب وقت ممكن باش يقدّملكم المعلومات اللازمة ويجاوب على استفساراتكم.\nمرحبا بيكم.",
+    "sortOrder": 3
+  },
+  {
+    "seedKey": "lib-1.4-fr",
+    "title": "1.4 Confirmation de réception d'une demande – Français",
+    "category": "ACC · Accueil",
+    "body": "Bonjour,\nNous avons bien reçu votre demande. Notre équipe vous contactera dans les meilleurs délais afin de vous communiquer les informations nécessaires et de répondre à vos questions.\nL’équipe MEDTOURS",
+    "sortOrder": 4
+  },
+  {
+    "seedKey": "lib-2.1-tn",
+    "title": "2.1 Demande de numéro – Tunisien",
+    "category": "TEL · Téléphone",
+    "body": "📞 باش نعطيوكم الأسعار والتفاصيل الدقيقة حسب طلبكم، ابعثولنا رقم تليفونكم، وفريق MEDTOURS يعاود يتصل بيكم في أقرب وقت ممكن.\nمرحبا بيكم.",
+    "sortOrder": 5
+  },
+  {
+    "seedKey": "lib-2.2-fr",
+    "title": "2.2 Demande de numéro – Français",
+    "category": "TEL · Téléphone",
+    "body": "Bonjour,\nAfin de vous communiquer les tarifs, les disponibilités et les détails des offres correspondant à votre demande, merci de nous transmettre votre numéro de téléphone.\nNotre équipe vous rappellera dans les meilleurs délais.\nL’équipe MEDTOURS",
+    "sortOrder": 6
+  },
+  {
+    "seedKey": "lib-2.3-tn",
+    "title": "2.3 Proposition d'un appel explicatif – Tunisien",
+    "category": "TEL · Téléphone",
+    "body": "إذا تحبّوا، نجموا نكلموكم ونفسّرولكم العروض بالتفصيل، ونعطيوكم المعلومات اللازمة باش تختاروا الرحلة اللي تناسبكم.\n📞 ابعثولنا رقم تليفونكم والوقت المناسب للاتصال بيكم.",
+    "sortOrder": 7
+  },
+  {
+    "seedKey": "lib-3.1-tn",
+    "title": "3.1 Demande de la date de départ – Tunisien",
+    "category": "QUAL · Qualification",
+    "body": "الأسعار تختلف حسب تاريخ السفر، مدّة الإقامة، شركة الطيران، نوع الفندق ونوع الغرفة.\n📅 تنجّموا تحدّدولنا تاريخ السفر اللي يناسبكم، باش نتحقّقوا من الأسعار والتوفّر ونقترحولكم العرض المناسب.",
+    "sortOrder": 8
+  },
+  {
+    "seedKey": "lib-3.2-tn",
+    "title": "3.2 Demande du nombre de voyageurs (PAX) – Tunisien",
+    "category": "QUAL · Qualification",
+    "body": "باش نحدّدولكم السعر المناسب، تنجّموا تعطيوْنا عدد الأشخاص اللي باش يسافروا؟\n👥 وزادة، تحبّوا الإقامة في غرفة ثنائية، ثلاثية ولا رباعية؟",
+    "sortOrder": 9
+  },
+  {
+    "seedKey": "lib-3.3-tn",
+    "title": "3.3 Qualification complète – Tunisien",
+    "category": "QUAL · Qualification",
+    "body": "باش نعاونكم نختاروا العرض الأنسب ليكم، نرجو منكم توضيح بعض التفاصيل:\n- 📅 تاريخ السفر المفضّل.\n- 👥 عدد الأشخاص.\n- 🛏️ نوع الغرفة: ثنائية، ثلاثية ولا رباعية.\n- ⏳ مدّة الإقامة المطلوبة.\n- ✈️ شركة الطيران المفضّلة، إذا عندكم اختيار معيّن.\nبالمعلومات هاذي، نجموا نتحقّقوا من العروض والأسعار المتوفّرة حسب طلبكم.",
+    "sortOrder": 10
+  },
+  {
+    "seedKey": "lib-3.4-fr",
+    "title": "3.4 Qualification – Français",
+    "category": "QUAL · Qualification",
+    "body": "Afin de vous proposer une offre adaptée, merci de nous préciser les éléments suivants :\n- Date de départ souhaitée.\n- Nombre de voyageurs.\n- Type de chambre : double, triple ou quadruple.\n- Durée du séjour souhaitée.\n- Compagnie aérienne préférée, si vous avez une préférence.\nCes informations nous permettront de vérifier les disponibilités et de vous communiquer un tarif correspondant à votre demande.",
+    "sortOrder": 11
+  },
+  {
+    "seedKey": "lib-4.1-tn",
+    "title": "4.1 Envoi de la liste des départs – Tunisien",
+    "category": "OFF · Offres",
+    "body": "السلام عليكم،\nكيف ما اتفقنا، هاذي قائمة الرحلات المتوفّرة لشهر [الشهر] 🕋✈️\nتلقاو فيها:\n- 📅 تواريخ الذهاب والعودة.\n- ✈️ شركات الطيران ومسار الرحلة.\n- 💰 الأسعار حسب نوع الغرفة.\n- 🏨 تفاصيل الإقامة في مكة المكرّمة والمدينة المنوّرة.\nتنجموا تطّلعوا على العروض وتختاروا الرحلة اللي تناسبكم. وإذا تحتاجوا أي توضيح، إحنا على ذمّتكم.",
+    "sortOrder": 12
+  },
+  {
+    "seedKey": "lib-4.2-fr",
+    "title": "4.2 Envoi de la liste des départs – Français",
+    "category": "OFF · Offres",
+    "body": "Bonjour,\nComme convenu, vous trouverez ci-joint la liste des départs disponibles pour le mois de [mois].\nLe document présente les dates de voyage, les compagnies aériennes, les tarifs selon le type de chambre, ainsi que les informations relatives aux hôtels à La Mecque et à Médine.\nNous restons à votre disposition pour toute précision et pour vous accompagner dans le choix de votre séjour.\nL’équipe MEDTOURS",
+    "sortOrder": 13
+  },
+  {
+    "seedKey": "lib-4.3-tn",
+    "title": "4.3 Présentation des départs de plusieurs mois – Tunisien",
+    "category": "OFF · Offres",
+    "body": "السلام عليكم،\nهاذي قائمة رحلات العمرة المتوفّرة للأشهر الجاية: [الأشهر] 🕋✈️\nتلقاو فيها تواريخ السفر، شركات الطيران، الأسعار حسب نوع الغرفة، وتفاصيل الإقامة في مكة والمدينة.\nإذا عندكم تاريخ معيّن في بالكم، ابعثولنا التفاصيل باش نتحقّقوا من التوفّر ونعاونكم تختاروا العرض المناسب.",
+    "sortOrder": 14
+  },
+  {
+    "seedKey": "lib-4.4-fr",
+    "title": "4.4 Présentation des départs de novembre – Français",
+    "category": "OFF · Offres",
+    "body": "Bonjour,\nVoici la liste des départs du mois de novembre 🕋✈️\nVous y trouverez les dates de départ et de retour, les compagnies aériennes, les tarifs en chambres double, triple et quadruple, le parcours du vol ainsi que les hôtels prévus à La Mecque et à Médine.\nContactez-nous pour vérifier les disponibilités et obtenir les informations nécessaires à votre réservation.",
+    "sortOrder": 15
+  },
+  {
+    "seedKey": "lib-4.5-tn",
+    "title": "4.5 Transmission d'un devis personnalisé – Tunisien",
+    "category": "OFF · Offres",
+    "body": "السلام عليكم مدام/سي [الاسم]،\nكيف ما اتفقنا، نبعثولكم عرض السعر الخاص برحلتكم، حسب التفاصيل اللي طلبتوها.\n📎 تلقاو العرض في المرفقات، وفيه تفاصيل الرحلة والأسعار والإقامة.\nإذا تحتاجوا أي توضيح أو تحبّوا تكملوا إجراءات الحجز، إحنا على ذمّتكم.",
+    "sortOrder": 16
+  },
+  {
+    "seedKey": "lib-4.5-fr",
+    "title": "4.5 Transmission d'un devis personnalisé – Français",
+    "category": "OFF · Offres",
+    "body": "Bonjour Madame/Monsieur [Nom],\nComme convenu lors de notre échange, veuillez trouver en pièce jointe votre devis personnalisé.\nVous y trouverez les détails de la prestation ainsi que les tarifs correspondant à votre demande.\nNous restons à votre disposition pour toute information complémentaire ou pour vous accompagner dans les démarches de réservation.\nL’équipe MEDTOURS",
+    "sortOrder": 17
+  },
+  {
+    "seedKey": "lib-5.1-tn",
+    "title": "5.1 Réponse générale sur les prix – Tunisien",
+    "category": "TAR · Tarifs",
+    "body": "الأسعار تختلف حسب تاريخ السفر، مدّة الإقامة، شركة الطيران، نوع الفندق ونوع الغرفة.\n📅 عطونا تاريخ السفر وعدد الأشخاص، ونمدّوكم بالسعر المناسب حسب العروض والتوفّر.",
+    "sortOrder": 18
+  },
+  {
+    "seedKey": "lib-5.2-fr",
+    "title": "5.2 Réponse générale sur les prix – Français",
+    "category": "TAR · Tarifs",
+    "body": "Les tarifs varient selon les dates de départ, la durée du séjour, la compagnie aérienne, la catégorie de l’hôtel et le type de chambre.\nMerci de nous communiquer votre date de départ et le nombre de voyageurs afin que nous puissions vérifier les tarifs et les disponibilités correspondant à votre demande.",
+    "sortOrder": 19
+  },
+  {
+    "seedKey": "lib-5.3-tn",
+    "title": "5.3 Demande d'un tarif précis – Tunisien",
+    "category": "TAR · Tarifs",
+    "body": "باش نعطيوكم السعر الدقيق، يلزمنا نعرفوا تاريخ السفر، عدد الأشخاص ونوع الغرفة المطلوبة.\n📞 تنجّموا تبعثولنا التفاصيل هاذي أو رقم تليفونكم باش نتصلوا بيكم ونفسّرولكم الخيارات المتوفّرة.",
+    "sortOrder": 20
+  },
+  {
+    "seedKey": "lib-5.4-tn",
+    "title": "5.4 Départ complet ou indisponible – Tunisien",
+    "category": "TAR · Tarifs",
+    "body": "بالنسبة للرحلة المطلوبة، التوفّر يلزمنا نعاودوا نثبتوه. إذا ما عادش فما بلايص، نجموا نبحثولكم على تاريخ آخر أو عرض بديل يناسبكم.",
+    "sortOrder": 21
+  },
+  {
+    "seedKey": "lib-5.4-fr",
+    "title": "5.4 Départ complet ou indisponible – Français",
+    "category": "TAR · Tarifs",
+    "body": "Les disponibilités du départ souhaité doivent être vérifiées. Si ce départ est complet, nous pourrons rechercher une autre date ou une offre alternative correspondant à vos besoins.",
+    "sortOrder": 22
+  },
+  {
+    "seedKey": "lib-6.1-tn",
+    "title": "6.1 Présentation générale – Tunisien",
+    "category": "PKG · Package",
+    "body": "🕋 مع MEDTOURS، نقدّمولكم package Omra متكامل، حسب تفاصيل العرض المختار.\nينجم يشمل:\n- ✈️ تذكرة الطائرة.\n- 🏨 الإقامة في مكة المكرّمة والمدينة المنوّرة.\n- 🚍 النقل والتنقّلات حسب البرنامج.\n- 🛂 تأشيرة العمرة.\n- 👳 المرافقة والإرشاد حسب البرنامج.\n- 🕌 الزيارات الدينية المبرمجة.\n- 📋 المتابعة والمساعدة حسب الخدمات المتضمّنة في العرض.\nالتفاصيل النهائية تتحدّد حسب الـ package المختار. مرحبا بيكم لأي استفسار.",
+    "sortOrder": 23
+  },
+  {
+    "seedKey": "lib-6.2-fr",
+    "title": "6.2 Présentation générale – Français",
+    "category": "PKG · Package",
+    "body": "MEDTOURS vous propose des packages Omra comprenant les prestations prévues dans l'offre sélectionnée.\nSelon le programme, les prestations peuvent inclure :\n- Le billet d'avion.\n- L'hébergement à La Mecque et à Médine.\n- Les transferts et déplacements prévus.\n- Le visa Omra.\n- L'accompagnement et l'assistance selon le programme.\n- Les visites religieuses prévues.\nLes prestations incluses sont précisées dans chaque offre. Notre équipe reste à votre disposition pour vous communiquer le détail du package choisi.",
+    "sortOrder": 24
+  },
+  {
+    "seedKey": "lib-6.3-tn",
+    "title": "6.3 Demande concernant le visa seul – Tunisien",
+    "category": "PKG · Package",
+    "body": "إحنا في MEDTOURS ما نقدّموش فيزا العمرة وحدها؛ الفيزا تكون ضمن package العمرة.\nإذا تحبّوا، نجموا نوضّحولكم العروض المتوفّرة والأسعار حسب تاريخ السفر وعدد الأشخاص.",
+    "sortOrder": 25
+  },
+  {
+    "seedKey": "lib-7.1-tn",
+    "title": "7.1 Informations sur les hôtels – Tunisien",
+    "category": "HOT · Hôtels",
+    "body": "📍 في مكة المكرّمة: الفندق المبرمج في العرض يبعد حوالي 400 متر على الحرم المكّي.\n📍 في المدينة المنوّرة: الفندق المبرمج يبعد حوالي 100 متر على المسجد النبوي الشريف.\nالمسافات هاذي تخصّ الفنادق المذكورة في العرض المعني. إذا تحبّوا، نجموا نوضّحولكم اسم الفندق وموقعه حسب الرحلة المختارة.",
+    "sortOrder": 26
+  },
+  {
+    "seedKey": "lib-7.2-tn",
+    "title": "7.2 Fauteuils électriques à La Mecque – Tunisien",
+    "category": "HOT · Hôtels",
+    "body": "♿ للتسهيل على حجّاجنا، MEDTOURS توفّر 5 كراسي كهربائية في مكة المكرّمة لمساعدة الأشخاص اللي عندهم صعوبة في المشي، خاصةً كبار السنّ.\nيرجى التواصل معانا مسبقاً للتثبّت من شروط الاستعمال والتوفّر خلال فترة السفر.",
+    "sortOrder": 27
+  },
+  {
+    "seedKey": "lib-7.3-tn",
+    "title": "7.3 Informations sur les repas – Tunisien",
+    "category": "HOT · Hôtels",
+    "body": "بالنسبة للوجبات، يلزمنا نثبتوا تفاصيل العرض المختار، خاطر نظام الإقامة والوجبات ينجم يختلف من package لآخر.\nنجموا نمدّوكم بالتفاصيل الدقيقة حسب الفندق والرحلة اللي تختاروها.",
+    "sortOrder": 28
+  },
+  {
+    "seedKey": "lib-8.1-tn",
+    "title": "8.1 Paiement avec avance de 40 % – Tunisien",
+    "category": "PAY · Paiement",
+    "body": "السلام عليكم، مرحبا بيكم 🌷\nحسب شروط العرض، الدفع يكون بتسبقة قدرها 40٪ عند الحجز، والباقي ينجم يتقسّم على 6 أو 7 أشهر حسب الاتفاق.\nللتثبّت من طريقة الخلاص المناسبة لملفّكم، تنجّموا تتواصلوا معانا مباشرة.",
+    "sortOrder": 29
+  },
+  {
+    "seedKey": "lib-8.2-fr",
+    "title": "8.2 Modalités de paiement – Français",
+    "category": "PAY · Paiement",
+    "body": "Bonjour,\nSelon les conditions de l'offre concernée, un acompte de 40 % est demandé à la réservation. Le solde peut être échelonné sur 6 ou 7 mois, selon les modalités convenues.\nNotre équipe reste à votre disposition pour vous préciser les conditions applicables à votre dossier.",
+    "sortOrder": 30
+  },
+  {
+    "seedKey": "lib-9.1-tn",
+    "title": "9.1 Explication – Tunisien",
+    "category": "ALC · À la carte",
+    "body": "السلام عليكم سي [الاسم]،\nالعرض اللي قدّمنهولكم هو package منظّم حسب برنامج وشروط محدّدة.\nإذا نبدّلوا بعض التفاصيل، كيف الفندق، شركة الطيران، تواريخ السفر أو نوع الخدمات، تنجم تتحوّل الرحلة إلى Omra à la carte، وهذا ينجم يسبّب مصاريف إضافية حسب التغييرات المطلوبة.\nنجموا نراجعوا طلبكم ونتثبّتوا من الكلفة النهائية قبل تأكيد الحجز.",
+    "sortOrder": 31
+  },
+  {
+    "seedKey": "lib-9.2-fr",
+    "title": "9.2 Explication – Français",
+    "category": "ALC · À la carte",
+    "body": "Bonjour Monsieur/Madame [Nom],\nL'offre présentée correspond à un package établi selon un programme et des conditions précis.\nToute modification concernant les dates, les hôtels, la compagnie aérienne ou les prestations peut transformer le package en Omra à la carte et entraîner des frais supplémentaires.\nNous pouvons étudier les modifications souhaitées et vous communiquer le coût correspondant avant toute confirmation.",
+    "sortOrder": 32
+  },
+  {
+    "seedKey": "lib-10.1-tn",
+    "title": "10.1 Après l'envoi d'un devis – Tunisien",
+    "category": "REL · Relance",
+    "body": "السلام عليكم سي/مدام [الاسم]،\nحبيت نتثبّت معاكم إذا اطّلعتوا على عرض العمرة اللي بعثناهولكم، وإذا عندكم أي استفسار بخصوص الأسعار، الرحلة أو الإقامة.\nإحنا على ذمّتكم لأي توضيح، ونجموا نعاونكم في اختيار العرض الأنسب ليكم.",
+    "sortOrder": 33
+  },
+  {
+    "seedKey": "lib-10.2-fr",
+    "title": "10.2 Après l'envoi d'un devis – Français",
+    "category": "REL · Relance",
+    "body": "Bonjour Monsieur/Madame [Nom],\nJe reviens vers vous concernant le devis Omra que nous vous avons transmis.\nAvez-vous pu consulter notre proposition ? Nous restons à votre disposition pour répondre à vos questions et vous apporter les précisions nécessaires.\nL’équipe MEDTOURS",
+    "sortOrder": 34
+  },
+  {
+    "seedKey": "lib-10.3-tn",
+    "title": "10.3 Le prospect souhaite réfléchir – Tunisien",
+    "category": "REL · Relance",
+    "body": "بالطبيعة، خذوا وقتكم باش تطّلعوا على العرض وتقارنوا الخيارات.\nإذا تحتاجوا أي معلومة إضافية أو تحبّوا نعاودوا نتواصلوا معاكم في وقت آخر، إحنا على ذمّتكم.",
+    "sortOrder": 35
+  },
+  {
+    "seedKey": "lib-10.3-fr",
+    "title": "10.3 Le prospect souhaite réfléchir – Français",
+    "category": "REL · Relance",
+    "body": "Bien entendu, prenez le temps d'étudier notre proposition.\nNous restons disponibles si vous souhaitez des précisions ou si vous désirez que nous reprenions contact avec vous à une date qui vous convient.",
+    "sortOrder": 36
+  },
+  {
+    "seedKey": "lib-10.4-tn",
+    "title": "10.4 Le prospect indique qu'il contactera l'agence si nécessaire – Tunisien",
+    "category": "REL · Relance",
+    "body": "يعطيكم الصحة على تفاعلكم وثقتكم في MEDTOURS. إحنا على ذمّتكم إذا تحتاجوا أي معلومة إضافية. مرحبا بيكم في أي وقت.",
+    "sortOrder": 37
+  },
+  {
+    "seedKey": "lib-10.4-fr",
+    "title": "10.4 Le prospect indique qu'il contactera l'agence si nécessaire – Français",
+    "category": "REL · Relance",
+    "body": "Merci pour votre retour et pour l'intérêt porté à MEDTOURS.\nNous restons à votre disposition pour toute information complémentaire. N'hésitez pas à nous recontacter si vous souhaitez poursuivre votre projet.\nL’équipe MEDTOURS",
+    "sortOrder": 38
+  },
+  {
+    "seedKey": "lib-11.1-tn",
+    "title": "11.1 Présentation – Tunisien",
+    "category": "EMI · Emirates",
+    "body": "بالنسبة لبعض الرحلات مع Emirates، تنجم تكون فما إمكانية التوقّف في دبي لمدّة معيّنة، حسب برنامج الرحلة والتذاكر المتوفّرة.\nإذا تحبّوا تستغلّوا الفرصة لاكتشاف دبي، نجموا نثبتولكم تفاصيل التوقّف، المدّة والشروط، قبل اختيار الرحلة.",
+    "sortOrder": 39
+  },
+  {
+    "seedKey": "lib-11.2-fr",
+    "title": "11.2 Présentation – Français",
+    "category": "EMI · Emirates",
+    "body": "Pour certaines options avec Emirates, une escale à Dubaï peut être envisageable selon l'itinéraire et les conditions du billet.\nSi vous souhaitez profiter de cette occasion pour découvrir la ville, nous pouvons vérifier la durée de l'escale, les conditions applicables et les possibilités correspondant à votre voyage.",
+    "sortOrder": 40
+  },
+  {
+    "seedKey": "lib-12.1-tn",
+    "title": "12.1 « Bonjour, je souhaite avoir plus d'informations » – Tunisien",
+    "category": "FAQ · Questions fréquentes",
+    "body": "السلام عليكم، مرحبا بيكم في MEDTOURS 🌷\nباش نعاونكم، تنجّموا تعطيوْنا تاريخ السفر وعدد الأشخاص؟ أو ابعثولنا رقم تليفونكم باش نتصلوا بيكم ونمدّوكم بالتفاصيل.",
+    "sortOrder": 41
+  },
+  {
+    "seedKey": "lib-12.2-tn",
+    "title": "12.2 « Quel est le prix ? » – Tunisien",
+    "category": "FAQ · Questions fréquentes",
+    "body": "الأسعار تختلف حسب تاريخ السفر، نوع الغرفة، الفندق وشركة الطيران.\n📅 عطونا تاريخ السفر وعدد الأشخاص، ونمدّوكم بالسعر المناسب حسب التوفّر.",
+    "sortOrder": 42
+  },
+  {
+    "seedKey": "lib-12.3-tn",
+    "title": "12.3 « Je veux recevoir les offres » – Tunisien",
+    "category": "FAQ · Questions fréquentes",
+    "body": "مرحبا بيكم. ابعثولنا الشهر اللي تحبّوا تسافروا فيه وعدد الأشخاص، ونوجّهولكم العروض المتوفّرة حسب طلبكم.",
+    "sortOrder": 43
+  },
+  {
+    "seedKey": "lib-12.4-tn",
+    "title": "12.4 « Je préfère être contacté par téléphone » – Tunisien",
+    "category": "FAQ · Questions fréquentes",
+    "body": "بالطبيعة، ابعثولنا رقم تليفونكم والوقت المناسب للاتصال بيكم، وفريق MEDTOURS يعاود يتصل بيكم في أقرب وقت ممكن.",
+    "sortOrder": 44
+  },
+  {
+    "seedKey": "lib-12.5-tn",
+    "title": "12.5 « Merci pour les informations » – Tunisien",
+    "category": "FAQ · Questions fréquentes",
+    "body": "يعطيكم الصحة على اهتمامكم بـ MEDTOURS. إحنا على ذمّتكم لأي استفسار إضافي، ومرحبا بيكم.",
+    "sortOrder": 45
+  },
+  {
+    "seedKey": "lib-12.6-fr",
+    "title": "12.6 Message court – Français",
+    "category": "FAQ · Questions fréquentes",
+    "body": "Bonjour, merci pour votre intérêt envers MEDTOURS.\nPour vous renseigner précisément, merci de nous communiquer votre date de départ et le nombre de voyageurs, ou votre numéro de téléphone afin que notre équipe puisse vous contacter.",
+    "sortOrder": 46
+  },
+  {
+    "seedKey": "lib-12.7-fr",
+    "title": "12.7 Message de clôture – Français",
+    "category": "FAQ · Questions fréquentes",
+    "body": "Merci pour votre confiance. Nous restons à votre disposition pour toute question complémentaire et serons heureux de vous accompagner dans votre projet Omra.\nL’équipe MEDTOURS",
+    "sortOrder": 47
+  }
+]

@@ -127,6 +127,7 @@ function computeMaturity(p = {}) {
 
   // 1. Closed dossiers are not leads any more
   if (stage === "perdu") return out("perdu", because("Dossier perdu"));
+  if (stage === "non_interesse") return out("perdu", because("Non intéressé"));
   if (stage === "depart") return out("gagne", "Départ effectué");
 
   // 2. The customer has committed (booking, payment, confirmed dossier)

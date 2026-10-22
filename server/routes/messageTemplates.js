@@ -55,10 +55,9 @@ function sanitize(body) {
   return out;
 }
 
-const categoriesOf = (rows) =>
-  [...new Set(rows.map((t) => t.category).filter(Boolean))].sort((a, b) =>
-    a.localeCompare(b, "fr", { sensitivity: "base" }),
-  );
+// In the order the templates come (sortOrder first), so the official
+// library's categories read ACC, TEL, QUAL, OFF… as in the document
+const categoriesOf = (rows) => [...new Set(rows.map((t) => t.category).filter(Boolean))];
 
 // ── List ────────────────────────────────────────────────────────────────────
 router.get("/", protect, async (req, res) => {
@@ -128,9 +127,14 @@ router.delete("/:id", ...write, async (req, res) => {
   try {
     if (!validId(req.params.id)) return res.status(404).json({ message: "Modèle introuvable." });
     if (req.query.hard === "1") {
-      const gone = await MessageTemplate.findByIdAndDelete(req.params.id).lean();
-      if (!gone) return res.status(404).json({ message: "Modèle introuvable." });
-      return res.json({ success: true, deleted: true });
+      // A template from the official library would be re-inserted at the
+      // next restart (db/seedMessageTemplates.js): keep it, deactivated.
+      const seeded = await MessageTemplate.exists({ _id: req.params.id, seedKey: { $exists: true } });
+      if (!seeded) {
+        const gone = await MessageTemplate.findByIdAndDelete(req.params.id).lean();
+        if (!gone) return res.status(404).json({ message: "Modèle introuvable." });
+        return res.json({ success: true, deleted: true });
+      }
     }
     const template = await MessageTemplate.findByIdAndUpdate(
       req.params.id,
@@ -138,7 +142,8 @@ router.delete("/:id", ...write, async (req, res) => {
       { new: true },
     ).lean();
     if (!template) return res.status(404).json({ message: "Modèle introuvable." });
-    res.json({ success: true, template });
+    // kept: a hard delete was asked for a library template
+    res.json({ success: true, template, kept: req.query.hard === "1" });
   } catch (err) {
     console.error("[templates] delete failed:", err.message);
     res.status(500).json({ message: "Impossible de supprimer le modèle." });

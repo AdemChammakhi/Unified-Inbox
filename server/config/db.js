@@ -31,6 +31,15 @@ const connectDB = async () => {
         }
       })
       .catch((e) => console.error("[Startup] Partners seed failed:", e.message));
+    // Idempotent: insert MEDTOURS' official quick-reply library when
+    // missing; never overwrites templates edited from the Modèles page.
+    require("../db/seedMessageTemplates")()
+      .then((r) => {
+        if (r.inserted > 0) {
+          console.log(`[Startup] Message templates seeded: ${r.inserted} new / ${r.loaded}`);
+        }
+      })
+      .catch((e) => console.error("[Startup] Message templates seed failed:", e.message));
   } catch (error) {
     console.error(`Error: ${error.message}`);
     process.exit(1);
