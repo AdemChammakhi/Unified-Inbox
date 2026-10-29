@@ -28,7 +28,6 @@ import {
   Unlock,
 } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
-import AdAttribution from "../components/AdAttribution";
 import AppointmentsPanel from "../components/AppointmentsPanel";
 import ProspectExport from "../components/ProspectExport";
 import EmailBody from "../components/EmailBody";
@@ -40,6 +39,10 @@ import {
   STAGE_LABELS,
   STAGE_COLORS,
   DEFAULT_STAGE,
+  QUALIFICATIONS,
+  DEFAULT_QUALIFICATION,
+  qualificationColor,
+  qualificationLabel,
   TYPOLOGIES,
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
@@ -58,7 +61,7 @@ import {
   Legend,
 } from "recharts";
 
-/** Small header chip (priority, typologie, RDV, dossier toggle). */
+/** Small chip (typologie, qualification, RDV, dossier toggle). */
 const mgrChip = (color) => ({
   display: "inline-flex",
   alignItems: "center",
@@ -91,6 +94,10 @@ const lookupBy = (map, conv) => {
   return pid ? map[pid] : undefined;
 };
 
+/** Qualification of a conversation; no dossier yet reads as the default. */
+const qualificationOf = (dossiers, conv) =>
+  lookupBy(dossiers, conv)?.qualification || DEFAULT_QUALIFICATION;
+
 /** Format an appointment for display: "lun. 25 août, 14:30". */
 const formatAppointment = (value) => {
   if (!value) return "";
@@ -106,16 +113,6 @@ const formatAppointment = (value) => {
 };
 
 const CHART_COLORS = ["#E8833A", "#5FBF8A", "#5B9BD9", "#E2685F", "#E3A63C"];
-
-// Labels for the "replying to…" context card (ads, posts, stories)
-const CONTEXT_KIND_LABELS = {
-  ad: "Replied to your ad",
-  post: "Replied to your post",
-  story_reply: "Replied to your story",
-  share: "Shared a post",
-  story_mention: "Mentioned you in a story",
-  referral: "Came from a link",
-};
 
 // WhatsApp media is served through our authenticated proxy; <img>/<video>
 // tags can't send headers, so the JWT rides along as a query param.
@@ -236,10 +233,12 @@ const ManagerDashboard = () => {
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
   const [appointments, setAppointments] = useState({});
-  // customerId -> { stage, typologie, invoiceRef, isPriority, appointmentAt }
+  // customerId -> { stage, qualification, typologie, appointmentAt }
   const [dossiers, setDossiers] = useState({});
   const [dossierOpen, setDossierOpen] = useState(false);
   const [classFilter, setClassFilter] = useState("all");
+  // "all" | a qualification key
+  const [qualificationFilter, setQualificationFilter] = useState("all");
   // "all" | "none" (not yet recorded) | a typologie key
   const [typologyFilter, setTypologyFilter] = useState("all");
   const [sortMode, setSortMode] = useState(readSortMode);
@@ -268,7 +267,6 @@ const ManagerDashboard = () => {
   const [analyticsRange, setAnalyticsRange] = useState(7);
   const [analytics, setAnalytics] = useState(null);
   const [agentStats, setAgentStats] = useState([]);
-  const [adAttribution, setAdAttribution] = useState([]);
   const [appointmentStats, setAppointmentStats] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
@@ -467,7 +465,6 @@ const ManagerDashboard = () => {
                 fromId: message.fromId || data.senderId,
                 time: message.time,
                 attachments: message.attachments || [],
-                context: message.context || null,
               },
             ],
             _fromSocket: true,
@@ -509,7 +506,6 @@ const ManagerDashboard = () => {
                 fromId: message.fromId,
                 time: message.time,
                 attachments: message.attachments || [],
-                context: message.context || null,
               };
               const existingIdx = (prev.messages || []).findIndex(
                 (m) => m.id === message.id,
@@ -579,7 +575,6 @@ const ManagerDashboard = () => {
                       fromId: message.fromId,
                       time: message.time,
                       attachments: message.attachments || [],
-                      context: message.context || null,
                     },
                   ],
                 };
@@ -746,9 +741,9 @@ const ManagerDashboard = () => {
   }, [activeTab, user?.token, logout, navigate]);
 
   // Save dossier fields for a conversation. `patch` holds any of
-  // { classification (stage code), typologie, invoiceRef, isPriority,
-  // appointmentAt (ISO string, or null to clear) }; the RDV date is set from
-  // the DossierPanel, independently of the stage.
+  // { stage (code), qualification (code), typologie, appointmentAt (ISO
+  // string, or null to clear) }; the RDV date is set from the DossierPanel,
+  // independently of the stage.
   const updateClassification = async (conversationId, patch) => {
     const conv =
       selectedConvRef.current?.id === conversationId
@@ -787,7 +782,7 @@ const ManagerDashboard = () => {
         if (key !== conversationId) delete next[conversationId];
         return next;
       });
-      // The stage, priority and RDV feed the maturity
+      // The stage, the qualification and the RDV feed the maturity
       queryClient.invalidateQueries({ queryKey: ["leadInsights", activeTab] });
     } catch (error) {
       alert(error.response?.data?.message || "Impossible de mettre à jour le dossier.");
@@ -824,6 +819,11 @@ const ManagerDashboard = () => {
         return cls === classFilter;
       });
     }
+    if (qualificationFilter !== "all") {
+      filtered = filtered.filter(
+        (conv) => qualificationOf(dossiers, conv) === qualificationFilter,
+      );
+    }
     if (typologyFilter !== "all") {
       const wanted = typologyFilter === "none" ? "" : typologyFilter;
       filtered = filtered.filter(
@@ -856,6 +856,7 @@ const ManagerDashboard = () => {
     classifications,
     classFilter,
     dossiers,
+    qualificationFilter,
     typologyFilter,
     searchDebounced,
     sortMode,
@@ -1026,24 +1027,19 @@ const ManagerDashboard = () => {
       if (!token) return;
       setAnalyticsLoading(true);
       try {
-        const [summaryRes, agentsRes, attributionRes, rdvRes] =
-          await Promise.all([
-            axios.get(`/api/analytics/summary?range=${range}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-            axios.get("/api/analytics/agents", {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-            axios.get(`/api/analytics/ad-attribution?range=${range}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-            axios.get(`/api/analytics/appointments?range=${range}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-          ]);
+        const [summaryRes, agentsRes, rdvRes] = await Promise.all([
+          axios.get(`/api/analytics/summary?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          axios.get("/api/analytics/agents", {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          axios.get(`/api/analytics/appointments?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
         setAnalytics(summaryRes.data);
         setAgentStats(agentsRes.data?.agents || []);
-        setAdAttribution(attributionRes.data?.ads || []);
         setAppointmentStats(rdvRes.data || null);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
@@ -1199,6 +1195,7 @@ const ManagerDashboard = () => {
 
   const isChat = activeMainTab === "chats";
   const selectedInsight = selectedConv ? getInsight(selectedConv) : null;
+  const selectedQualification = qualificationOf(dossiers, selectedConv);
 
   return (
     <DashboardLayout noPadding={isChat}>
@@ -1551,7 +1548,7 @@ const ManagerDashboard = () => {
                   </select>
                 </div>
 
-                {/* Classification Filter */}
+                {/* Étape filter — the seven funnel steps */}
                 <div
                   style={{
                     display: "flex",
@@ -1610,6 +1607,57 @@ const ManagerDashboard = () => {
                       {f.label}
                     </button>
                   ))}
+                </div>
+
+                {/* Qualification filter — the ten statuses, loss reasons
+                    included */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 14px",
+                    borderBottom: "1px solid var(--border-primary)",
+                    backgroundColor: "var(--bg-nav)",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.6,
+                      color: "var(--text-faint)",
+                    }}
+                  >
+                    Qualification :
+                  </span>
+                  <select
+                    className="mgr-class-dropdown"
+                    value={qualificationFilter}
+                    onChange={(e) => setQualificationFilter(e.target.value)}
+                    style={{
+                      flex: 1,
+                      padding: "3px 6px",
+                      border: "1px solid var(--border-primary)",
+                      borderRadius: "4px",
+                      fontSize: "10px",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      backgroundColor: "var(--bg-secondary)",
+                      outline: "none",
+                      fontFamily: "'Hanken Grotesk', sans-serif",
+                      color:
+                        qualificationFilter === "all"
+                          ? "var(--text-primary)"
+                          : qualificationColor(qualificationFilter),
+                    }}
+                  >
+                    <option value="all">Toutes les qualifications</option>
+                    {QUALIFICATIONS.map((q) => (
+                      <option key={q.key} value={q.key}>{q.label}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* Typologie filter — eight values plus "not recorded" */}
@@ -1737,6 +1785,7 @@ const ManagerDashboard = () => {
                     sortedConversations.map((conv, index) => {
                       const cls =
                         lookupBy(classifications, conv) || DEFAULT_STAGE;
+                      const qual = qualificationOf(dossiers, conv);
                       const isSelected = selectedConv?.id === conv.id;
                       const isUnread = unreadConvIds.has(conv.id);
                       const insight = getInsight(conv);
@@ -1876,14 +1925,6 @@ const ManagerDashboard = () => {
                                   ?.map((p) => p.name)
                                   .join(", ") || "Unknown"}
                               </strong>
-                              {lookupBy(dossiers, conv)?.typologie && (
-                                <span
-                                  style={mgrChip("var(--accent)")}
-                                  title="Typologie de la demande"
-                                >
-                                  {TYPOLOGY_LABELS[lookupBy(dossiers, conv).typologie]}
-                                </span>
-                              )}
                               {lookupBy(locks, conv) && (
                                 <span
                                   style={{
@@ -1920,6 +1961,38 @@ const ManagerDashboard = () => {
                                 }}
                               />
                             </div>
+                            {/* Qualification (once past "Nouveau lead") and
+                                typologie, on their own line as in the inbox,
+                                so two chips never squeeze the name out */}
+                            {(qual !== DEFAULT_QUALIFICATION ||
+                              lookupBy(dossiers, conv)?.typologie) && (
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  flexWrap: "wrap",
+                                  gap: 6,
+                                  marginTop: 3,
+                                }}
+                              >
+                                {qual !== DEFAULT_QUALIFICATION && (
+                                  <span
+                                    style={mgrChip(qualificationColor(qual))}
+                                    title="Qualification du lead"
+                                  >
+                                    {qualificationLabel(qual)}
+                                  </span>
+                                )}
+                                {lookupBy(dossiers, conv)?.typologie && (
+                                  <span
+                                    style={mgrChip("var(--accent)")}
+                                    title="Typologie de la demande"
+                                  >
+                                    {TYPOLOGY_LABELS[lookupBy(dossiers, conv).typologie]}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                             <p
                               style={{
                                 margin: "3px 0",
@@ -2023,11 +2096,14 @@ const ManagerDashboard = () => {
                         backgroundColor: "var(--bg-secondary)",
                       }}
                     >
+                      {/* Wraps like the inbox header: three selects and
+                          the chips overflow a laptop-width pane otherwise */}
                       <div
                         style={{
                           display: "flex",
                           alignItems: "center",
-                          gap: "12px",
+                          flexWrap: "wrap",
+                          gap: "8px 12px",
                         }}
                       >
                         {selectedConv.participants?.[0]?.profilePicUrl && (
@@ -2082,15 +2158,16 @@ const ManagerDashboard = () => {
                         <select
                           value={
                             lookupBy(classifications, selectedConv) ||
-                            "non_classifie"
+                            DEFAULT_STAGE
                           }
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) =>
                             updateClassification(selectedConv.id, {
-                              classification: e.target.value,
+                              stage: e.target.value,
                             }).catch(() => {})
                           }
                           className="mgr-class-dropdown"
+                          title="Étape du parcours de vente"
                           style={{
                             padding: "2px 6px",
                             border:
@@ -2108,17 +2185,52 @@ const ManagerDashboard = () => {
                             color:
                               CLASSIFICATION_COLORS[
                                 lookupBy(classifications, selectedConv) ||
-                                  "non_classifie"
+                                  DEFAULT_STAGE
                               ],
                             borderColor:
                               CLASSIFICATION_COLORS[
                                 lookupBy(classifications, selectedConv) ||
-                                  "non_classifie"
+                                  DEFAULT_STAGE
                               ] + "55",
                           }}
                         >
                           {STAGES.map((s) => (
                             <option key={s.key} value={s.key}>{s.label}</option>
+                          ))}
+                        </select>
+                        {/* Qualification: where the lead stands now, loss
+                            reasons included — independent of the stage */}
+                        <select
+                          value={selectedQualification}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) =>
+                            updateClassification(selectedConv.id, {
+                              qualification: e.target.value,
+                            }).catch(() => {})
+                          }
+                          className="mgr-class-dropdown"
+                          title="Qualification du lead"
+                          style={{
+                            padding: "2px 6px",
+                            border:
+                              "1px solid var(--border-primary)",
+                            borderRadius: "4px",
+                            fontSize: "9px",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            backgroundColor: "var(--bg-secondary)",
+                            outline: "none",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.3px",
+                            fontFamily:
+                              "'Hanken Grotesk', sans-serif",
+                            color: qualificationColor(selectedQualification),
+                            borderColor:
+                              qualificationColor(selectedQualification) + "55",
+                          }}
+                        >
+                          {QUALIFICATIONS.map((q) => (
+                            <option key={q.key} value={q.key}>{q.label}</option>
                           ))}
                         </select>
                         {/* Typologie of the request, beside the stage */}
@@ -2156,11 +2268,6 @@ const ManagerDashboard = () => {
                             <option key={t.key} value={t.key}>{t.label}</option>
                           ))}
                         </select>
-                        {lookupBy(dossiers, selectedConv)?.isPriority && (
-                          <span style={mgrChip("#E3A63C")} title="Dossier prioritaire">
-                            ★ Prioritaire
-                          </span>
-                        )}
                         {lookupBy(appointments, selectedConv) && (
                           <span style={mgrChip("#A98BD6")} title="Rendez-vous fixé">
                             📅{" "}
@@ -2178,7 +2285,7 @@ const ManagerDashboard = () => {
                             ...mgrChip(dossierOpen ? "var(--accent)" : "var(--text-muted)"),
                             cursor: "pointer",
                           }}
-                          title="Dossier client : typologie, facture, priorité, RDV, pièces jointes"
+                          title="Dossier client : typologie, RDV"
                           onClick={() => setDossierOpen((v) => !v)}
                         >
                           📁 Dossier
@@ -2306,21 +2413,13 @@ const ManagerDashboard = () => {
                       </div>
                     </div>
 
-                    {/* Dossier client: typologie, facture, priorité, RDV, pièces jointes */}
+                    {/* Dossier client: typologie, RDV */}
                     {dossierOpen && (
                       <DossierPanel
                         key={`${activeTab}:${selectedConv.id}`}
                         dossier={lookupBy(dossiers, selectedConv)}
                         onSave={(patch) =>
                           updateClassification(selectedConv.id, patch)
-                        }
-                        platform={activeTab}
-                        customerId={
-                          activeTab === "email"
-                            ? selectedConv.email ||
-                              selectedConv.participants?.[0]?.email ||
-                              selectedConv.id
-                            : selectedConv.participants?.[0]?.id || selectedConv.id
                         }
                         canEdit
                       />
@@ -2437,96 +2536,6 @@ const ManagerDashboard = () => {
                             >
                               {msg.from}
                             </small>
-                            {/* Ad / post / story the customer is replying to */}
-                            {msg.context && (
-                              <a
-                                href={msg.context.url || undefined}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: "10px",
-                                  padding: "8px 10px",
-                                  margin: "4px 0 8px",
-                                  borderRadius: "8px",
-                                  backgroundColor: "rgba(0,0,0,0.14)",
-                                  border:
-                                    "1.5px dashed rgba(140,140,150,0.5)",
-                                  textDecoration: "none",
-                                  color: "inherit",
-                                  maxWidth: "100%",
-                                  cursor: msg.context.url
-                                    ? "pointer"
-                                    : "default",
-                                }}
-                                onClick={(e) => {
-                                  if (!msg.context.url) e.preventDefault();
-                                }}
-                              >
-                                {msg.context.photoUrl && (
-                                  <img
-                                    src={msg.context.photoUrl}
-                                    alt=""
-                                    loading="lazy"
-                                    style={{
-                                      width: 44,
-                                      height: 44,
-                                      borderRadius: 8,
-                                      objectFit: "cover",
-                                      flexShrink: 0,
-                                    }}
-                                    onError={(e) => {
-                                      e.target.style.display = "none";
-                                    }}
-                                  />
-                                )}
-                                <div style={{ minWidth: 0 }}>
-                                  <div
-                                    style={{
-                                      fontSize: 9,
-                                      fontWeight: 700,
-                                      textTransform: "uppercase",
-                                      letterSpacing: "1.2px",
-                                      opacity: 0.75,
-                                      marginBottom: 2,
-                                      fontFamily:
-                                        "'Space Grotesk', sans-serif",
-                                    }}
-                                  >
-                                    {CONTEXT_KIND_LABELS[
-                                      msg.context.kind
-                                    ] || "In reply to"}
-                                  </div>
-                                  {msg.context.title && (
-                                    <div
-                                      style={{
-                                        fontSize: 12,
-                                        fontWeight: 700,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {msg.context.title}
-                                    </div>
-                                  )}
-                                  {msg.context.body && (
-                                    <div
-                                      style={{
-                                        fontSize: 11,
-                                        opacity: 0.8,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {msg.context.body}
-                                    </div>
-                                  )}
-                                </div>
-                              </a>
-                            )}
                             {isEmail && msg.subject && (
                               <p
                                 style={{
@@ -3291,12 +3300,6 @@ const ManagerDashboard = () => {
                 <AppointmentsPanel
                   data={appointmentStats}
                   rangeLabel={` (${analyticsRange}j)`}
-                />
-
-                {/* Ad / post attribution */}
-                <AdAttribution
-                  ads={adAttribution}
-                  rangeLabel={` in the last ${analyticsRange} day${analyticsRange > 1 ? "s" : ""}`}
                 />
               </>
             )}

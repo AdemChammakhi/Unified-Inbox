@@ -40,13 +40,18 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Allow MongoDB Atlas (external HTTPS)
+    # Allow MongoDB Atlas (the Better Call Fedi support desk) and HTTPS
     - to: []
       ports:
         - protocol: TCP
           port: 27017
         - protocol: TCP
           port: 443
+    # Allow SQL Server (UnifiedBox1 / UnifiedBoxDW)
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 1433
     # Allow email: IMAP (993) and SMTP submission (587)
     - to: []
       ports:

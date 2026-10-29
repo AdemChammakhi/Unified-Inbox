@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../context/AuthContext";
 import PlatformIcon from "../components/PlatformIcon";
-import AdAttribution from "../components/AdAttribution";
 import AppointmentsPanel from "../components/AppointmentsPanel";
 import ProspectExport from "../components/ProspectExport";
 import {
@@ -28,7 +27,6 @@ const AdminDashboard = () => {
   const [analyticsRange, setAnalyticsRange] = useState(7);
   const [analytics, setAnalytics] = useState(null);
   const [agentStats, setAgentStats] = useState([]);
-  const [adAttribution, setAdAttribution] = useState([]);
   const [appointmentStats, setAppointmentStats] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
@@ -38,24 +36,19 @@ const AdminDashboard = () => {
       if (!token) return;
       setAnalyticsLoading(true);
       try {
-        const [summaryRes, agentsRes, attributionRes, rdvRes] =
-          await Promise.all([
-            axios.get(`/api/analytics/summary?range=${range}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-            axios.get("/api/analytics/agents", {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-            axios.get(`/api/analytics/ad-attribution?range=${range}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-            axios.get(`/api/analytics/appointments?range=${range}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            }),
-          ]);
+        const [summaryRes, agentsRes, rdvRes] = await Promise.all([
+          axios.get(`/api/analytics/summary?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          axios.get("/api/analytics/agents", {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          axios.get(`/api/analytics/appointments?range=${range}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
         setAnalytics(summaryRes.data);
         setAgentStats(agentsRes.data?.agents || []);
-        setAdAttribution(attributionRes.data?.ads || []);
         setAppointmentStats(rdvRes.data || null);
       } catch (err) {
         console.error("Analytics fetch failed:", err.message);
@@ -461,12 +454,6 @@ const AdminDashboard = () => {
               <AppointmentsPanel
                 data={appointmentStats}
                 rangeLabel={` (${analyticsRange}j)`}
-              />
-
-              {/* Ad / post attribution */}
-              <AdAttribution
-                ads={adAttribution}
-                rangeLabel={` in the last ${analyticsRange} day${analyticsRange > 1 ? "s" : ""}`}
               />
             </>
           )}

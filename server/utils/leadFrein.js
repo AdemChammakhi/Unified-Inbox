@@ -6,14 +6,15 @@
  * the lead sheet and it feeds the maturity rules (a named obstacle means the
  * interest is real but the decision is pending).
  *
- * Storage: the data models are frozen, so the frein lives in the EXISTING
- * Contact.customFields (Mixed) field, keyed by the customer's platform id:
+ * Storage: the contact's custom fields (dbo.contact_custom_fields), two rows
+ * per contact, each value JSON:
  *
- *   customFields.leadFrein        { code, note, setBy, setAt }  current value
- *   customFields.leadFreinHistory [ same shape ]                newest last, max 20
+ *   leadFrein         { code, note, setBy, setAt }  current value
+ *   leadFreinHistory  [ same shape ]                newest last, max 20
  *
- * Contacts are matched on platformIdentities (platform + externalId), the
- * customer id every list shape agrees on (see CLAUDE.md §6).
+ * The contact is found through its platform identity (platform + customer
+ * id), the customer id every list shape agrees on (see CLAUDE.md §6), and
+ * created when missing.
  */
 
 "use strict";
@@ -37,11 +38,15 @@ const FREIN_PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email"]);
 const NOTE_MAX = 200;
 const HISTORY_MAX = 20;
 
-// Models are required lazily so the pure helpers (and leadMaturity, which
-// uses freinLabel) never pull Mongoose in.
-const models = () => ({
-  Contact: require("../models/Contact"),
-  User: require("../models/User"),
+const FIELD = "leadFrein";
+const HISTORY_FIELD = "leadFreinHistory";
+
+// The data layer is required lazily so the pure helpers (and leadMaturity,
+// which uses freinLabel) never open a database connection.
+const store = () => ({
+  sql: require("../db/sql"),
+  contacts: require("../db/contacts"),
+  users: require("../db/users"),
 });
 
 /** @returns {boolean} */
@@ -78,23 +83,17 @@ function cleanNote(note) {
   return note.trim().slice(0, NOTE_MAX);
 }
 
-function hasIdentity(contact, platform, externalId) {
-  return Boolean(
-    contact &&
-      (contact.platformIdentities || []).some(
-        (p) => p && p.platform === platform && p.externalId === externalId,
-      ),
-  );
-}
-
-function toTime(value) {
-  if (!value) return 0;
-  const t = new Date(value).getTime();
-  return Number.isFinite(t) ? t : 0;
+function parseJson(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Record the frein for one customer. Creates the Contact when none exists.
+ * Record the frein for one customer. Creates the contact when none exists.
  * Throws an Error with `status = 400` on invalid input.
  *
  * @returns {Promise<{code: string, note: string, setBy: string|null, setAt: Date}>}
@@ -104,7 +103,7 @@ async function setFrein({ platform, customerId, code, note, userId }) {
     throw badRequest("Plateforme invalide.");
   }
   const externalId = typeof customerId === "string" ? customerId.trim() : "";
-  if (!externalId || externalId.startsWith("$")) {
+  if (!externalId || externalId.startsWith("$") || externalId.length > 255) {
     throw badRequest("Client introuvable pour cette conversation.");
   }
   if (!isValidFreinCode(code)) {
@@ -118,85 +117,33 @@ async function setFrein({ platform, customerId, code, note, userId }) {
     setAt: new Date(),
   };
 
-  const { Contact } = models();
-  const filter = {
-    platformIdentities: { $elemMatch: { platform, externalId } },
-  };
-
-  // Several contacts can share one identity (the find-or-create is not
-  // atomic); write to the most recently touched one, which getFreins then
-  // resolves by setAt anyway.
-  let contact = await Contact.findOne(filter)
-    .sort({ updatedAt: -1 })
-    .select("_id customFields")
-    .lean();
-  if (!contact) {
-    contact = await Contact.findOrCreateByPlatformId(platform, externalId, {});
-    // That static matches platform and id without $elemMatch, so it can hand
-    // back a merged contact holding them on two different identities. A
-    // frein written there could never be read back; create the right one.
-    if (!hasIdentity(contact, platform, externalId)) {
-      const now = new Date();
-      contact = await Contact.create({
-        displayName: "Unknown",
-        platformIdentities: [
-          { platform, externalId, name: "Unknown", lastSeenAt: now },
-        ],
-        firstContactAt: now,
-        lastContactAt: now,
-      });
-    }
-  }
-
-  const customFields = contact.customFields;
-  const canDotSet =
-    customFields === undefined ||
-    (customFields !== null &&
-      typeof customFields === "object" &&
-      !Array.isArray(customFields));
-
-  if (canDotSet) {
-    const history = customFields && customFields.leadFreinHistory;
-    if (history === undefined || Array.isArray(history)) {
-      await Contact.updateOne(
-        { _id: contact._id },
-        {
-          $set: { "customFields.leadFrein": frein },
-          $push: {
-            "customFields.leadFreinHistory": {
-              $each: [frein],
-              $slice: -HISTORY_MAX,
-            },
-          },
-        },
-      );
-    } else {
-      // A malformed history cannot take $push; start it afresh.
-      await Contact.updateOne(
-        { _id: contact._id },
-        {
-          $set: {
-            "customFields.leadFrein": frein,
-            "customFields.leadFreinHistory": [frein],
-          },
-        },
-      );
-    }
-  } else {
-    // customFields is null or not an object: dotted paths cannot be created
-    // under it, so replace it with a fresh object holding only the frein.
-    await Contact.updateOne(
-      { _id: contact._id },
-      { $set: { customFields: { leadFrein: frein, leadFreinHistory: [frein] } } },
+  const { sql, contacts } = store();
+  await sql.tx(async (t) => {
+    const { contactId } = await contacts.ensureIdentity(t, {
+      platform,
+      externalId,
+    });
+    const history = parseJson(
+      await contacts.readCustomField(t, contactId, HISTORY_FIELD),
     );
-  }
+    const next = [...(Array.isArray(history) ? history : []), frein].slice(
+      -HISTORY_MAX,
+    );
+    await contacts.writeCustomField(t, contactId, FIELD, JSON.stringify(frein));
+    await contacts.writeCustomField(
+      t,
+      contactId,
+      HISTORY_FIELD,
+      JSON.stringify(next),
+    );
+  });
 
   return frein;
 }
 
 /**
  * Current frein for many customers of one platform.
- * Two queries in total: one Contact, one User.
+ * Two queries in total: one for the frein fields, one for the users.
  *
  * @param {string} platform
  * @param {string[]} customerIds
@@ -217,52 +164,19 @@ async function getFreins(platform, customerIds) {
   ];
   if (ids.length === 0) return result;
 
-  const { Contact, User } = models();
-  const contacts = await Contact.find({
-    platformIdentities: {
-      $elemMatch: { platform, externalId: { $in: ids } },
-    },
-    "customFields.leadFrein.code": { $exists: true, $ne: null },
-  })
-    .select("platformIdentities customFields.leadFrein")
-    .lean();
+  const { contacts, users } = store();
+  const raw = await contacts.customFieldFor(platform, ids, FIELD);
 
-  const wanted = new Set(ids);
-  const best = new Map(); // customerId -> raw frein
-  for (const contact of contacts) {
-    const frein = contact.customFields && contact.customFields.leadFrein;
-    if (!frein || !isValidFreinCode(frein.code)) continue;
-    for (const identity of contact.platformIdentities || []) {
-      if (identity.platform !== platform) continue;
-      const id = identity.externalId;
-      if (!wanted.has(id)) continue;
-      const current = best.get(id);
-      if (!current || toTime(frein.setAt) > toTime(current.setAt)) {
-        best.set(id, frein);
-      }
-    }
+  const best = new Map(); // customerId -> frein
+  for (const [id, value] of raw) {
+    const frein = parseJson(value);
+    if (frein && isValidFreinCode(frein.code)) best.set(id, frein);
   }
   if (best.size === 0) return result;
 
-  const userIds = [
-    ...new Set(
-      [...best.values()]
-        .map((f) => (f.setBy ? String(f.setBy) : ""))
-        .filter((id) => /^[a-f0-9]{24}$/i.test(id)),
-    ),
-  ];
-  const names = new Map();
-  if (userIds.length > 0) {
-    const users = await User.find({ _id: { $in: userIds } })
-      .select("firstName lastName")
-      .lean();
-    for (const u of users) {
-      names.set(
-        String(u._id),
-        `${u.firstName || ""} ${u.lastName || ""}`.trim(),
-      );
-    }
-  }
+  const names = await users.namesByIds(
+    [...best.values()].map((f) => f.setBy).filter(Boolean),
+  );
 
   for (const [id, frein] of best) {
     const setBy = frein.setBy ? String(frein.setBy) : null;

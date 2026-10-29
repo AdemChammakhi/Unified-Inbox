@@ -4,16 +4,18 @@
  *   POST /api/lead-insights        counts, maturity and frein for a list page
  *   PUT  /api/lead-insights/frein  record the main need or obstacle
  *
- * Nothing here is stored except the frein (Contact.customFields, see
- * utils/leadFrein.js). Message counts, the maturity level and the
- * "needs qualification" flag are computed from Message and Classification
- * rows at read time; the data models are frozen.
+ * Nothing here is stored except the frein (contact custom fields, see
+ * utils/leadFrein.js). Message counts, the maturity level and the "needs
+ * qualification" flag are computed from the customer's conversation and its
+ * messages at read time.
  *
  * Ids: a conversation has no single stable id (CLAUDE.md §6). The client
  * sends each list row as { key: conv.id, customerId: first participant },
  * and everything is keyed by the CUSTOMER, the only id both list shapes
- * share. `keyToCustomer` in the response lets the client look a row up by
- * its conversation key when its participant id was missing.
+ * share. Either id finds the customer's conversation (the thread id is
+ * recorded on it once known); `keyToCustomer` in the response lets the
+ * client look a row up by its conversation key when its participant id was
+ * missing.
  */
 
 "use strict";
@@ -21,9 +23,9 @@
 const crypto = require("crypto");
 const express = require("express");
 const router = express.Router();
-const Message = require("../models/Message");
-const Classification = require("../models/Classification");
 const { protect } = require("../middleware/auth");
+const { db } = require("../db/sql");
+const conversations = require("../db/conversations");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 const { resolveRecipientId } = require("../utils/resolveRecipient");
 const {
@@ -68,9 +70,6 @@ function ownIds() {
   );
 }
 
-/** Sender names the Graph sync used for the Page's own messages. */
-const OWN_SENDER_NAMES = ["Page", "You"];
-
 /**
  * Graph thread ids (t_…) are conversations, never people. Email has no
  * threads, and an address may legitimately start with "t_".
@@ -89,12 +88,6 @@ function cleanId(value) {
 function checkPlatform(value) {
   const platform = sanitizePlatform(value);
   return platform && PLATFORMS.has(platform) ? platform : null;
-}
-
-function toTime(value) {
-  if (!value) return 0;
-  const t = new Date(value).getTime();
-  return Number.isFinite(t) ? t : 0;
 }
 
 function userName(user) {
@@ -127,63 +120,62 @@ function clearLeadsCacheSafely() {
 }
 
 /**
- * Map each list row to its customer.
- * @returns {Promise<{ customers: string[], keyToCustomer: Map<string,string> }>}
+ * Map each list row to its customer, and each customer to its stored
+ * conversation (null when nothing is stored for it yet).
+ * @returns {Promise<{ customers: Map<string, object|null>, keyToCustomer: Map<string,string> }>}
  */
 async function resolveCustomers(platform, items, own) {
-  const customers = new Set();
-  const keyToCustomer = new Map();
-  const pendingKeys = new Set();
-
   const usable = (id) => id && !isThreadId(platform, id) && !own.has(id);
+  const keys = [
+    ...new Set(items.flatMap((it) => [it.key, it.customerId].filter(Boolean))),
+  ];
+  const stored = await conversations.findByKeys(platform, keys);
+  const byKey = new Map();
+  for (const conv of stored) {
+    if (conv.customerId && !byKey.has(conv.customerId)) byKey.set(conv.customerId, conv);
+    if (!byKey.has(conv.externalId)) byKey.set(conv.externalId, conv);
+  }
 
+  const customers = new Map();
+  const keyToCustomer = new Map();
   for (const { key, customerId } of items) {
-    let customer = null;
-    if (usable(customerId)) customer = customerId;
-    else if (usable(key)) customer = key;
-
-    if (customer) {
-      customers.add(customer);
-      if (key) keyToCustomer.set(key, customer);
-    } else if (key) {
-      pendingKeys.add(key);
+    const conv =
+      (customerId && byKey.get(customerId)) || (key && byKey.get(key)) || null;
+    let customer = conv && usable(conv.customerId) ? conv.customerId : null;
+    if (!customer) customer = usable(customerId) ? customerId : usable(key) ? key : null;
+    if (!customer) continue;
+    if (!customers.get(customer)) {
+      customers.set(customer, conv && conv.customerId === customer ? conv : null);
     }
+    if (key) keyToCustomer.set(key, customer);
   }
+  return { customers, keyToCustomer };
+}
 
-  // Thread-keyed rows with no participant: the customer is the sender of the
-  // newest inbound message stored under that thread.
-  if (pendingKeys.size > 0) {
-    const senderFilter = { $nin: [...own] };
-    if (platform !== "email") senderFilter.$not = /^t_/;
-    const rows = await Message.aggregate([
-      {
-        $match: {
-          platform,
-          direction: "incoming",
-          conversationId: { $in: [...pendingKeys] },
-          senderId: senderFilter,
-          senderName: { $nin: OWN_SENDER_NAMES },
-        },
-      },
-      { $sort: { timestamp: -1 } },
-      { $group: { _id: "$conversationId", senderId: { $first: "$senderId" } } },
-    ]);
-    for (const row of rows) {
-      const customer =
-        typeof row.senderId === "string" ? row.senderId.trim() : "";
-      if (!usable(customer) || customer.startsWith("$")) continue;
-      customers.add(customer);
-      keyToCustomer.set(row._id, customer);
-    }
-  }
-
-  return { customers: [...customers], keyToCustomer };
+/** Message counts and latest times per conversation, over all history. */
+async function messageStats(conversationIds) {
+  const stats = new Map();
+  if (conversationIds.length === 0) return stats;
+  const rows = (
+    await db.query(
+      `SELECT m.conversation_id,
+              messages_in = SUM(CASE WHEN m.sender_type = N'contact' THEN 1 ELSE 0 END),
+              messages_out = SUM(CASE WHEN m.sender_type <> N'contact' THEN 1 ELSE 0 END),
+              last_in = MAX(CASE WHEN m.sender_type = N'contact' THEN dbo.fn_DateTimeCombine(m.sent_date, m.sent_time) END),
+              last_out = MAX(CASE WHEN m.sender_type <> N'contact' THEN dbo.fn_DateTimeCombine(m.sent_date, m.sent_time) END)
+       FROM dbo.message m
+       WHERE m.conversation_id IN (SELECT CONVERT(int, value) FROM OPENJSON(@ids))
+       GROUP BY m.conversation_id`,
+      { ids: JSON.stringify(conversationIds) },
+    )
+  ).rows;
+  for (const r of rows) stats.set(r.conversation_id, r);
+  return stats;
 }
 
 /** Build the full response for one platform and a list of rows. */
 async function computeInsights(platform, items) {
   const own = ownIds();
-  const ownList = [...own];
   const { customers, keyToCustomer } = await resolveCustomers(
     platform,
     items,
@@ -193,194 +185,42 @@ async function computeInsights(platform, items) {
   const insights = Object.create(null);
   const keyMap = Object.create(null);
   for (const [key, customer] of keyToCustomer) keyMap[key] = customer;
-  if (customers.length === 0) {
+  if (customers.size === 0) {
     return { insights, keyToCustomer: keyMap, thresholds: THRESHOLDS };
   }
 
-  const customerSet = new Set(customers);
-  const keys = [...keyToCustomer.keys()];
-  // Graph threads found through the customer's own messages (second pass
-  // below): thread id -> { customer, last }
-  const threadOwner = new Map();
-  // A conversation id that IS a customer id belongs to that customer; any
-  // other resolved key or found thread belongs to its customer.
-  const customerOfConv = (conversationId) => {
-    if (typeof conversationId !== "string") return null;
-    if (customerSet.has(conversationId)) return conversationId;
-    const owner = threadOwner.get(conversationId);
-    return keyToCustomer.get(conversationId) || (owner && owner.customer) || null;
-  };
-  const convIds = [...new Set([...keys, ...customers])];
-
-  // An "incoming" row sent by us is a Graph-sync mislabel (instagram.js heals
-  // these lazily); it is our reply, not the prospect's message.
-  const isIncoming = {
-    $and: [
-      { $eq: ["$direction", "incoming"] },
-      { $not: [{ $in: ["$senderId", { $literal: ownList }] }] },
-      { $not: [{ $in: ["$senderName", { $literal: OWN_SENDER_NAMES }] }] },
-    ],
-  };
-
-  // One group per (direction, sender or recipient, conversation)
-  const countStages = [
-    {
-      $project: {
-        _id: 0,
-        i: isIncoming,
-        senderId: 1,
-        recipientId: 1,
-        conversationId: 1,
-        at: { $ifNull: ["$timestamp", "$createdAt"] },
-      },
-    },
-    {
-      $group: {
-        _id: {
-          i: "$i",
-          s: { $cond: ["$i", "$senderId", null] },
-          r: { $cond: ["$i", null, "$recipientId"] },
-          c: "$conversationId",
-        },
-        n: { $sum: 1 },
-        last: { $max: "$at" },
-      },
-    },
-  ];
-  // The customer's own messages, anywhere
-  const fromCustomers = {
-    platform,
-    direction: "incoming",
-    senderId: { $in: customers },
-  };
-
-  // Both $or branches are backed by an index ({platform, senderId} and
-  // {platform, conversationId}). Replies are matched through their
-  // conversation, never through recipientId: Message has no recipientId
-  // index (and none may be added), so such a clause would scan every
-  // message of the platform on each request.
-  const [groups, classRows, freins] = await Promise.all([
-    Message.aggregate([
-      {
-        $match: {
-          platform,
-          status: { $ne: "failed" },
-          $or: [fromCustomers, { platform, conversationId: { $in: convIds } }],
-        },
-      },
-      ...countStages,
-    ]),
-    Classification.find({ platform, conversationId: { $in: convIds } })
-      .select("conversationId stage isPriority appointmentAt updatedAt")
-      .lean(),
-    getFreins(platform, customers),
+  const convIds = [...customers.values()].filter(Boolean).map((c) => c.id);
+  const [stats, freins] = await Promise.all([
+    messageStats(convIds),
+    getFreins(platform, [...customers.keys()]),
   ]);
 
-  // Graph-synced history, and CRM replies sent while the list was built from
-  // Graph, are stored under the t_… thread id. When this list is keyed by
-  // customer ids (the DB-built list), those threads are found through the
-  // customer's own messages under them, and their remaining rows (our
-  // replies) are read in a second, index-backed pass. The first pass already
-  // counted the customer's own messages there, hence the $nor.
-  const listed = new Set(convIds);
-  for (const g of groups) {
-    const { i: incoming, s: senderId, c: conversationId } = g._id || {};
-    if (
-      !incoming ||
-      !customerSet.has(senderId) ||
-      listed.has(conversationId) ||
-      !isThreadId(platform, conversationId)
-    ) {
-      continue;
-    }
-    const last = toTime(g.last);
-    const current = threadOwner.get(conversationId);
-    if (!current || last > current.last) {
-      threadOwner.set(conversationId, { customer: senderId, last });
-    }
-  }
-  if (threadOwner.size > 0) {
-    const threadGroups = await Message.aggregate([
-      {
-        $match: {
-          platform,
-          status: { $ne: "failed" },
-          conversationId: { $in: [...threadOwner.keys()] },
-          $nor: [fromCustomers],
-        },
-      },
-      ...countStages,
-    ]);
-    groups.push(...threadGroups);
-  }
-
-  const stats = new Map(); // customer -> counters
-  for (const customer of customers) {
-    stats.set(customer, {
-      messagesIn: 0,
-      messagesOut: 0,
-      lastIncomingAt: null,
-      lastOutgoingAt: null,
-    });
-  }
-
-  for (const g of groups) {
-    const { i: incoming, s: senderId, r: recipientId, c: conversationId } =
-      g._id || {};
-    const direct = incoming ? senderId : recipientId;
-    const customer = customerSet.has(direct)
-      ? direct
-      : customerOfConv(conversationId);
-    const st = customer && stats.get(customer);
-    if (!st) continue;
-    const last = g.last ? new Date(g.last) : null;
-    const count = Number(g.n) || 0;
-    if (incoming) {
-      st.messagesIn += count;
-      if (last && (!st.lastIncomingAt || last > st.lastIncomingAt)) {
-        st.lastIncomingAt = last;
-      }
-    } else {
-      st.messagesOut += count;
-      if (last && (!st.lastOutgoingAt || last > st.lastOutgoingAt)) {
-        st.lastOutgoingAt = last;
-      }
-    }
-  }
-
-  const classOf = new Map(); // customer -> newest Classification row
-  for (const row of classRows) {
-    const customer = customerOfConv(row.conversationId);
-    if (!customer) continue;
-    const current = classOf.get(customer);
-    if (!current || toTime(row.updatedAt) > toTime(current.updatedAt)) {
-      classOf.set(customer, row);
-    }
-  }
-
   const now = new Date();
-  for (const customer of customers) {
-    const st = stats.get(customer);
-    const cls = classOf.get(customer);
+  for (const [customer, conv] of customers) {
+    const st = (conv && stats.get(conv.id)) || {};
+    const messagesIn = Number(st.messages_in) || 0;
+    const messagesOut = Number(st.messages_out) || 0;
+    const lastIncomingAt = st.last_in || null;
+    const lastOutgoingAt = st.last_out || null;
     const frein = freins.get(customer) || null;
     insights[customer] = {
-      messagesIn: st.messagesIn,
-      messagesOut: st.messagesOut,
-      lastIncomingAt: st.lastIncomingAt,
-      lastOutgoingAt: st.lastOutgoingAt,
+      messagesIn,
+      messagesOut,
+      lastIncomingAt,
+      lastOutgoingAt,
       maturity: computeMaturity({
-        messagesIn: st.messagesIn,
-        messagesOut: st.messagesOut,
-        lastIncomingAt: st.lastIncomingAt,
-        lastOutgoingAt: st.lastOutgoingAt,
-        stage: cls ? cls.stage : null,
-        isPriority: cls ? cls.isPriority === true : false,
-        appointmentAt: cls ? cls.appointmentAt : null,
+        messagesIn,
+        messagesOut,
+        lastIncomingAt,
+        lastOutgoingAt,
+        stage: conv ? conv.stage : null,
+        qualification: conv ? conv.qualification : null,
+        appointmentAt: conv ? conv.appointmentAt : null,
         frein,
         now,
       }),
       frein: publicFrein(frein),
-      needsQualification: st.messagesOut >= 1 && !frein,
+      needsQualification: messagesOut >= 1 && !frein,
     };
   }
 
@@ -423,7 +263,7 @@ router.post("/", protect, async (req, res) => {
     }
 
     // Keyed on the exact (key, customer) pairs: the same customers under
-    // different conversation keys can match different message rows.
+    // different conversation keys can resolve differently.
     // JSON.stringify quotes and escapes every id, so no two different lists
     // can produce the same signature, whatever characters the ids hold.
     const signature = JSON.stringify(

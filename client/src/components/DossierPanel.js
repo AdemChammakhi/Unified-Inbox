@@ -1,18 +1,17 @@
 import React, { useEffect, useState } from "react";
-import { Star, CalendarDays, FileText, X } from "lucide-react";
+import { CalendarDays, X } from "lucide-react";
 import { TYPOLOGIES } from "../constants/pipeline";
-import DossierDocuments from "./DossierDocuments";
 
 /**
- * DossierPanel — the customer's file, beyond the pipeline stage: typologie
- * of the request, priority flag, RDV date, invoice reference and attached
- * documents. Every field saves on its own; the parent persists through
- * PUT /api/classifications and passes the stored values back as `dossier`.
+ * DossierPanel — the customer's file, beyond the étape and the
+ * qualification (both set from the conversation header): typologie of the
+ * request and RDV date. Every field saves on its own; the parent persists
+ * through PUT /api/classifications and passes the stored values back as
+ * `dossier`.
  *
  * Props:
- *   dossier    { typologie, isPriority, invoiceRef, appointmentAt } | undefined
+ *   dossier    { stage, qualification, typologie, appointmentAt } | undefined
  *   onSave     (patch) => Promise   — patch holds only the changed field(s)
- *   platform, customerId            — for the documents list
  *   canEdit    boolean
  */
 
@@ -37,17 +36,15 @@ const formatRdv = (value) => {
   });
 };
 
-const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true }) => {
+const DossierPanel = ({ dossier, onSave, canEdit = true }) => {
   const d = dossier || {};
-  const [invoice, setInvoice] = useState(d.invoiceRef || "");
   const [rdv, setRdv] = useState(toLocalInput(d.appointmentAt));
   const [saving, setSaving] = useState("");
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    setInvoice(d.invoiceRef || "");
     setRdv(toLocalInput(d.appointmentAt));
-  }, [d.invoiceRef, d.appointmentAt]);
+  }, [d.appointmentAt]);
 
   const save = async (field, patch) => {
     setSaving(field);
@@ -79,33 +76,6 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
               <option key={t.key} value={t.key}>{t.label}</option>
             ))}
           </select>
-        </label>
-
-        <label style={styles.field}>
-          <span style={styles.label}>Référence de facture</span>
-          <span style={styles.inline}>
-            <input
-              style={{ ...styles.input, flex: 1 }}
-              value={invoice}
-              maxLength={60}
-              placeholder="ex. F-2026-0142"
-              disabled={!canEdit || busy("invoiceRef")}
-              onChange={(e) => setInvoice(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") save("invoiceRef", { invoiceRef: invoice.trim() });
-              }}
-            />
-            {canEdit && invoice.trim() !== (d.invoiceRef || "") && (
-              <button
-                className="inbox-send-action"
-                style={styles.smallBtn}
-                disabled={busy("invoiceRef")}
-                onClick={() => save("invoiceRef", { invoiceRef: invoice.trim() })}
-              >
-                {busy("invoiceRef") ? "…" : "Enregistrer"}
-              </button>
-            )}
-          </span>
         </label>
 
         <label style={styles.field}>
@@ -148,34 +118,9 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
             <span style={styles.hint}>Fixé le {formatRdv(d.appointmentAt)}</span>
           )}
         </label>
-
-        <label style={{ ...styles.field, justifyContent: "flex-end" }}>
-          <span style={styles.label}>Priorité</span>
-          <button
-            type="button"
-            className="inbox-tab-btn"
-            style={{
-              ...styles.toggle,
-              ...(d.isPriority ? styles.toggleOn : {}),
-            }}
-            disabled={!canEdit || busy("isPriority")}
-            onClick={() => save("isPriority", { isPriority: !d.isPriority })}
-            aria-pressed={Boolean(d.isPriority)}
-          >
-            <Star size={13} fill={d.isPriority ? "currentColor" : "none"} />
-            {d.isPriority ? "Dossier prioritaire" : "Marquer prioritaire"}
-          </button>
-        </label>
       </div>
 
       {error && <div style={styles.error} role="alert">{error}</div>}
-
-      <div style={styles.docs}>
-        <div style={styles.label}>
-          <FileText size={12} /> Pièces jointes du dossier
-        </div>
-        <DossierDocuments platform={platform} customerId={customerId} compact />
-      </div>
     </div>
   );
 };
@@ -236,29 +181,10 @@ const styles = {
     display: "inline-flex",
   },
   hint: { fontSize: 11, color: "var(--text-muted)" },
-  toggle: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "7px 11px",
-    borderRadius: 8,
-    border: "1px solid var(--border-primary)",
-    backgroundColor: "transparent",
-    color: "var(--text-muted)",
-    fontSize: 12.5,
-    cursor: "pointer",
-  },
-  toggleOn: {
-    color: "#E3A63C",
-    borderColor: "#E3A63C88",
-    backgroundColor: "#E3A63C1a",
-    fontWeight: 700,
-  },
   error: {
     fontSize: 12,
     color: "var(--danger)",
   },
-  docs: { display: "flex", flexDirection: "column", gap: 6 },
 };
 
 export default DossierPanel;

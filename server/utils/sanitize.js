@@ -39,7 +39,10 @@ function sanitizeId(value) {
 
 /**
  * Validate that a platform string is one of the known platforms.
- * Returns the lowercase platform string, or null if invalid.
+ * Returns the lowercase platform string, or null if invalid. "messenger",
+ * the alias the MongoDB schema accepted, is the facebook platform: the
+ * SQL Server CHECKs (CK_conv_platform, CK_channels_platform) know only that
+ * name.
  *
  * @param {*} value
  * @returns {string|null}
@@ -47,7 +50,8 @@ function sanitizeId(value) {
 function sanitizePlatform(value) {
   if (typeof value !== "string") return null;
   const lower = value.trim().toLowerCase();
-  return VALID_PLATFORMS.has(lower) ? lower : null;
+  if (!VALID_PLATFORMS.has(lower)) return null;
+  return lower === "messenger" ? "facebook" : lower;
 }
 
 /**

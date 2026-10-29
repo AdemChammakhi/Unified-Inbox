@@ -3,6 +3,12 @@ import axios from "axios";
 
 const AuthContext = createContext(null);
 
+// Roles with a dashboard route (/admin, /manager, /agent). A session saved
+// under any other role, e.g. one opened before the agent role was renamed,
+// would redirect to a page that no longer exists: drop it so the user signs
+// in again and gets their current role.
+const KNOWN_ROLES = new Set(["admin", "manager", "agent"]);
+
 export const useAuth = () => useContext(AuthContext);
 
 export const AuthProvider = ({ children }) => {
@@ -12,7 +18,9 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const stored = localStorage.getItem("user");
     if (stored) {
-      setUser(JSON.parse(stored));
+      const saved = JSON.parse(stored);
+      if (KNOWN_ROLES.has(saved?.role)) setUser(saved);
+      else localStorage.removeItem("user");
     }
     setLoading(false);
   }, []);

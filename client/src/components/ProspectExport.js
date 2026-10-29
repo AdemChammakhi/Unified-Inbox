@@ -6,7 +6,7 @@ import { useAuth } from "../context/AuthContext";
 /**
  * ProspectExport — download the prospect sheet the team used to maintain by
  * hand: one row per prospect with source (incl. the originating ad), phone,
- * first/last contact, classification stage, RDV date and assigned agent.
+ * first/last contact, étape and qualification, RDV date and assigned agent.
  *
  * Excel comes color-coded like the app (and like their old spreadsheet);
  * CSV is tuned for French Excel (UTF-8 BOM, semicolons).

@@ -4,8 +4,8 @@ import PlatformIcon from "./PlatformIcon";
 /**
  * AppointmentsPanel — the RDV agenda.
  *
- * Conversations classified "RDV" carry the date the appointment was booked
- * for, so unlike the other classifications this one has a future: the useful
+ * A conversation's RDV date is set from its header ("📅 RDV"), independently
+ * of its Étape and Qualification, and unlike them it has a future: the useful
  * view is not "how many did we tag" but "who are we seeing, and when".
  * Counts summarise the load; the list is ordered soonest-first so the top row
  * is always the next thing the team has to honour.
@@ -49,7 +49,7 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
     <div className="chart-card" style={{ marginTop: 16 }}>
       <div className="chart-card-title">📅 Rendez-vous</div>
       <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--text-faint)" }}>
-        Conversations classées RDV{rangeLabel}, avec la date convenue.
+        Rendez-vous fixés{rangeLabel}, avec la date convenue.
       </p>
 
       {/* Summary counts */}
@@ -84,7 +84,7 @@ const AppointmentsPanel = ({ data, rangeLabel = "" }) => {
         <div style={styles.empty}>
           Aucun rendez-vous à venir.
           <br />
-          Classez une conversation en “RDV” pour fixer une date.
+          Fixez-en un avec le bouton « 📅 RDV » d’une conversation.
         </div>
       ) : (
         <div style={styles.list}>

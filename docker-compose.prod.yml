@@ -17,8 +17,47 @@ volumes:
   # Outbound message media (server/uploads) — must survive container
   # recreation on deploy, or attachment URLs in old messages break.
   uploads-data:
+  # UnifiedBox1 + UnifiedBoxDW data and log files. Back this volume up.
+  sqlserver-data:
 
 services:
+  # ── SQL Server 2025 Express — UnifiedBox1 (app) + UnifiedBoxDW (warehouse) ─
+  # Databases are created once by database/sqlserver/deploy.sh (see
+  # database/sqlserver/README.md). SQL Server needs 2 GB of RAM to start.
+  # sqlserver.env holds MSSQL_SA_PASSWORD only — never the backend's file,
+  # so the sa password stays out of the backend container.
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-latest
+    container_name: sqlserver
+    env_file:
+      - sqlserver.env
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Express
+      - TZ=UTC
+    ports:
+      - "127.0.0.1:1433:1433"   # Only localhost — reach it through an SSH tunnel
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    networks:
+      - unified-inbox
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -b -Q 'SELECT 1' -o /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
   # ── Backend — Express API + Socket.IO ──────────────────────────────────────
   backend:
     image: ademxd/projetpfe-backend:latest
@@ -30,6 +69,9 @@ services:
       - NODE_ENV=production
     ports:
       - "127.0.0.1:5000:5000"   # Only localhost — host Nginx proxies external traffic
+    depends_on:
+      sqlserver:
+        condition: service_healthy
     volumes:
       - uploads-data:/app/server/uploads
     networks:

@@ -9,26 +9,14 @@
  * answers "(#100) No matching user found": the reply never leaves, and until
  * this was mapped the agent saw only a generic failure.
  *
- * Every inbound message in a conversation carries the real customer id in
- * senderId, so the person is always recoverable from what we already stored.
+ * The conversation row behind a thread id carries its customer
+ * (participant_external_id, see server/db/conversations.js), so the person is
+ * always recoverable from what we already stored.
  */
 
 "use strict";
 
-const Message = require("../models/Message");
-
-/** Ids that are us, never a recipient. */
-function ownIds() {
-  return [
-    process.env.FACEBOOK_PAGE_ID,
-    process.env.INSTAGRAM_ACCOUNT_ID,
-    process.env.WHATSAPP_PHONE_NUMBER_ID,
-    process.env.EMAIL_USER,
-    "agent",
-    "unknown",
-    "Page",
-  ].filter(Boolean);
-}
+const conversations = require("../db/conversations");
 
 /**
  * @param {string} platform
@@ -41,25 +29,16 @@ async function resolveRecipientId(platform, recipientId, conversationId) {
   // A plain user id is already correct — don't spend a query on it.
   if (given && !/^t_/i.test(given)) return { id: given, repaired: false };
 
-  const keys = [given, conversationId].filter(Boolean);
+  const keys = [given, conversationId].filter((k) => typeof k === "string" && k);
   if (keys.length === 0) return { id: given, repaired: false };
 
   try {
-    const doc = await Message.findOne({
-      platform,
-      conversationId: { $in: keys },
-      direction: "incoming",
-      senderId: { $nin: ownIds() },
-    })
-      .sort({ timestamp: -1 })
-      .select("senderId")
-      .lean();
-
-    if (doc?.senderId && !/^t_/i.test(doc.senderId)) {
+    const conv = await conversations.resolve(platform, keys);
+    if (conv?.customerId && !/^t_/i.test(conv.customerId)) {
       console.log(
-        `[Send] recipient repaired: ${given} -> ${doc.senderId} (${platform})`,
+        `[Send] recipient repaired: ${given} -> ${conv.customerId} (${platform})`,
       );
-      return { id: doc.senderId, repaired: true };
+      return { id: conv.customerId, repaired: true };
     }
   } catch (err) {
     console.error("[Send] recipient resolution failed:", err.message);

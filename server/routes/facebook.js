@@ -1,15 +1,21 @@
 const express = require("express");
 const axios = require("axios");
 const router = express.Router();
-const Message = require("../models/Message");
-const ConversationLock = require("../models/ConversationLock");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 const {
-  parseGraphAttachments,
-  messageTypeFor,
-} = require("../utils/metaPayload");
-const { getContactAvatarMap } = require("../services/conversationService");
+  getContactAvatarMap,
+  storeCrmSend,
+  syncGraphMessages,
+  metaOwnIds,
+} = require("../services/conversationService");
+const {
+  mergeStoredConversations,
+  storedConversationList,
+  recordGraphListInBackground,
+} = require("../services/inboxLists");
+const conversations = require("../db/conversations");
+const messages = require("../db/messages");
 
 const { describeMetaSendError, TEXT_LIMITS } = require("../utils/metaSendError");
 const { resolveRecipientId } = require("../utils/resolveRecipient");
@@ -70,56 +76,19 @@ function isTextSendPending(mid) {
 
 /**
  * Store a message the CRM sent, following the dedupe contract with the echo
- * webhook (routes/webhooks.js). With Meta's message id, the write is an upsert
- * keyed by it, so a row the echo stored first (sentBy null) is claimed instead
- * of duplicated. Without an id, a plain create.
+ * webhook (routes/webhooks.js). With Meta's message id, a row the echo stored
+ * first (no CRM sender) is claimed instead of duplicated. Without an id, a
+ * plain insert.
+ * @returns {Promise<{conversation: object, inserted: boolean}>}
  */
-async function storeFbCrmSend({
-  messageId,
-  recipientId,
-  pageId,
-  content,
-  attachments,
-  sentBy,
-}) {
-  if (messageId) {
-    return Message.updateOne(
-      { externalId: messageId },
-      {
-        $set: {
-          sentBy,
-          senderName: "Page",
-          direction: "outgoing",
-          status: "sent",
-        },
-        $setOnInsert: {
-          platform: "facebook",
-          conversationId: recipientId,
-          senderId: pageId,
-          recipientId: recipientId,
-          content,
-          messageType: messageTypeFor(attachments),
-          attachments,
-          externalId: messageId,
-          timestamp: new Date(),
-        },
-      },
-      { upsert: true },
-    );
-  }
-  return Message.create({
+function storeFbCrmSend({ messageId, recipientId, content, attachments, sentBy }) {
+  return storeCrmSend({
     platform: "facebook",
-    conversationId: recipientId,
-    senderId: pageId,
-    senderName: "Page",
-    recipientId: recipientId,
-    content,
-    messageType: messageTypeFor(attachments),
-    attachments,
-    direction: "outgoing",
-    status: "sent",
+    customerId: recipientId,
     externalId: messageId,
-    sentBy,
+    content,
+    attachments,
+    userId: sentBy,
   });
 }
 
@@ -174,16 +143,6 @@ let _fbCacheSlimTime = 0;
 let _fbFetch = null;
 let _fbFetchSlim = null;
 
-// Returns a display-friendly name from what is already stored in the DB.
-// Does NOT make any external API calls — name resolution happens once at
-// webhook-receive time (webhooks.js getSenderName) and is persisted then.
-function resolveStoredName(senderName) {
-  if (!senderName) return "Unknown";
-  // If the stored value looks like a raw numeric Facebook/Instagram ID, ignore it
-  if (/^\d{6,}$/.test(senderName)) return "Unknown";
-  return senderName;
-}
-
 async function fetchFacebookConversations(slim = false) {
   const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
   const pageId = process.env.FACEBOOK_PAGE_ID;
@@ -206,7 +165,7 @@ async function fetchFacebookConversations(slim = false) {
 
   // Fetch conversations from the Page
   // Paginate to get all conversations (new ones may not be on the first page)
-  let conversations = [];
+  let graphConversations = [];
   let nextUrl = `${GRAPH_API}/${pageId}/conversations`;
   let params = {
     fields: `participants{id,name,picture{url}},${msgFields}`,
@@ -221,17 +180,19 @@ async function fetchFacebookConversations(slim = false) {
         ? await axios.get(nextUrl, { params, timeout: 10000 })
         : await axios.get(nextUrl, { timeout: 10000 });
     const pageData = convRes.data.data || [];
-    conversations = conversations.concat(pageData);
+    graphConversations = graphConversations.concat(pageData);
     nextUrl = convRes.data.paging?.next;
     if (!nextUrl || pageData.length === 0) break;
   }
-  console.log(`Facebook API returned ${conversations.length} conversations`);
+  console.log(`Facebook API returned ${graphConversations.length} conversations`);
 
   // Format conversations
-  // Collected across all conversations and flushed as ONE bulkWrite below
-  // instead of firing an individual findOneAndUpdate per message.
-  const syncOps = [];
-  const formatted = conversations.map((conv) => {
+  // Threads to store (full mode only) and thread ids to record, both written
+  // after the list is built, without holding up the response.
+  const threadSyncs = [];
+  const threadLinks = [];
+  const ownIds = metaOwnIds("facebook", [pageId]);
+  const formatted = graphConversations.map((conv) => {
     const participants = conv.participants?.data || [];
     const messages = conv.messages?.data || [];
     const lastMessage = messages[0];
@@ -239,35 +200,21 @@ async function fetchFacebookConversations(slim = false) {
     // Filter out the Page from participants to show only the user
     const otherParticipants = participants.filter((p) => p.id !== pageId);
 
+    // The thread id of a listed customer is recorded, so the thread key
+    // resolves to that customer's conversation later
+    const customerId = otherParticipants[0]?.id;
+    if (customerId) threadLinks.push({ customerId, threadId: conv.id });
+
     // Skip DB sync in slim mode — we only need the lastMessage preview
-    if (!slim) {
-      for (const m of messages) {
-        if (!m.id) continue;
-        const direction = m.from?.id === pageId ? "outgoing" : "incoming";
-        const graphAtts = parseGraphAttachments(m.attachments);
-        syncOps.push({
-          updateOne: {
-            filter: { externalId: m.id },
-            update: {
-              $setOnInsert: {
-                platform: "facebook",
-                conversationId: conv.id,
-                senderId: m.from?.id || "unknown",
-                senderName: m.from?.name || "Unknown",
-                recipientId: m.to?.data?.[0]?.id || pageId,
-                content: m.message || "",
-                messageType: messageTypeFor(graphAtts),
-                attachments: graphAtts,
-                direction,
-                status: direction === "outgoing" ? "sent" : "delivered",
-                externalId: m.id,
-                timestamp: m.created_time,
-              },
-            },
-            upsert: true,
-          },
-        });
-      }
+    if (!slim && messages.length > 0) {
+      threadSyncs.push({
+        platform: "facebook",
+        graphMessages: messages,
+        ownIds,
+        customerId,
+        threadId: conv.id,
+        customerName: otherParticipants[0]?.name,
+      });
     }
 
     // Build a name map from participants so messages with empty from.name
@@ -316,119 +263,18 @@ async function fetchFacebookConversations(slim = false) {
     };
   });
 
-  // Flush the DB sync as a single unordered bulk upsert (non-blocking)
-  if (syncOps.length > 0) {
-    Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
-      console.error("FB message sync error (non-fatal):", err.message),
-    );
-  }
+  // Store what the list revealed (non-blocking)
+  recordGraphListInBackground("facebook", threadLinks, threadSyncs);
 
   // --- Merge in DB-only conversations (new senders the Graph API hasn't returned yet) ---
+  // One entry per PERSON — see the Instagram route for why: a stored
+  // conversation matches a Graph one through the thread id or the customer id.
   try {
-    const knownIds = new Set();
-    formatted.forEach((c) => {
-      knownIds.add(c.id);
-      c.participants.forEach((p) => knownIds.add(p.id));
+    const merged = await mergeStoredConversations("facebook", formatted, {
+      limit: 100,
     });
-
-    const recentDbMsgs = await Message.find({
-      platform: "facebook",
-    })
-      .sort({ timestamp: -1 })
-      .limit(200)
-      .lean();
-
-    // Build a map of key (conversationId/senderId) -> latest message in DB
-    const dbLatestMap = {};
-    for (const m of recentDbMsgs) {
-      const key = m.conversationId || m.senderId;
-      const displayName = resolveStoredName(m.senderName);
-      if (!dbLatestMap[key]) {
-        dbLatestMap[key] = {
-          text: m.content || "",
-          from: displayName,
-          time: m.timestamp || m.createdAt,
-        };
-      }
-    }
-
-    // Update Graph API conversations if DB has a newer message
-    formatted.forEach((c) => {
-      let dbLatest = dbLatestMap[c.id];
-      if (!dbLatest) {
-        // Try participant IDs
-        for (const p of c.participants || []) {
-          if (dbLatestMap[p.id]) {
-            dbLatest = dbLatestMap[p.id];
-            break;
-          }
-        }
-      }
-
-      if (dbLatest) {
-        const serverTime = new Date(c.lastMessage?.time || 0).getTime();
-        const dbTime = new Date(dbLatest.time).getTime();
-        if (dbTime > serverTime) {
-          c.lastMessage = dbLatest;
-        }
-      }
-    });
-
-    // One entry per PERSON — see the Instagram route for why: the same
-    // customer's rows sit under the sender id and under the "t_…" thread id.
-    const newConvMap = {};
-    for (const m of recentDbMsgs) {
-      const customerId =
-        m.direction === "outgoing" ? m.recipientId : m.senderId;
-      if (!customerId || customerId === pageId) continue;
-      if (
-        knownIds.has(customerId) ||
-        knownIds.has(m.senderId) ||
-        knownIds.has(m.conversationId)
-      )
-        continue;
-      const key = customerId;
-      const displayName = resolveStoredName(m.senderName);
-      if (!newConvMap[key]) {
-        newConvMap[key] = {
-          id: key,
-          participants: [
-            {
-              id: customerId,
-              name: m.direction === "outgoing" ? `User ${customerId.slice(-4)}` : displayName,
-            },
-          ],
-          lastMessage: null,
-          messages: [],
-        };
-      }
-      const conv = newConvMap[key];
-      if (m.direction !== "outgoing" && /^User \d{4}$/.test(conv.participants[0].name)) {
-        conv.participants[0].name = displayName;
-      }
-      if (/^t_/i.test(m.conversationId || "")) conv.id = m.conversationId;
-      const msg = {
-        id: m.externalId || m._id.toString(),
-        text: m.content || "",
-        from: displayName,
-        fromId: m.senderId,
-        time: m.timestamp || m.createdAt,
-      };
-      conv.messages.push(msg);
-      if (
-        !conv.lastMessage ||
-        new Date(msg.time) > new Date(conv.lastMessage.time)
-      ) {
-        conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
-      }
-    }
-
-    const dbOnlyConvs = Object.values(newConvMap);
-    if (dbOnlyConvs.length > 0) {
-      console.log(
-        `Merging ${dbOnlyConvs.length} DB-only Facebook conversation(s)`,
-      );
-      formatted.unshift(...dbOnlyConvs);
+    if (merged > 0) {
+      console.log(`Merging ${merged} DB-only Facebook conversation(s)`);
     }
   } catch (mergeErr) {
     console.error("DB merge non-fatal error:", mergeErr.message);
@@ -524,45 +370,9 @@ router.get("/conversations", protect, async (req, res) => {
 
     // If the Graph API fails, fall back to conversations built from the local DB
     try {
-      const dbMessages = await Message.find({ platform: "facebook" })
-        .sort({ timestamp: -1 })
-        .limit(500)
-        .lean();
-
-      const convMap = {};
-      for (const m of dbMessages) {
-        const incomingDisplayName = resolveStoredName(m.senderName);
-        if (!convMap[m.conversationId]) {
-          convMap[m.conversationId] = {
-            id: m.conversationId,
-            participants: [
-              {
-                id: m.direction === "incoming" ? m.senderId : m.recipientId,
-                name: m.direction === "incoming" ? incomingDisplayName : "Page",
-              },
-            ],
-            lastMessage: null,
-            messages: [],
-          };
-        }
-        const conv = convMap[m.conversationId];
-        const msg = {
-          id: m.externalId || m._id.toString(),
-          text: m.content || "",
-          from: m.direction === "incoming" ? incomingDisplayName : "Page",
-          fromId: m.senderId,
-          time: m.timestamp || m.createdAt,
-        };
-        conv.messages.push(msg);
-        if (
-          !conv.lastMessage ||
-          new Date(msg.time) > new Date(conv.lastMessage.time)
-        ) {
-          conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
-        }
-      }
-
-      return res.json({ conversations: Object.values(convMap) });
+      return res.json({
+        conversations: await storedConversationList("facebook", 100),
+      });
     } catch (dbErr) {
       console.error("DB fallback also failed:", dbErr.message);
     }
@@ -575,8 +385,10 @@ router.get("/conversations", protect, async (req, res) => {
 });
 
 // GET /api/facebook/messages-paged
-// Returns paginated messages for a specific conversation from MongoDB.
+// Returns paginated messages for a specific conversation from the database.
 // Cursor-based: pass `before` (ISO timestamp) to load messages older than that point.
+// The conversation is found by either key the inbox may hold: the thread id
+// (t_…) or the customer's PSID (see server/db/conversations.js).
 router.get("/messages-paged", protect, async (req, res) => {
   try {
     const { conversationId, participantId, limit = 30, before } = req.query;
@@ -584,79 +396,63 @@ router.get("/messages-paged", protect, async (req, res) => {
       return res.status(400).json({ message: "conversationId is required" });
     }
     const pageLimit = Math.min(Number(limit) || 30, 100);
+    const safeConvId = sanitizeId(conversationId);
+    const safePartId = sanitizeId(participantId);
+    if (!safeConvId) {
+      return res.status(400).json({ message: "Invalid conversationId" });
+    }
+    const keys = [safeConvId, safePartId].filter(Boolean);
+    const stored = await conversations.findByKeys("facebook", keys);
+
     // --- Sync missing messages from Graph API on first page load ---
     // Only BLOCK when the thread has nothing local; otherwise respond now
     // and top up in the background. 8 s hard timeout.
     const syncThreadFromGraph = async () => {
       const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
       const pageId = process.env.FACEBOOK_PAGE_ID;
-      if (accessToken && pageId && isValidGraphId(conversationId)) {
-          // Numeric id = webhook keying (the sender's PSID). Graph history
-          // lives under the t_… thread id — resolve it, but keep STORING
-          // under the requested id so webhook and synced rows share a key.
-          let fetchId = conversationId;
-          if (/^\d+$/.test(conversationId)) {
-            fetchId = await resolveFbThreadId(
-              conversationId,
-              accessToken,
-              pageId,
-            );
-            if (!fetchId) return;
-          }
-          const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(fetchId)}`, {
-            params: {
-              fields:
-                "messages.limit(30){message,from,to,created_time,attachments}",
-              access_token: accessToken,
-            },
-            timeout: 8000,
-          });
-          const msgs = convRes.data.messages?.data || [];
+      if (!accessToken || !pageId) return;
 
-          // One awaited bulk upsert so the following find() sees the rows,
-          // without 30 parallel round-trips to MongoDB.
-          const pageSyncOps = msgs
-            .filter((m) => m.id)
-            .map((m) => {
-              const isOutgoing = m.from?.id && m.from.id === pageId;
-              const direction = isOutgoing ? "outgoing" : "incoming";
-              const senderName = isOutgoing ? "Page" : m.from?.name || "Unknown";
-              const graphAtts = parseGraphAttachments(m.attachments);
-              return {
-                updateOne: {
-                  filter: { externalId: m.id },
-                  update: {
-                    $setOnInsert: {
-                      platform: "facebook",
-                      conversationId: conversationId,
-                      senderId: m.from?.id || "unknown",
-                      senderName,
-                      recipientId: m.to?.data?.[0]?.id || pageId,
-                      content: m.message || "",
-                      messageType: messageTypeFor(graphAtts),
-                      attachments: graphAtts,
-                      direction,
-                      status: direction === "outgoing" ? "sent" : "delivered",
-                      externalId: m.id,
-                      timestamp: m.created_time,
-                    },
-                  },
-                  upsert: true,
-                },
-              };
-            });
-          if (pageSyncOps.length > 0) {
-            await Message.bulkWrite(pageSyncOps, { ordered: false });
-          }
+      // A numeric id is the customer's PSID (webhook keying); Graph history
+      // lives under the thread id: the requested key when it is one, else
+      // the one recorded on the conversation, else Meta's per-user lookup.
+      const numeric = (id) => typeof id === "string" && /^\d+$/.test(id);
+      const customerId =
+        (numeric(safePartId) && safePartId) ||
+        stored[0]?.customerId ||
+        (numeric(safeConvId) && safeConvId) ||
+        undefined;
+      let fetchId = !numeric(safeConvId)
+        ? safeConvId
+        : stored[0] && !numeric(stored[0].externalId)
+          ? stored[0].externalId
+          : null;
+      if (!fetchId && customerId) {
+        fetchId = await resolveFbThreadId(customerId, accessToken, pageId);
       }
+      if (!fetchId || !isValidGraphId(fetchId)) return;
+      const convRes = await axios.get(`${GRAPH_API}/${encodeURIComponent(fetchId)}`, {
+        params: {
+          fields:
+            "messages.limit(30){message,from,to,created_time,attachments}",
+          access_token: accessToken,
+        },
+        timeout: 8000,
+      });
+      // Stored in the customer's conversation (found from the messages when
+      // the inbox only knew the thread), awaited so the page read below
+      // sees the rows
+      await syncGraphMessages({
+        platform: "facebook",
+        graphMessages: convRes.data.messages?.data || [],
+        ownIds: metaOwnIds("facebook", [pageId]),
+        customerId,
+        threadId: fetchId,
+      });
     };
 
     let refreshSuggested = false;
     if (!before) {
-      const hasLocal = await Message.exists({
-        platform: "facebook",
-        conversationId: sanitizeId(conversationId) || "-",
-      });
+      const hasLocal = await messages.anyIn(stored.map((c) => c.id));
       if (!hasLocal) {
         try {
           await syncThreadFromGraph();
@@ -685,65 +481,17 @@ router.get("/messages-paged", protect, async (req, res) => {
       }
     }
 
-    const pageId = process.env.FACEBOOK_PAGE_ID;
-
-    // Heal existing DB records where outgoing messages were saved as incoming
-    if (pageId) {
-      Message.updateMany(
-        {
-          platform: "facebook",
-          direction: "incoming",
-          $or: [
-            { senderId: pageId },
-            { senderName: "Page" },
-            { senderName: "You" },
-          ],
-        },
-        { $set: { direction: "outgoing" } }
-      ).catch(() => {});
-    }
-
-    // Webhook messages are saved with conversationId = senderId (PSID).
-    // API-synced messages are saved with conversationId = Graph API conv.id (e.g. "t_…").
-    // Accept both so we never miss webhook-saved messages when the user opens a conversation.
-    const safeConvId = sanitizeId(conversationId);
-    const safePartId = sanitizeId(participantId);
-    if (!safeConvId) {
-      return res.status(400).json({ message: "Invalid conversationId" });
-    }
-    const convIdFilter =
-      safePartId && safePartId !== safeConvId
-        ? { $in: [safeConvId, safePartId] }
-        : safeConvId;
-    const query = { platform: "facebook", conversationId: convIdFilter };
-    if (before) query.timestamp = { $lt: new Date(before) };
-
-    const messages = await Message.find(query)
-      .sort({ timestamp: -1 })
-      .limit(pageLimit)
-      .lean();
+    // Read again: the sync may have created the conversation or recorded
+    // its thread id
+    const found = await conversations.findByKeys("facebook", keys);
+    const page = await messages.page(
+      found.map((c) => c.id),
+      { before, limit: pageLimit },
+    );
 
     return res.json({
-      messages: messages.reverse().map((m) => {
-        const isOutgoing =
-          m.direction === "outgoing" ||
-          (pageId && m.senderId === pageId) ||
-          m.senderName === "Page" ||
-          m.senderName === "You";
-        return {
-          id: m.externalId || m._id.toString(),
-          text: m.content || "",
-          from: isOutgoing ? "Page" : m.senderName || "Unknown",
-          fromId: m.senderId,
-          time: m.timestamp || m.createdAt,
-          direction: isOutgoing ? "outgoing" : "incoming",
-          messageType: m.messageType,
-          attachmentUrl: m.attachmentUrl || null,
-          attachments: m.attachments || [],
-          context: m.context || null,
-        };
-      }),
-      hasMore: messages.length === pageLimit,
+      messages: page.messages,
+      hasMore: page.hasMore,
       refreshSuggested,
     });
   } catch (err) {
@@ -811,20 +559,21 @@ router.post("/send", protect, async (req, res) => {
         message: "This conversation was just locked by another agent.",
       });
     }
-    // Marketing agents are auto-locked after a successful send: hold the
-    // conversation for the duration of the send.
-    if (req.user.role === "marketing") {
+    // Agents are auto-locked after a successful send: hold the conversation
+    // for the duration of the send.
+    if (req.user.role === "agent") {
       releaseClaim = takeFbSendClaim(lockConvId, myId) || noopRelease;
     }
-    const existingLock = await ConversationLock.findOne({
-      conversationId: lockConvId,
-      platform: "facebook",
-    });
+    const existing = await conversations.resolve("facebook", [
+      lockConvId,
+      recipientId,
+    ]);
+    const existingLock = existing?.lockedBy ? existing : null;
     // No lock will be created: the claim is not needed.
     if (existingLock) releaseClaim();
     if (
       existingLock &&
-      existingLock.lockedBy.toString() !== req.user._id.toString() &&
+      existingLock.lockedBy !== String(req.user._id) &&
       req.user.role !== "admin"
     ) {
       return res.status(403).json({
@@ -832,8 +581,8 @@ router.post("/send", protect, async (req, res) => {
           "This conversation is locked to another agent. Only the assigned agent can reply.",
       });
     }
-    // The auto-lock for marketing agents is created further down, only once
-    // Meta has accepted the message, so a failed send never assigns anyone.
+    // The auto-lock for agents is created further down, only once Meta has
+    // accepted the message, so a failed send never assigns anyone.
 
     // Build the Send API message objects: optional text, then optional media.
     // Messenger requires text and attachments to be separate messages.
@@ -922,32 +671,6 @@ router.post("/send", protect, async (req, res) => {
 
     const messageId = lastData?.message_id || lastData?.id || null;
 
-    // Auto-lock on first reply (marketing agents), now that Meta accepted the
-    // message. The message is already delivered, so a lock failure here must
-    // never fail the request: log it and answer with the normal success.
-    if (!existingLock && req.user.role === "marketing") {
-      try {
-        await ConversationLock.create({
-          conversationId: lockConvId,
-          platform: "facebook",
-          lockedBy: req.user._id,
-        });
-      } catch (lockErr) {
-        if (lockErr.code === 11000) {
-          // Duplicate key: another agent locked between our check and create
-          console.log(
-            "[Facebook:Lock] Lock race detected after send (non-fatal)",
-          );
-        } else {
-          console.error(
-            "[Facebook:Lock] Lock creation failed after send (non-fatal):",
-            lockErr.message,
-          );
-        }
-      }
-    }
-    releaseClaim();
-
     const storedAttachments = attachment?.url
       ? [
           {
@@ -962,28 +685,52 @@ router.post("/send", protect, async (req, res) => {
       : [];
 
     // Save to database (non-blocking — don't let DB errors fail the response)
+    let savedConversation = null;
     try {
-      await storeFbCrmSend({
+      const saved = await storeFbCrmSend({
         messageId,
         recipientId,
-        pageId,
         content: message || "",
         attachments: storedAttachments,
         sentBy: req.user?._id || null,
       });
+      savedConversation = saved.conversation;
       // The text part lives in this row. If the echo webhook stored it under
       // its own id before this row existed, remove that copy.
       if (acceptedText && acceptedText.mid !== messageId) {
-        await Message.deleteOne({
-          platform: "facebook",
-          externalId: acceptedText.mid,
-          direction: "outgoing",
-          sentBy: null,
-        });
+        await messages.deleteEchoCopy([saved.conversation.id], acceptedText.mid);
       }
     } catch (dbErr) {
       console.error("DB save error (non-fatal):", dbErr.message);
     }
+
+    // Auto-lock on first reply (agents), now that Meta accepted the message.
+    // The message is already delivered, so a lock failure here must never
+    // fail the request: log it and answer with the normal success.
+    if (!existingLock && req.user.role === "agent") {
+      try {
+        const target =
+          savedConversation ||
+          existing ||
+          (await conversations.ensureForCustomer({
+            platform: "facebook",
+            customerId: recipientId,
+          }));
+        const locked = await conversations.lock(target.id, req.user._id);
+        if (!locked) {
+          // Another agent locked between our check and this write
+          console.log(
+            "[Facebook:Lock] Lock race detected after send (non-fatal)",
+          );
+        }
+      } catch (lockErr) {
+        console.error(
+          "[Facebook:Lock] Lock creation failed after send (non-fatal):",
+          lockErr.message,
+        );
+      }
+    }
+    releaseClaim();
 
     // Emit socket event so the UI updates in real-time
     const io = req.app.get("io");
@@ -1021,7 +768,6 @@ router.post("/send", protect, async (req, res) => {
         await storeFbCrmSend({
           messageId: acceptedText.mid,
           recipientId: acceptedText.recipientId,
-          pageId: acceptedText.pageId,
           content: acceptedText.content || "",
           attachments: [],
           sentBy: req.user?._id || null,
@@ -1064,11 +810,9 @@ router.post("/send", protect, async (req, res) => {
 // GET /api/facebook/messages - Get stored Facebook messages from database
 router.get("/messages", protect, async (req, res) => {
   try {
-    const messages = await Message.find({ platform: "facebook" })
-      .sort({ timestamp: -1 })
-      .limit(100)
-      .lean();
-    return res.json({ messages });
+    return res.json({
+      messages: await messages.recentOfPlatform("facebook", 100),
+    });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch messages" });
   }

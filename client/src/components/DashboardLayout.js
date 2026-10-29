@@ -14,8 +14,6 @@ import {
   LifeBuoy,
   Table2,
   Users,
-  MapPin,
-  FileText,
 } from "lucide-react";
 
 const DashboardLayout = ({ children, noPadding = false }) => {
@@ -84,28 +82,6 @@ const DashboardLayout = ({ children, noPadding = false }) => {
               {!collapsed && <span>Leads</span>}
             </Link>
           )}
-
-          {/* Directory of MEDTOUR agencies and B2B partners — every role,
-              agents use it to orient a customer to the nearest office. */}
-          <Link
-            to="/partenaires"
-            className={`sidebar-link${location.pathname === "/partenaires" ? " active" : ""}`}
-            title="Agences & partenaires"
-          >
-            <MapPin size={18} className="sidebar-link-icon" />
-            {!collapsed && <span>Agences & partenaires</span>}
-          </Link>
-
-          {/* Canned replies — every role reads and copies, admins and
-              managers maintain the list. Also reachable from the inbox. */}
-          <Link
-            to="/modeles"
-            className={`sidebar-link${location.pathname === "/modeles" ? " active" : ""}`}
-            title="Modèles de messages"
-          >
-            <FileText size={18} className="sidebar-link-icon" />
-            {!collapsed && <span>Modèles de messages</span>}
-          </Link>
 
           {/* Account management — administrators only */}
           {user?.role === "admin" && (

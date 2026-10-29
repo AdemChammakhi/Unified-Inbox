@@ -315,10 +315,12 @@ jobs:
     #
     # NOTE: the compose file on the VPS is intentionally NOT synced from this
     # repo. /opt/unified-inbox/docker-compose.prod.yml is the source of truth
-    # there — it additionally runs mongodb + mongo-express and reads .env
-    # (not .env.production). Copying this repo's version over it would make
-    # `up -d --remove-orphans` delete the production database container.
-    # Compose changes must be applied manually on the VPS.
+    # there — it runs the database containers (mongodb + mongo-express until
+    # the SQL Server cutover, then sqlserver) and reads .env (not
+    # .env.production). Copying this repo's version over it would make
+    # `up -d --remove-orphans` delete a production database container.
+    # Compose changes must be applied manually on the VPS
+    # (database/sqlserver/README.md lists the SQL Server ones).
     env:
       DEPLOY_SCRIPT: |
         cd /opt/unified-inbox

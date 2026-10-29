@@ -11,7 +11,14 @@ import {
   MATURITY,
   MATURITY_RANK,
 } from "../constants/leadQualification";
-import { STAGE_LABELS, STAGE_COLORS, STAGES } from "../constants/pipeline";
+import {
+  STAGE_LABELS,
+  STAGE_COLORS,
+  STAGES,
+  QUALIFICATIONS,
+  QUALIFICATION_LABELS,
+  QUALIFICATION_COLORS,
+} from "../constants/pipeline";
 import { RefreshCw, X } from "lucide-react";
 
 /**
@@ -19,18 +26,26 @@ import { RefreshCw, X } from "lucide-react";
  *
  * The same rows the team used to keep by hand and now export to Excel, but
  * readable and filterable in place. Every column filters: free-text columns
- * take a substring, the closed sets (platform, classification, maturity,
- * frein, agent) become dropdowns built from the data actually present, so a
- * filter never offers a value that would return nothing.
+ * take a substring, the closed sets (platform, étape, qualification,
+ * typologie, maturity, frein, agent) become dropdowns built from the data
+ * actually present, so a filter never offers a value that would return
+ * nothing.
  *
  * Maturity and frein come from the server (buildProspectRows): `maturity`,
  * `maturityLevel`, `maturityReason`, `frein` (label, "Autre : note" included)
- * and `freinCode`.
+ * and `freinCode`. The étape is `classification` (stage code) and the
+ * qualification `qualification` (code).
  */
 
-// Pipeline stages and typologies come from the shared constants
+// Stages and qualifications come from the shared constants
 const CLASSIFICATION_LABELS = STAGE_LABELS;
 const CLASSIFICATION_COLORS = STAGE_COLORS;
+
+/** Colour maps of the two coloured cells, by column. */
+const CHIP_COLORS = {
+  classification: CLASSIFICATION_COLORS,
+  qualification: QUALIFICATION_COLORS,
+};
 
 const PLATFORM_LABELS = {
   instagram: "Instagram",
@@ -49,12 +64,11 @@ const COLUMNS = [
   { key: "firstContact", label: "Premier contact", type: "date", width: 140 },
   { key: "lastContact", label: "Dernier contact", type: "date", width: 140 },
   { key: "classification", label: "Étape", type: "select", width: 140 },
+  { key: "qualification", label: "Qualification", type: "select", width: 170 },
   { key: "typologie", label: "Typologie", type: "select", width: 150 },
-  { key: "isPriority", label: "Prioritaire", type: "select", width: 100 },
   { key: "maturity", label: "Maturité", type: "select", width: 118 },
   { key: "frein", label: "Motif / frein", type: "select", width: 180 },
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
-  { key: "invoiceRef", label: "Réf. facture", type: "text", width: 130 },
   { key: "agent", label: "Commercial", type: "select", width: 150 },
   { key: "messagesIn", label: "Reçus", type: "number", width: 78 },
   { key: "messagesOut", label: "Envoyés", type: "number", width: 84 },
@@ -95,11 +109,11 @@ const cellText = (row, key) => {
   }
   if (key === "frein") return String(row.frein || "");
   if (key === "typologie") return String(row.typologieLabel || "");
-  if (key === "isPriority") return row.isPriority ? "Oui" : "";
   const v = row[key];
   if (v === null || v === undefined) return "";
   if (key === "platform") return PLATFORM_LABELS[v] || v;
   if (key === "classification") return CLASSIFICATION_LABELS[v] || v;
+  if (key === "qualification") return QUALIFICATION_LABELS[v] || v;
   if (key === "firstContact" || key === "lastContact" || key === "rdvAt") {
     return fmtDate(v);
   }
@@ -197,8 +211,11 @@ const Leads = () => {
         present("classification"),
         STAGES.map((s) => s.label),
       ),
+      qualification: orderedLike(
+        present("qualification"),
+        QUALIFICATIONS.map((q) => q.label),
+      ),
       typologie: build("typologie"),
-      isPriority: build("isPriority"),
       maturity: orderedLike(present("maturity"), MATURITY_ORDER),
       frein: orderedLike(present("frein"), FREIN_ORDER),
       agent: build("agent"),
@@ -423,10 +440,11 @@ const Leads = () => {
                           </td>
                         );
                       }
-                      if (c.key === "classification") {
-                        const color =
-                          CLASSIFICATION_COLORS[r.classification] ||
-                          CLASSIFICATION_COLORS.nouveau_lead;
+                      // Étape and qualification: a chip in their colour,
+                      // "Nouveau lead" grey for an unknown code
+                      if (CHIP_COLORS[c.key]) {
+                        const colors = CHIP_COLORS[c.key];
+                        const color = colors[r[c.key]] || colors.nouveau_lead;
                         return (
                           <td key={c.key} style={styles.td}>
                             <span
@@ -437,8 +455,7 @@ const Leads = () => {
                                 backgroundColor: `${color}1a`,
                               }}
                             >
-                              {CLASSIFICATION_LABELS[r.classification] ||
-                                r.classification}
+                              {cellText(r, c.key)}
                             </span>
                           </td>
                         );

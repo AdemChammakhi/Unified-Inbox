@@ -15,8 +15,6 @@ import Inbox from "./pages/Inbox";
 import Support from "./pages/Support";
 import Leads from "./pages/Leads";
 import Accounts from "./pages/Accounts";
-import Partners from "./pages/Partners";
-import Templates from "./pages/Templates";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { useAuth } from "./context/AuthContext";
 
@@ -65,24 +63,6 @@ function App() {
           />
 
           <Route
-            path="/partenaires"
-            element={
-              <ProtectedRoute>
-                <Partners />
-              </ProtectedRoute>
-            }
-          />
-
-          <Route
-            path="/modeles"
-            element={
-              <ProtectedRoute>
-                <Templates />
-              </ProtectedRoute>
-            }
-          />
-
-          <Route
             path="/accounts"
             element={
               <ProtectedRoute allowedRole="admin">
@@ -109,10 +89,11 @@ function App() {
             }
           />
 
+          {/* Agents' dashboard; the page keeps its historical name */}
           <Route
-            path="/marketing"
+            path="/agent"
             element={
-              <ProtectedRoute allowedRole="marketing">
+              <ProtectedRoute allowedRole="agent">
                 <MarketingDashboard />
               </ProtectedRoute>
             }

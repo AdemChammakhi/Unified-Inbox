@@ -1,229 +1,186 @@
 /**
  * conversationService.js
  *
- * Shared helper used by every webhook/email route to resolve the correct
- * Channel, Contact and Conversation documents before saving a Message.
- *
- * All callers pass a `platform` + `externalSenderId` and get back a
- * Conversation ObjectId they can attach the Message to.
+ * The one path every stored message takes: webhooks, CRM sends, email sync
+ * and Meta Graph history sync all resolve the customer's conversation
+ * (server/db/conversations.js), bring the attachment within the schema's
+ * limits (utils/storedMedia.js) and insert through server/db/messages.js,
+ * which dedupes on the platform message id.
  */
 
 "use strict";
 
-const mongoose = require("mongoose");
-const { Channel, Contact, Conversation } = require("../models");
+const conversations = require("../db/conversations");
+const messages = require("../db/messages");
+const contacts = require("../db/contacts");
+const campaigns = require("../db/campaigns");
+const { ownAccountId } = require("../db/channels");
+const { firstAttachmentUrl, UNAVAILABLE_TEXT } = require("../utils/storedMedia");
+const { parseGraphAttachments } = require("../utils/metaPayload");
 
 /**
- * Map a Message.messageType value onto the lastMessage.type enum
- * (which has no "attachment"/"other" members).
+ * The text and attachment to store for a message: the first attachment
+ * only, and a note instead of an empty bubble when its file is lost.
  */
-const LAST_MESSAGE_TYPE_MAP = {
-  attachment: "document",
-  other: "unsupported",
-};
-
-function toLastMessageType(type) {
-  const t = type || "text";
-  return LAST_MESSAGE_TYPE_MAP[t] || t;
+async function storablePayload(content, attachments) {
+  const text = typeof content === "string" ? content : "";
+  const { attachmentUrl, lost } = await firstAttachmentUrl(attachments);
+  return {
+    content: lost && !text.trim() ? UNAVAILABLE_TEXT : text,
+    attachmentUrl,
+    messageType: attachmentUrl ? messages.messageTypeOf(attachments) : "text",
+  };
 }
 
 /**
- * Map from platform name to the env var holding the platform account ID.
- * Used to seed the Channel document on first run.
+ * Store one message exchanged with a customer.
+ *
+ * @param {object} p
+ * @param {string} p.platform
+ * @param {string} p.customerId            the customer's platform id
+ * @param {"contact"|"agent"} p.senderType contact = from the customer
+ * @param {string} [p.externalId]          platform message id (dedupe key)
+ * @param {string|number} [p.senderUserId] CRM user who sent it
+ * @param {string} [p.content]
+ * @param {Array<object>} [p.attachments]  utils/metaPayload shapes
+ * @param {Date|string} [p.sentAt]
+ * @param {string} [p.name] / [p.username] / [p.avatar] what was learned about the customer
+ * @param {string} [p.threadId]            Meta's thread id, when known
+ * @param {object} [p.context]             parsed ad referral (campaign attribution)
+ * @param {boolean} [p.isRead]
+ * @returns {Promise<{conversation: object, inserted: boolean, messageId: number|null}>}
  */
-const PLATFORM_ACCOUNT_ID_ENV = {
-  facebook: "FACEBOOK_PAGE_ID",
-  instagram: "INSTAGRAM_ACCOUNT_ID",
-  whatsapp: "WHATSAPP_PHONE_NUMBER_ID",
-  email: "EMAIL_USER",
-  tiktok: "TIKTOK_ACCOUNT_ID",
-};
-
-const PLATFORM_TOKEN_ENV = {
-  facebook: "FACEBOOK_PAGE_ACCESS_TOKEN",
-  instagram: "INSTAGRAM_ACCESS_TOKEN",
-  whatsapp: "WHATSAPP_ACCESS_TOKEN",
-  email: null,
-  tiktok: null,
-};
-
-/**
- * Find or lazily create the Channel document for a given platform.
- * Cached in-process after first creation so repeated webhook calls don't
- * hit MongoDB for channel lookup on every message.
- */
-const _channelCache = {};
-
-async function getOrCreateChannel(platform) {
-  if (_channelCache[platform]) return _channelCache[platform];
-
-  const accountId = process.env[PLATFORM_ACCOUNT_ID_ENV[platform]];
-  const tokenRef = PLATFORM_TOKEN_ENV[platform];
-
-  let channel = await Channel.findOne({
-    platform,
-    externalId: accountId || platform,
+async function storeCustomerMessage(p) {
+  const conversation = await conversations.ensureForCustomer({
+    platform: p.platform,
+    customerId: p.customerId,
+    name: p.senderType === "contact" ? p.name : undefined,
+    username: p.username,
+    avatar: p.avatar,
+    threadId: p.threadId,
+    firstSeenAt: p.sentAt ? new Date(p.sentAt) : undefined,
   });
-
-  if (!channel) {
-    channel = await Channel.create({
-      platform,
-      name: `${platform.charAt(0).toUpperCase() + platform.slice(1)} Channel`,
-      externalId: accountId || platform,
-      accessTokenRef: tokenRef || undefined,
-      isActive: true,
-      isVerified: true,
+  const payload = await storablePayload(p.content, p.attachments);
+  const res = await messages.insertMessage(conversation, {
+    externalId: p.externalId,
+    senderType: p.senderType,
+    senderUserId: p.senderUserId,
+    isRead: p.isRead,
+    sentAt: p.sentAt,
+    ...payload,
+  });
+  if (p.context) {
+    campaigns.recordReferral(conversation, p.platform, p.context).catch((err) => {
+      console.error(`[Campaign] ${p.platform} referral not recorded (non-fatal):`, err.message);
     });
   }
-
-  _channelCache[platform] = channel;
-  return channel;
+  return { conversation, ...res };
 }
 
 /**
- * Find or create the Channel, Contact, and Conversation for an incoming
- * message, then return the Conversation document.
- *
- * This is the single entry point used by ALL webhook handlers.
- *
- * @param {object} opts
- * @param {string}  opts.platform          - "facebook" | "instagram" | "whatsapp" | "email"
- * @param {string}  opts.externalSenderId  - Platform-native sender ID
- * @param {string}  [opts.senderName]      - Display name from platform
- * @param {string}  [opts.senderAvatar]    - Profile picture URL
- * @param {string}  [opts.senderUsername]  - @username (Instagram)
- * @returns {Promise<{channel, contact, conversation}>}
+ * Store a message the CRM sent, claiming the row an echo may have stored
+ * first under the same platform id (see routes/webhooks.js, storeEcho).
  */
-async function getOrCreateConversation({
-  platform,
-  externalSenderId,
-  senderName,
-  senderAvatar,
-  senderUsername,
-}) {
-  const channel = await getOrCreateChannel(platform);
+async function storeCrmSend({ platform, customerId, externalId, content, attachments, userId, sentAt }) {
+  const conversation = await conversations.ensureForCustomer({ platform, customerId });
+  const payload = await storablePayload(content, attachments);
+  const res = await messages.storeCrmSend(conversation, {
+    externalId,
+    userId,
+    sentAt,
+    ...payload,
+  });
+  return { conversation, ...res };
+}
 
-  const contact = await Contact.findOrCreateByPlatformId(
+/** Our own ids on Meta for a platform: they are never a customer. */
+function metaOwnIds(platform, extra = []) {
+  return new Set(
+    [
+      process.env.FACEBOOK_PAGE_ID,
+      platform === "instagram" ? process.env.INSTAGRAM_ACCOUNT_ID : null,
+      ownAccountId(platform),
+      ...extra,
+    ]
+      .filter(Boolean)
+      .map(String),
+  );
+}
+
+/**
+ * The customer of a Graph thread, from its messages: the sender of an
+ * incoming one, else the recipient of one of ours.
+ */
+function customerOfGraphMessages(graphMessages, ownIds) {
+  for (const m of graphMessages || []) {
+    const from = m?.from?.id ? String(m.from.id) : null;
+    if (from && !ownIds.has(from)) return from;
+  }
+  for (const m of graphMessages || []) {
+    const to = m?.to?.data?.[0]?.id ? String(m.to.data[0].id) : null;
+    if (to && !ownIds.has(to)) return to;
+  }
+  return null;
+}
+
+/**
+ * Store a batch of Graph API messages of one thread (history sync). Only
+ * messages not stored yet are fetched for media and inserted.
+ *
+ * @param {object} p
+ * @param {string} p.platform
+ * @param {Array<object>} p.graphMessages  Graph `messages.data` entries
+ * @param {Set<string>} p.ownIds           ids that are us (Page, IG account)
+ * @param {string} [p.customerId]          the customer when already known
+ * @param {string} [p.threadId]            the Graph thread id
+ * @param {string} [p.customerName]
+ * @returns {Promise<{conversation: object|null, inserted: number}>}
+ */
+async function syncGraphMessages({ platform, graphMessages, ownIds, customerId, threadId, customerName }) {
+  const list = (graphMessages || []).filter((m) => m && m.id);
+  const customer = customerId || customerOfGraphMessages(list, ownIds);
+  if (!customer || conversations.isThreadId(platform, customer)) return { conversation: null, inserted: 0 };
+  const incomingName =
+    customerName ||
+    list.map((m) => (m.from?.id === customer ? m.from?.username || m.from?.name : null)).find(Boolean);
+  const conversation = await conversations.ensureForCustomer({
     platform,
-    externalSenderId,
-    {
-      name: senderName || senderUsername || externalSenderId,
-      username: senderUsername || null,
-      avatar: senderAvatar || null,
-    },
+    customerId: customer,
+    name: incomingName,
+    threadId,
+    firstSeenAt: list.length ? new Date(list[list.length - 1].created_time) : undefined,
+  });
+  const known = await messages.existingExternalIds(
+    conversation.id,
+    list.map((m) => m.id),
   );
-
-  const resolvedName = senderName || senderUsername || externalSenderId;
-
-  const update = {
-    $setOnInsert: {
-      platform,
-      externalId: externalSenderId,
-      channelId: channel._id,
-      contactId: contact._id,
-      participantName: resolvedName,
-      participantExternalId: externalSenderId,
-    },
-  };
-  // Late-arriving avatars should reach existing conversations too
-  if (senderAvatar) {
-    update.$set = { participantAvatar: senderAvatar };
-  } else {
-    update.$setOnInsert.participantAvatar = null;
+  const fresh = list.filter((m) => !known.has(String(m.id)));
+  if (fresh.length === 0) return { conversation, inserted: 0 };
+  const rows = [];
+  for (const m of fresh) {
+    const outgoing = m.from?.id ? ownIds.has(String(m.from.id)) : false;
+    const payload = await storablePayload(m.message || "", parseGraphAttachments(m.attachments));
+    rows.push({
+      externalId: m.id,
+      senderType: outgoing ? "agent" : "contact",
+      sentAt: m.created_time,
+      ...payload,
+    });
   }
-
-  const conversation = await Conversation.findOneAndUpdate(
-    { platform: String(platform), externalId: String(externalSenderId) },
-    update,
-    { upsert: true, new: true },
-  );
-
-  return { channel, contact, conversation };
+  const inserted = await messages.insertMessages(conversation, rows);
+  return { conversation, inserted: inserted.length };
 }
 
-/**
- * Atomically update lastMessage and counters on a Conversation after a
- * Message document has been saved.
- *
- * @param {ObjectId} conversationId
- * @param {object}   message   - Saved Message document
- */
-async function updateConversationAfterMessage(conversationId, message) {
-  const isInbound = message.direction === "inbound" || message.direction === "incoming";
-  const normalizedDirection = isInbound ? "inbound" : "outbound";
-
-  const query = {};
-  if (mongoose.Types.ObjectId.isValid(conversationId)) {
-    query._id = conversationId;
-  } else {
-    query.externalId = conversationId;
-    query.platform = message.platform;
-  }
-
-  return Conversation.findOneAndUpdate(
-    query,
-    {
-      $set: {
-        lastMessage: {
-          messageId: message._id,
-          content: (message.content || message.text || "").substring(0, 200),
-          type: toLastMessageType(message.messageType || message.type),
-          direction: normalizedDirection,
-          senderName: message.senderName || message.sender?.name || "",
-          sentAt: message.timestamp || message.createdAt || new Date(),
-        },
-      },
-      $inc: {
-        messageCount: 1,
-        unreadCount: isInbound ? 1 : 0,
-      },
-    },
-    { new: true }
-  );
-}
-
-/**
- * Batch-resolve stored avatars for a set of platform sender IDs.
- * Used by the conversation-list routes to give DB-only conversations
- * (created by webhooks, not yet returned by the Graph API) a profile
- * picture without any external API calls.
- *
- * @param {string} platform
- * @param {Iterable<string>} externalIds
- * @returns {Promise<Object<string,string>>} map externalId -> avatar URL
- */
-async function getContactAvatarMap(platform, externalIds) {
-  const ids = [...new Set([...externalIds].filter(Boolean))];
-  if (ids.length === 0) return {};
-  try {
-    const contacts = await Contact.find({
-      platformIdentities: {
-        $elemMatch: { platform, externalId: { $in: ids } },
-      },
-    })
-      .select("avatar platformIdentities.platform platformIdentities.externalId platformIdentities.avatar")
-      .lean();
-
-    const map = {};
-    for (const c of contacts) {
-      for (const ident of c.platformIdentities || []) {
-        if (ident.platform !== platform) continue;
-        const avatar = ident.avatar || c.avatar;
-        if (ids.includes(ident.externalId) && avatar) {
-          map[ident.externalId] = avatar;
-        }
-      }
-    }
-    return map;
-  } catch (err) {
-    console.error("Avatar map lookup failed (non-fatal):", err.message);
-    return {};
-  }
+/** Stored avatars for list rows without one: { customerId: url }. */
+function getContactAvatarMap(platform, externalIds) {
+  return contacts.avatarMap(platform, externalIds);
 }
 
 module.exports = {
-  getOrCreateConversation,
-  updateConversationAfterMessage,
-  getOrCreateChannel,
+  storeCustomerMessage,
+  storeCrmSend,
+  syncGraphMessages,
+  customerOfGraphMessages,
+  metaOwnIds,
   getContactAvatarMap,
 };

@@ -18,11 +18,11 @@ import { UserPlus, RefreshCw, Pencil, Trash2, Power } from "lucide-react";
 const ROLES = [
   { key: "admin", label: "Admin", color: "#E8833A" },
   { key: "manager", label: "Manager", color: "#5B9BD9" },
-  { key: "marketing", label: "Agent", color: "#5FBF8A" },
+  { key: "agent", label: "Agent", color: "#5FBF8A" },
 ];
 
 const roleMeta = (r) => ROLES.find((x) => x.key === r) || ROLES[2];
-const EMPTY = { firstName: "", lastName: "", email: "", password: "", role: "marketing" };
+const EMPTY = { firstName: "", lastName: "", email: "", password: "", role: "agent" };
 
 const Accounts = () => {
   const { user, logout } = useAuth();
@@ -169,8 +169,8 @@ const Accounts = () => {
   };
 
   const grouped = useMemo(() => {
-    const agents = users.filter((u) => u.role === "marketing");
-    const staff = users.filter((u) => u.role !== "marketing");
+    const agents = users.filter((u) => u.role === "agent");
+    const staff = users.filter((u) => u.role !== "agent");
     return { staff, agents };
   }, [users]);
 

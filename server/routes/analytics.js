@@ -1,9 +1,51 @@
 const express = require("express");
 const router = express.Router();
-const Message = require("../models/Message");
-const ConversationLock = require("../models/ConversationLock");
-const Classification = require("../models/Classification");
+const { db, at } = require("../db/sql");
+const { isPlaceholderName } = require("../db/contacts");
 const { protect, authorize } = require("../middleware/auth");
+
+// Counts of "clients" are distinct customers who wrote: one conversation per
+// customer per platform (server/db/conversations.js), over incoming messages
+// by the time they were stored (created_*), as the MongoDB version counted
+// by createdAt.
+
+/** WHERE fragment: a message stored at or after the @<prefix>_date/_time pair. */
+const storedSince = (prefix) =>
+  `(m.created_date > @${prefix}_date OR (m.created_date = @${prefix}_date AND m.created_time >= @${prefix}_time))`;
+
+async function distinctClientsSince(prefix, params) {
+  return db.scalar(
+    `SELECT COUNT(DISTINCT m.conversation_id) FROM dbo.message m
+     WHERE m.sender_type = N'contact' AND ${storedSince(prefix)}`,
+    params,
+  );
+}
+
+async function clientsByPlatform(params) {
+  return (
+    await db.query(
+      `SELECT _id = c.platform, count = COUNT(DISTINCT m.conversation_id)
+       FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
+       WHERE m.sender_type = N'contact' AND ${storedSince("since")}
+       GROUP BY c.platform
+       ORDER BY count DESC`,
+      params,
+    )
+  ).rows;
+}
+
+function windows(range) {
+  const now = new Date();
+  const since = new Date(now - range * 24 * 60 * 60 * 1000);
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const weekStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
+  return {
+    ...at("since", since),
+    ...at("today", todayStart),
+    ...at("week", weekStart),
+  };
+}
 
 // GET /api/analytics/summary?range=7  (range: 1, 7, 30)
 router.get(
@@ -13,81 +55,47 @@ router.get(
   async (req, res) => {
     try {
       const range = parseInt(req.query.range) || 7;
-      const now = new Date();
-      const since = new Date(now - range * 24 * 60 * 60 * 1000);
-      const todayStart = new Date(now);
-      todayStart.setHours(0, 0, 0, 0);
-      const weekStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
+      const params = windows(range);
 
       const [
-        totalInRangeRes,
-        todayCountRes,
-        weekCountRes,
+        totalInRange,
+        todayCount,
+        weekCount,
         byPlatform,
         dailySeries,
-        activeAgents,
+        activeAgentCount,
       ] = await Promise.all([
-        // Distinct clients in range (1 per sender, not per message)
-        Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: since } } },
-          { $group: { _id: "$senderId" } },
-          { $count: "count" },
-        ]),
+        // Distinct clients in range (1 per customer, not per message)
+        distinctClientsSince("since", params),
         // Distinct clients today
-        Message.aggregate([
-          {
-            $match: { direction: "incoming", createdAt: { $gte: todayStart } },
-          },
-          { $group: { _id: "$senderId" } },
-          { $count: "count" },
-        ]),
+        distinctClientsSince("today", params),
         // Distinct clients this week
-        Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: weekStart } } },
-          { $group: { _id: "$senderId" } },
-          { $count: "count" },
-        ]),
+        distinctClientsSince("week", params),
         // Distinct clients by platform
-        Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: since } } },
-          { $group: { _id: { platform: "$platform", senderId: "$senderId" } } },
-          { $group: { _id: "$_id.platform", count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-        ]),
+        clientsByPlatform(params),
         // Daily series — distinct clients per day per platform
-        Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: since } } },
-          {
-            $group: {
-              _id: {
-                date: {
-                  $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
-                },
-                platform: "$platform",
-                senderId: "$senderId",
-              },
-            },
-          },
-          {
-            $group: {
-              _id: { date: "$_id.date", platform: "$_id.platform" },
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { "_id.date": 1 } },
-        ]),
+        db
+          .query(
+            `SELECT date = CONVERT(char(10), m.created_date, 23), c.platform,
+                    count = COUNT(DISTINCT m.conversation_id)
+             FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
+             WHERE m.sender_type = N'contact' AND ${storedSince("since")}
+             GROUP BY m.created_date, c.platform
+             ORDER BY m.created_date`,
+            params,
+          )
+          .then((r) => r.rows),
         // Active agents (have locks)
-        ConversationLock.distinct("lockedBy"),
+        db.scalar(
+          `SELECT COUNT(DISTINCT locked_by_user_id) FROM dbo.conversations
+           WHERE locked_by_user_id IS NOT NULL AND deleted_date IS NULL`,
+        ),
       ]);
-
-      const totalInRange = totalInRangeRes[0]?.count || 0;
-      const todayCount = todayCountRes[0]?.count || 0;
-      const weekCount = weekCountRes[0]?.count || 0;
 
       // Reshape daily series into chart-friendly format
       const dateMap = {};
       for (const row of dailySeries) {
-        const { date, platform } = row._id;
+        const { date, platform } = row;
         if (!dateMap[date]) dateMap[date] = { date };
         dateMap[date][platform] = row.count;
       }
@@ -101,12 +109,12 @@ router.get(
         });
 
       return res.json({
-        totalInRange,
-        todayCount,
-        weekCount,
+        totalInRange: totalInRange || 0,
+        todayCount: todayCount || 0,
+        weekCount: weekCount || 0,
         byPlatform,
         dailyData,
-        activeAgentCount: activeAgents.length,
+        activeAgentCount: activeAgentCount || 0,
       });
     } catch (err) {
       console.error("Analytics error:", err.message);
@@ -122,32 +130,26 @@ router.get(
   authorize("admin", "manager"),
   async (req, res) => {
     try {
-      // Count outgoing messages per agent (sentBy field, set when reply is sent)
-      const replyCounts = await Message.aggregate([
-        { $match: { direction: "outgoing", sentBy: { $ne: null } } },
-        { $group: { _id: "$sentBy", replies: { $sum: 1 } } },
-        { $sort: { replies: -1 } },
-        {
-          $lookup: {
-            from: "users",
-            localField: "_id",
-            foreignField: "_id",
-            as: "user",
-          },
-        },
-        { $unwind: "$user" },
-        {
-          $project: {
-            _id: 0,
-            agentId: "$_id",
-            name: { $concat: ["$user.firstName", " ", "$user.lastName"] },
-            role: "$user.role",
-            replies: 1,
-          },
-        },
-      ]);
+      // Count outgoing messages per agent (sender_user_id, set when a reply
+      // is sent from the CRM)
+      const rows = (
+        await db.query(
+          `SELECT u.user_id, u.first_name, u.last_name, u.role, replies = COUNT(*)
+           FROM dbo.message m JOIN dbo.users u ON u.user_id = m.sender_user_id
+           WHERE m.sender_type <> N'contact'
+           GROUP BY u.user_id, u.first_name, u.last_name, u.role
+           ORDER BY replies DESC`,
+        )
+      ).rows;
 
-      return res.json({ agents: replyCounts });
+      return res.json({
+        agents: rows.map((r) => ({
+          agentId: String(r.user_id),
+          name: `${r.first_name} ${r.last_name}`,
+          role: r.role,
+          replies: r.replies,
+        })),
+      });
     } catch (err) {
       console.error("Agents analytics error:", err.message);
       return res.status(500).json({ message: "Agent analytics failed" });
@@ -155,43 +157,47 @@ router.get(
   },
 );
 
-// GET /api/analytics/ad-attribution?range=30
-// Which sponsored posts / ads conversations come from.
-// Groups inbound messages that carry ad/post context (captured from Meta
-// referral webhooks) and, per ad: how many distinct conversations it opened
-// and how many total inbound messages those conversations produced.
 // GET /api/analytics/appointments?range=30
 // The RDV agenda: how many appointments were booked, how they are split
 // between still-upcoming and already-past, and the next ones in order.
-// `range` scopes the *booked in* count (when the RDV was created); the
-// upcoming list is not range-bound — an appointment three months out still
-// matters today.
+// `range` scopes the *booked in* count (when the dossier was last edited);
+// the upcoming list is not range-bound — an appointment three months out
+// still matters today.
 router.get("/appointments", protect, async (req, res) => {
   try {
     const range = parseInt(req.query.range) || 30;
     const since = new Date(Date.now() - range * 24 * 60 * 60 * 1000);
     const now = new Date();
+    const params = { ...at("since", since), ...at("now", now) };
+    const rdv = "dbo.fn_DateTimeCombine(c.appointment_date, c.appointment_time)";
 
-    const [bookedInRange, upcomingDocs, pastCount, totalCount] =
-      await Promise.all([
-        // The RDV date is independent of the pipeline stage: an appointment
-        // exists whenever appointmentAt is set.
-        Classification.countDocuments({
-          appointmentAt: { $ne: null },
-          updatedAt: { $gte: since },
-        }),
-        Classification.find({
-          appointmentAt: { $gte: now },
-        })
-          .sort({ appointmentAt: 1 })
-          .limit(50)
-          .populate("classifiedBy", "firstName lastName")
-          .lean(),
-        Classification.countDocuments({
-          appointmentAt: { $ne: null, $lt: now },
-        }),
-        Classification.countDocuments({ appointmentAt: { $ne: null } }),
-      ]);
+    // The RDV date is independent of the Étape and the Qualification: an appointment
+    // exists whenever it is set.
+    const [counts, upcomingRows] = await Promise.all([
+      db.one(
+        `SELECT
+           total = COUNT(*),
+           bookedInRange = SUM(CASE WHEN c.classified_date > @since_date
+                                      OR (c.classified_date = @since_date AND c.classified_time >= @since_time)
+                                    THEN 1 ELSE 0 END),
+           pastCount = SUM(CASE WHEN ${rdv} < dbo.fn_DateTimeCombine(@now_date, @now_time) THEN 1 ELSE 0 END)
+         FROM dbo.conversations c
+         WHERE c.appointment_date IS NOT NULL AND c.deleted_date IS NULL`,
+        params,
+      ),
+      db
+        .query(
+          `SELECT TOP (50) c.platform, c.external_id, c.participant_external_id, c.participant_name,
+                  appointment_at = ${rdv}, u.first_name, u.last_name
+           FROM dbo.conversations c
+           LEFT JOIN dbo.users u ON u.user_id = c.classified_by_user_id
+           WHERE c.appointment_date IS NOT NULL AND c.deleted_date IS NULL
+             AND ${rdv} >= dbo.fn_DateTimeCombine(@now_date, @now_time)
+           ORDER BY c.appointment_date, c.appointment_time`,
+          params,
+        )
+        .then((r) => r.rows),
+    ]);
 
     // "Today" in the server's local timezone — the agency books in its own
     // working day, not UTC.
@@ -199,52 +205,29 @@ router.get("/appointments", protect, async (req, res) => {
     endOfToday.setHours(23, 59, 59, 999);
     const endOfWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    // The agenda is useless without a name. Classification rows only carry
-    // the customer's id, so resolve the name from the latest inbound message
-    // of that customer (stored under either the customer id or a thread id
-    // they sent from) — one query for the whole list.
-    const ids = [...new Set(upcomingDocs.map((d) => String(d.conversationId)))];
-    const nameById = {};
-    if (ids.length > 0) {
-      const inbound = await Message.find({
-        direction: "incoming",
-        $or: [{ senderId: { $in: ids } }, { conversationId: { $in: ids } }],
-      })
-        .sort({ timestamp: -1 })
-        .select("senderId conversationId senderName platform")
-        .limit(ids.length * 5)
-        .lean();
-      for (const m of inbound) {
-        const usable =
-          m.senderName &&
-          m.senderName !== "Unknown" &&
-          !/^User \d{4}$/.test(m.senderName) &&
-          !/^\d{6,}$/.test(m.senderName);
-        if (!usable) continue;
-        for (const key of [m.senderId, m.conversationId]) {
-          if (ids.includes(key) && !nameById[key]) nameById[key] = m.senderName;
-        }
-      }
-    }
-
-    const upcoming = upcomingDocs.map((d) => ({
-      conversationId: d.conversationId,
-      platform: d.platform,
-      name:
-        nameById[String(d.conversationId)] ||
-        (d.platform === "whatsapp"
-          ? `+${d.conversationId}`
-          : `Client ${String(d.conversationId).slice(-4)}`),
-      appointmentAt: d.appointmentAt,
-      bookedBy: d.classifiedBy
-        ? `${d.classifiedBy.firstName || ""} ${d.classifiedBy.lastName || ""}`.trim()
-        : null,
-    }));
+    // The agenda is useless without a name: the customer's, from their
+    // conversation, else a readable fallback.
+    const upcoming = upcomingRows.map((d) => {
+      const key = d.participant_external_id || d.external_id;
+      return {
+        conversationId: key,
+        platform: d.platform,
+        name: !isPlaceholderName(d.participant_name, key)
+          ? d.participant_name
+          : d.platform === "whatsapp"
+            ? `+${key}`
+            : `Client ${String(key).slice(-4)}`,
+        appointmentAt: d.appointment_at,
+        bookedBy: d.first_name
+          ? `${d.first_name || ""} ${d.last_name || ""}`.trim()
+          : null,
+      };
+    });
 
     return res.json({
       range,
-      total: totalCount,
-      bookedInRange,
+      total: counts?.total || 0,
+      bookedInRange: counts?.bookedInRange || 0,
       upcomingCount: upcoming.length,
       todayCount: upcoming.filter(
         (a) => new Date(a.appointmentAt) <= endOfToday,
@@ -252,7 +235,7 @@ router.get("/appointments", protect, async (req, res) => {
       next7DaysCount: upcoming.filter(
         (a) => new Date(a.appointmentAt) <= endOfWeek,
       ).length,
-      pastCount,
+      pastCount: counts?.pastCount || 0,
       upcoming,
     });
   } catch (err) {
@@ -261,147 +244,49 @@ router.get("/appointments", protect, async (req, res) => {
   }
 });
 
-router.get("/ad-attribution", protect, async (req, res) => {
-  try {
-    const range = parseInt(req.query.range) || 30;
-    const since = new Date(Date.now() - range * 24 * 60 * 60 * 1000);
-
-    // Pass 1: group context-carrying messages by ad/post identity
-    const ads = await Message.aggregate([
-      {
-        $match: {
-          direction: "incoming",
-          context: { $ne: null },
-          createdAt: { $gte: since },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            $ifNull: [
-              "$context.adId",
-              {
-                $ifNull: [
-                  "$context.postId",
-                  { $ifNull: ["$context.url", "$context.title"] },
-                ],
-              },
-            ],
-          },
-          title: { $first: "$context.title" },
-          kind: { $first: "$context.kind" },
-          photoUrl: { $first: "$context.photoUrl" },
-          url: { $first: "$context.url" },
-          platforms: { $addToSet: "$platform" },
-          attributedMessages: { $sum: 1 },
-          senders: { $addToSet: "$senderId" },
-          lastAt: { $max: "$createdAt" },
-        },
-      },
-      { $match: { _id: { $ne: null } } },
-      { $sort: { lastAt: -1 } },
-      { $limit: 50 },
-    ]);
-
-    // Pass 2: total inbound messages sent by those senders in range,
-    // so each ad shows full conversation volume, not just the first message
-    const allSenders = [...new Set(ads.flatMap((a) => a.senders))];
-    const senderCounts = {};
-    if (allSenders.length > 0) {
-      const counts = await Message.aggregate([
-        {
-          $match: {
-            direction: "incoming",
-            senderId: { $in: allSenders },
-            createdAt: { $gte: since },
-          },
-        },
-        { $group: { _id: "$senderId", count: { $sum: 1 } } },
-      ]);
-      for (const c of counts) senderCounts[c._id] = c.count;
-    }
-
-    const result = ads
-      .map((a) => ({
-        key: a._id,
-        title: a.title || "(untitled ad)",
-        kind: a.kind,
-        photoUrl: a.photoUrl,
-        url: a.url,
-        platforms: a.platforms,
-        conversations: a.senders.length,
-        attributedMessages: a.attributedMessages,
-        totalMessages: a.senders.reduce(
-          (sum, s) => sum + (senderCounts[s] || 0),
-          0,
-        ),
-        lastAt: a.lastAt,
-      }))
-      .sort((x, y) => y.conversations - x.conversations || y.totalMessages - x.totalMessages);
-
-    return res.json({ range, ads: result });
-  } catch (err) {
-    console.error("Ad attribution error:", err.message);
-    return res.status(500).json({ message: "Ad attribution failed" });
-  }
-});
-
-// GET /api/analytics/marketing-summary — for marketing agents
+// GET /api/analytics/marketing-summary — for agents
 router.get("/marketing-summary", protect, async (req, res) => {
   try {
     const range = parseInt(req.query.range) || 7;
-    const now = new Date();
-    const since = new Date(now - range * 24 * 60 * 60 * 1000);
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const weekStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
+    const params = windows(range);
 
-    const [
-      rangeCountRes,
-      todayCountRes,
-      weekCountRes,
-      byPlatform,
-      recentMessages,
-    ] = await Promise.all([
-      // Distinct clients in selected range
-      Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: since } } },
-        { $group: { _id: "$senderId" } },
-        { $count: "count" },
-      ]),
-      // Distinct clients today
-      Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: todayStart } } },
-        { $group: { _id: "$senderId" } },
-        { $count: "count" },
-      ]),
-      // Distinct clients this week
-      Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: weekStart } } },
-        { $group: { _id: "$senderId" } },
-        { $count: "count" },
-      ]),
-      // Distinct clients by platform in selected range
-      Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: since } } },
-        { $group: { _id: { platform: "$platform", senderId: "$senderId" } } },
-        { $group: { _id: "$_id.platform", count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]),
-      Message.find({ direction: "incoming" })
-        .sort({ createdAt: -1 })
-        .limit(5)
-        .select("platform senderName content createdAt"),
-    ]);
+    const [rangeCount, todayCount, weekCount, byPlatform, recentRows] =
+      await Promise.all([
+        // Distinct clients in selected range
+        distinctClientsSince("since", params),
+        // Distinct clients today
+        distinctClientsSince("today", params),
+        // Distinct clients this week
+        distinctClientsSince("week", params),
+        // Distinct clients by platform in selected range
+        clientsByPlatform(params),
+        db
+          .query(
+            `SELECT TOP (5) m.message_id, c.platform, c.participant_name, m.content,
+                    customer_key = COALESCE(c.participant_external_id, c.external_id),
+                    created_at = dbo.fn_DateTimeCombine(m.created_date, m.created_time)
+             FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
+             WHERE m.sender_type = N'contact'
+             ORDER BY m.created_date DESC, m.created_time DESC, m.message_id DESC`,
+          )
+          .then((r) => r.rows),
+      ]);
 
-    const rangeCount = rangeCountRes[0]?.count || 0;
-    const todayCount = todayCountRes[0]?.count || 0;
-    const weekCount = weekCountRes[0]?.count || 0;
+    // An unresolved name reads "User 1234", as in the inbox lists
+    const recentMessages = recentRows.map((m) => ({
+      _id: String(m.message_id),
+      platform: m.platform,
+      senderName: isPlaceholderName(m.participant_name, m.customer_key)
+        ? `User ${String(m.customer_key).slice(-4)}`
+        : m.participant_name,
+      content: m.content || "",
+      createdAt: m.created_at,
+    }));
 
     return res.json({
-      rangeCount,
-      todayCount,
-      weekCount,
+      rangeCount: rangeCount || 0,
+      todayCount: todayCount || 0,
+      weekCount: weekCount || 0,
       byPlatform,
       recentMessages,
     });

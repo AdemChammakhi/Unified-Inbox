@@ -4,8 +4,33 @@ networks:
 
 volumes:
   uploads-data:
+  sqlserver-data:
 
 services:
+  # SQL Server 2025 Express - UnifiedBox1 + UnifiedBoxDW
+  # (create the databases once with database/sqlserver/deploy.sh)
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-latest
+    container_name: sqlserver
+    env_file:
+      - sqlserver.env   # MSSQL_SA_PASSWORD=... (gitignored)
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Express
+    ports:
+      - "127.0.0.1:1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    networks:
+      - network1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -b -Q 'SELECT 1' -o /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
   # Backend - Express APII
   backend:
     build:
@@ -19,10 +44,13 @@ services:
       - "5000:5000"
     volumes:
       - uploads-data:/app/server/uploads
+    depends_on:
+      sqlserver:
+        condition: service_healthy
     environment:
       - PORT=5000
       # Real values come from .env — never commit secrets here
-      # - MONGO_URI=<from .env>
+      # - SQLSERVER_HOST=sqlserver, SQLSERVER_USER, SQLSERVER_PASSWORD=<from .env>
       # - JWT_SECRET=<from .env>
     networks:
       network1:

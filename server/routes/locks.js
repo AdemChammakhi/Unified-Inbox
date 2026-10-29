@@ -1,31 +1,34 @@
 const express = require("express");
-const ConversationLock = require("../models/ConversationLock");
+const conversations = require("../db/conversations");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 
 const router = express.Router();
+
+// The lock is locked_by_user_id on the customer's conversation row
+// (server/db/conversations.js). Maps list it under the customer id AND the
+// thread id when one is recorded, so the client's lookup by conversation id
+// or first participant finds it either way (CLAUDE.md §6).
 
 // GET /api/locks — Get all locks for a platform (with agent name populated)
 router.get("/", protect, async (req, res) => {
   try {
     const { platform } = req.query;
     const safePlatform = platform ? sanitizePlatform(platform) : null;
-    const filter = safePlatform ? { platform: safePlatform } : {};
-    const locks = await ConversationLock.find(filter)
-      .populate("lockedBy", "firstName lastName email role")
-      .lean();
+    const locks = await conversations.lockedConversations(safePlatform);
 
     // Build a map: { conversationId: { agentId, agentName, lockedAt } }
     const lockMap = {};
     locks.forEach((lock) => {
-      lockMap[lock.conversationId] = {
-        agentId: lock.lockedBy?._id,
-        agentName: lock.lockedBy
-          ? `${lock.lockedBy.firstName} ${lock.lockedBy.lastName}`
-          : "Unknown",
-        agentEmail: lock.lockedBy?.email,
+      const entry = {
+        agentId: lock.agentId,
+        agentName: lock.agentName,
+        agentEmail: lock.agentEmail,
         lockedAt: lock.lockedAt,
       };
+      for (const key of new Set([lock.customerId, lock.externalId].filter(Boolean))) {
+        lockMap[key] = entry;
+      }
     });
 
     return res.json({ locks: lockMap });
@@ -38,18 +41,14 @@ router.get("/", protect, async (req, res) => {
 // GET /api/locks/all — Admin/Manager: get all locks across all platforms with agent info
 router.get("/all", protect, authorize("admin", "manager"), async (req, res) => {
   try {
-    const locks = await ConversationLock.find({})
-      .populate("lockedBy", "firstName lastName email role")
-      .lean();
+    const locks = await conversations.lockedConversations();
 
     const result = locks.map((lock) => ({
-      conversationId: lock.conversationId,
+      conversationId: lock.customerId || lock.externalId,
       platform: lock.platform,
-      agentId: lock.lockedBy?._id,
-      agentName: lock.lockedBy
-        ? `${lock.lockedBy.firstName} ${lock.lockedBy.lastName}`
-        : "Unknown",
-      agentEmail: lock.lockedBy?.email,
+      agentId: lock.agentId,
+      agentName: lock.agentName,
+      agentEmail: lock.agentEmail,
       lockedAt: lock.lockedAt,
     }));
 
@@ -72,10 +71,7 @@ router.delete(
       if (!conversationId) {
         return res.status(400).json({ message: "Invalid conversationId" });
       }
-      await ConversationLock.findOneAndDelete({
-        conversationId,
-        ...(platform ? { platform } : {}),
-      });
+      await conversations.unlockByKey(conversationId, platform);
       return res.json({ success: true, message: "Conversation unlocked" });
     } catch (error) {
       console.error("Failed to unlock conversation:", error.message);
