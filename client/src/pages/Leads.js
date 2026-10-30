@@ -370,6 +370,25 @@ const Leads = () => {
     });
   }, [rows, filters, sort, mine, myId, myName]);
 
+  // What the Excel / CSV buttons export: the rows on screen, in their
+  // order, and a line describing how they were chosen for the file's title.
+  const exportView = useMemo(() => {
+    const parts = Object.entries(filters)
+      .filter(([, v]) => v !== "" && v != null)
+      .map(([key, value]) => {
+        const col = COLUMNS.find((c) => c.key === key);
+        const shown = key === "frein" && value === FREIN_NONE ? "Non renseigné" : value;
+        return `${col?.label || key} : ${shown}`;
+      });
+    if (mine) parts.unshift("Mes leads");
+    const sortCol = COLUMNS.find((c) => c.key === sort.key);
+    if (sortCol) parts.push(`tri ${sortCol.label} ${sort.dir === "asc" ? "▲" : "▼"}`);
+    return {
+      keys: filtered.map((r) => `${r.platform}:${r.customerId}`),
+      note: parts.join(" · "),
+    };
+  }, [filtered, filters, mine, sort]);
+
   const copyPhone = async (row) => {
     const ok = await copyText(row.phone);
     if (!ok) return;
@@ -585,7 +604,7 @@ const Leads = () => {
             >
               <PhoneIncoming size={13} /> + Appel entrant
             </button>
-            <ProspectExport range={range} />
+            <ProspectExport range={range} view={exportView} />
           </div>
         </div>
 

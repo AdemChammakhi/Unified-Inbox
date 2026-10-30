@@ -10,21 +10,39 @@ import { useAuth } from "../context/AuthContext";
  *
  * Excel comes color-coded like the app (and like their old spreadsheet);
  * CSV is tuned for French Excel (UTF-8 BOM, semicolons).
- * Backend: GET /api/exports/prospects — admin & manager only.
+ *
+ * Two modes:
+ *  - the full sheet (dashboards): GET /api/exports/prospects — admin &
+ *    manager only;
+ *  - `view` (the Leads page): the rows on screen, in their order, as
+ *    `{ keys: ["<platform>:<customerId>", …], note }` — POST
+ *    /api/leads/export, every role, each within the rows the server lets
+ *    them see (an agent's own leads).
  */
-const ProspectExport = ({ range = 30, platform = "all" }) => {
+const ProspectExport = ({ range = 30, platform = "all", view = null }) => {
   const { user } = useAuth();
   const [busy, setBusy] = useState(false);
 
   const download = async (format) => {
+    if (view && view.keys.length === 0) {
+      alert("Aucun prospect à exporter avec ces filtres.");
+      return;
+    }
     setBusy(true);
     try {
-      const res = await axios.get("/api/exports/prospects", {
-        params: { format, platform, range },
-        headers: { Authorization: `Bearer ${user?.token}` },
-        responseType: "blob",
-        timeout: 120000,
-      });
+      const headers = { Authorization: `Bearer ${user?.token}` };
+      const res = view
+        ? await axios.post(
+            "/api/leads/export",
+            { format, range, keys: view.keys, note: view.note || "" },
+            { headers, responseType: "blob", timeout: 120000 },
+          )
+        : await axios.get("/api/exports/prospects", {
+            params: { format, platform, range },
+            headers,
+            responseType: "blob",
+            timeout: 120000,
+          });
       const disposition = res.headers["content-disposition"] || "";
       const match = disposition.match(/filename="([^"]+)"/);
       const filename =
@@ -63,7 +81,11 @@ const ProspectExport = ({ range = 30, platform = "all" }) => {
     }
   };
 
-  if (user?.role !== "admin" && user?.role !== "manager") return null;
+  if (!view && user?.role !== "admin" && user?.role !== "manager") return null;
+
+  const what = view
+    ? `les ${view.keys.length} prospect${view.keys.length > 1 ? "s" : ""} affichés, avec vos filtres et votre tri`
+    : "la feuille prospects complète";
 
   return (
     <div style={styles.wrap}>
@@ -72,7 +94,7 @@ const ProspectExport = ({ range = 30, platform = "all" }) => {
         style={styles.btn}
         onClick={() => download("xlsx")}
         disabled={busy}
-        title="Feuille prospects avec code couleur, comme votre tableau de suivi"
+        title={`Excel avec code couleur : ${what}`}
       >
         <Download size={13} /> {busy ? "Export…" : "Excel"}
       </button>
@@ -81,7 +103,7 @@ const ProspectExport = ({ range = 30, platform = "all" }) => {
         style={styles.btn}
         onClick={() => download("csv")}
         disabled={busy}
-        title="CSV pour Excel français (séparateur ;)"
+        title={`CSV pour Excel français (séparateur ;) : ${what}`}
       >
         <Download size={13} /> CSV
       </button>

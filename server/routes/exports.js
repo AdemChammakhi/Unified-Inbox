@@ -906,7 +906,9 @@ async function toXlsx(rows, meta) {
   ws.mergeCells(1, 1, 1, HEADERS.length);
   const title = ws.getCell(1, 1);
   title.value =
-    `Prospects Medtour CRM — ${meta.platformLabel} — ${meta.rangeLabel} — exporté le ${fmtDate(new Date())}` +
+    `Prospects Medtour CRM — ${meta.platformLabel} — ${meta.rangeLabel}` +
+    (meta.note ? ` — ${meta.note}` : "") +
+    ` — exporté le ${fmtDate(new Date())}` +
     (rows.truncated
       ? "   ⚠ EXPORT TRONQUÉ : « Premier contact » et les compteurs sont partiels pour les anciens échanges."
       : "");
@@ -954,6 +956,30 @@ async function toXlsx(rows, meta) {
   ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: HEADERS.length } };
 
   return wb.xlsx.writeBuffer();
+}
+
+const rangeLabelOf = (rangeDays) =>
+  rangeDays ? `${rangeDays} derniers jours` : "tout l'historique";
+
+/**
+ * Write `rows` as the prospect file. Shared with the Leads page's export of
+ * the rows on screen (routes/leads.js), so both files read the same.
+ * `fileName` has no extension; `meta.note`, when set, is appended to the
+ * xlsx title band (e.g. the filters the rows were chosen with).
+ */
+async function sendSheet(res, rows, { format, fileName, meta }) {
+  if (format === "csv") {
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}.csv"`);
+    return res.send(toCsv(rows));
+  }
+  const buffer = await toXlsx(rows, meta);
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+  res.setHeader("Content-Disposition", `attachment; filename="${fileName}.xlsx"`);
+  return res.send(Buffer.from(buffer));
 }
 
 // Single-flight guard. The rate limiter caps how OFTEN exports are asked for,
@@ -1011,34 +1037,16 @@ router.get(
 
         const dateTag = new Date().toISOString().slice(0, 10);
         const platTag = platform || "tous-canaux";
-        const meta = {
-          platformLabel: platform
-            ? PLATFORM_LABELS[platform]
-            : "Tous les canaux",
-          rangeLabel: rangeDays
-            ? `${rangeDays} derniers jours`
-            : "tout l'historique",
-        };
-
-        if (format === "csv") {
-          res.setHeader("Content-Type", "text/csv; charset=utf-8");
-          res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="prospects-medtour-${platTag}-${dateTag}.csv"`,
-          );
-          return res.send(toCsv(rows));
-        }
-
-        const buffer = await toXlsx(rows, meta);
-        res.setHeader(
-          "Content-Type",
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        );
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename="prospects-medtour-${platTag}-${dateTag}.xlsx"`,
-        );
-        return res.send(Buffer.from(buffer));
+        return await sendSheet(res, rows, {
+          format,
+          fileName: `prospects-medtour-${platTag}-${dateTag}`,
+          meta: {
+            platformLabel: platform
+              ? PLATFORM_LABELS[platform]
+              : "Tous les canaux",
+            rangeLabel: rangeLabelOf(rangeDays),
+          },
+        });
       } finally {
         _exportInFlight = false;
       }
@@ -1050,4 +1058,6 @@ router.get(
 );
 
 module.exports = router;
+module.exports.sendSheet = sendSheet;
+module.exports.rangeLabelOf = rangeLabelOf;
 module.exports.buildProspectRows = buildProspectRows;

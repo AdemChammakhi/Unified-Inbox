@@ -17,7 +17,8 @@ const express = require("express");
 const router = express.Router();
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
-const { buildProspectRows } = require("./exports");
+const rateLimit = require("express-rate-limit");
+const { buildProspectRows, sendSheet, rangeLabelOf } = require("./exports");
 const IncomingCall = require("../models/IncomingCall");
 const Classification = require("../models/Classification");
 const ConversationLock = require("../models/ConversationLock");
@@ -81,10 +82,45 @@ function scopedFor(user, payload) {
   };
 }
 
+/**
+ * The period of a request: a positive number of days, or null for the whole
+ * history ("all" or absent). `undefined` means invalid. Must arrive as a
+ * plain string or number: Express's extended parser turns ?range[$gt]=1 into
+ * an object, whose parseInt is NaN.
+ */
+function parseRange(raw) {
+  if (raw === undefined || raw === "all") return null;
+  if (typeof raw !== "string" && typeof raw !== "number") return undefined;
+  const days = Number.parseInt(raw, 10);
+  return Number.isInteger(days) && days > 0 && days <= 3650 ? days : undefined;
+}
+
+/** The whole sheet for a period, from the cache or a (shared) build. */
+async function sheetFor(platform, rangeDays) {
+  const key = `${platform || "all"}:${rangeDays || "all"}`;
+  const hit = _cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    return { rows: hit.rows, truncated: hit.truncated, cached: true };
+  }
+
+  const since = rangeDays
+    ? new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000)
+    : null;
+  const generation = _generation;
+  const payload = await buildOnce(key, platform, since);
+  if (generation === _generation) {
+    _cache.set(key, { at: Date.now(), ...payload });
+    // Keep the cache from growing without bound across filter combinations
+    if (_cache.size > 20) _cache.delete(_cache.keys().next().value);
+  }
+  return { ...payload, cached: false };
+}
+
 // GET /api/leads?platform=all|<platform>&range=<days|all>
 // Every role reads the sheet, each within its scope (see scopedFor): agents
 // come here after the inbox to find the prospects they follow and their
-// numbers. The file export (routes/exports.js) stays with admins and managers.
+// numbers. The full-sheet export (routes/exports.js) stays with admins and
+// managers; everyone can export the rows on screen (POST /export below).
 router.get("/", protect, authorize("admin", "manager", "marketing"), async (req, res) => {
   try {
     const platform =
@@ -95,43 +131,102 @@ router.get("/", protect, authorize("admin", "manager", "marketing"), async (req,
       return res.status(400).json({ message: "Plateforme invalide" });
     }
 
-    let rangeDays = null;
-    if (req.query.range !== undefined && req.query.range !== "all") {
-      if (typeof req.query.range !== "string") {
-        return res.status(400).json({ message: "Période invalide" });
-      }
-      rangeDays = Number.parseInt(req.query.range, 10);
-      if (!Number.isInteger(rangeDays) || rangeDays <= 0 || rangeDays > 3650) {
-        return res.status(400).json({ message: "Période invalide" });
-      }
+    const rangeDays = parseRange(req.query.range);
+    if (rangeDays === undefined) {
+      return res.status(400).json({ message: "Période invalide" });
     }
 
-    const key = `${platform || "all"}:${rangeDays || "all"}`;
-    const hit = _cache.get(key);
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
-      return res.json({
-        ...scopedFor(req.user, { rows: hit.rows, truncated: hit.truncated }),
-        cached: true,
-      });
-    }
-
-    const since = rangeDays
-      ? new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000)
-      : null;
-    const generation = _generation;
-    const payload = await buildOnce(key, platform, since);
-    if (generation === _generation) {
-      _cache.set(key, { at: Date.now(), ...payload });
-      // Keep the cache from growing without bound across filter combinations
-      if (_cache.size > 20) _cache.delete(_cache.keys().next().value);
-    }
-
-    return res.json({ ...scopedFor(req.user, payload), cached: false });
+    const { cached, ...payload } = await sheetFor(platform, rangeDays);
+    return res.json({ ...scopedFor(req.user, payload), cached });
   } catch (err) {
     console.error("[Leads] failed:", err.message);
     return res.status(500).json({ message: "Impossible de charger les leads" });
   }
 });
+
+// The Leads page's export: exactly the rows on screen, filtered and sorted
+// as the user left them. The page sends the keys of those rows in display
+// order; the server rebuilds them from the same sheet, within the user's
+// scope, so an agent can only ever export his own leads whatever he sends.
+// 3000 keys stay inside Express's 100 KB body limit.
+const EXPORT_MAX_ROWS = 3000;
+// Its own budget, apart from the full export's: the file is small (built
+// from the cached sheet), and agents behind one office IP share the count.
+const viewExportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { message: "Trop d'exports demandés. Réessayez dans quelques minutes." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// POST /api/leads/export {format: xlsx|csv, range, keys: ["<platform>:<customerId>", …], note?}
+router.post(
+  "/export",
+  viewExportLimiter,
+  protect,
+  authorize("admin", "manager", "marketing"),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const format = body.format === "csv" ? "csv" : "xlsx";
+      const rangeDays = parseRange(body.range);
+      if (rangeDays === undefined) {
+        return res.status(400).json({ message: "Période invalide" });
+      }
+      const keys = Array.isArray(body.keys)
+        ? body.keys.filter((k) => typeof k === "string" && k.length <= 200)
+        : null;
+      if (!keys || keys.length === 0) {
+        return res.status(400).json({ message: "Aucun prospect à exporter." });
+      }
+      if (keys.length > EXPORT_MAX_ROWS) {
+        return res.status(400).json({
+          message: `Trop de lignes (${keys.length}) : affinez les filtres, maximum ${EXPORT_MAX_ROWS}.`,
+        });
+      }
+
+      const { rows: all, truncated } = await sheetFor(null, rangeDays);
+      const byKey = new Map(
+        scopedFor(req.user, { rows: all }).rows.map((r) => [
+          `${r.platform}:${r.customerId}`,
+          r,
+        ]),
+      );
+      const seen = new Set();
+      const rows = [];
+      for (const k of keys) {
+        const row = byKey.get(k);
+        if (row && !seen.has(k)) {
+          seen.add(k);
+          rows.push(row);
+        }
+      }
+      if (rows.length === 0) {
+        return res.status(404).json({
+          message: "Ces prospects ne sont plus dans la liste. Rafraîchissez la page.",
+        });
+      }
+      rows.truncated = truncated;
+
+      const note = oneLine(body.note, 300);
+      const dateTag = new Date().toISOString().slice(0, 10);
+      const who = req.user.role === "marketing" ? "mes-leads" : "selection";
+      return await sendSheet(res, rows, {
+        format,
+        fileName: `leads-medtour-${who}-${dateTag}`,
+        meta: {
+          platformLabel: req.user.role === "marketing" ? "Mes leads" : "Sélection",
+          rangeLabel: rangeLabelOf(rangeDays),
+          note: `${rows.length} prospect${rows.length > 1 ? "s" : ""}${note ? ` · ${note}` : ""}`,
+        },
+      });
+    } catch (err) {
+      console.error("[Leads] export failed:", err.message);
+      return res.status(500).json({ message: "L'export a échoué" });
+    }
+  },
+);
 
 const oneLine = (v, max) =>
   typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
