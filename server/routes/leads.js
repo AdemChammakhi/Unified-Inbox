@@ -156,8 +156,14 @@ router.get("/", protect, authorize("admin", "manager", "marketing"), async (req,
 // as the user left them. The page sends the keys of those rows in display
 // order; the server rebuilds them from the same sheet, within the user's
 // scope, so an agent can only ever export his own leads whatever he sends.
-// 3000 keys stay inside Express's 100 KB body limit.
-const EXPORT_MAX_ROWS = 3000;
+// The route has its own 1 MB body limit (server/index.js): ~30 bytes a key,
+// so the whole sheet of any period fits — 90 days or "Tout" is several
+// thousand rows, which the first limit (3000 rows / 100 KB) refused.
+const EXPORT_MAX_ROWS = 25000;
+// A workbook of thousands of rows is memory-hungry in the 512 MB backend:
+// one big export at a time, like the full export (routes/exports.js).
+const BIG_EXPORT_ROWS = 2000;
+let _bigExportInFlight = false;
 // Its own budget, apart from the full export's: the file is small (built
 // from the cached sheet), and agents behind one office IP share the count.
 const viewExportLimiter = rateLimit({
@@ -193,42 +199,52 @@ router.post(
           message: `Trop de lignes (${keys.length}) : affinez les filtres, maximum ${EXPORT_MAX_ROWS}.`,
         });
       }
-
-      const { rows: all, truncated } = await sheetFor(null, rangeDays);
-      const byKey = new Map(
-        scopedFor(req.user, { rows: all }).rows.map((r) => [
-          `${r.platform}:${r.customerId}`,
-          r,
-        ]),
-      );
-      const seen = new Set();
-      const rows = [];
-      for (const k of keys) {
-        const row = byKey.get(k);
-        if (row && !seen.has(k)) {
-          seen.add(k);
-          rows.push(row);
-        }
-      }
-      if (rows.length === 0) {
-        return res.status(404).json({
-          message: "Ces prospects ne sont plus dans la liste. Rafraîchissez la page.",
+      const big = keys.length > BIG_EXPORT_ROWS;
+      if (big && _bigExportInFlight) {
+        return res.status(429).json({
+          message: "Un export est déjà en cours. Patientez quelques secondes et réessayez.",
         });
       }
-      rows.truncated = truncated;
+      if (big) _bigExportInFlight = true;
+      try {
+        const { rows: all, truncated } = await sheetFor(null, rangeDays);
+        const byKey = new Map(
+          scopedFor(req.user, { rows: all }).rows.map((r) => [
+            `${r.platform}:${r.customerId}`,
+            r,
+          ]),
+        );
+        const seen = new Set();
+        const rows = [];
+        for (const k of keys) {
+          const row = byKey.get(k);
+          if (row && !seen.has(k)) {
+            seen.add(k);
+            rows.push(row);
+          }
+        }
+        if (rows.length === 0) {
+          return res.status(404).json({
+            message: "Ces prospects ne sont plus dans la liste. Rafraîchissez la page.",
+          });
+        }
+        rows.truncated = truncated;
 
-      const note = oneLine(body.note, 300);
-      const dateTag = new Date().toISOString().slice(0, 10);
-      const who = req.user.role === "marketing" ? "mes-leads" : "selection";
-      return await sendSheet(res, rows, {
-        format,
-        fileName: `leads-medtour-${who}-${dateTag}`,
-        meta: {
-          platformLabel: req.user.role === "marketing" ? "Mes leads" : "Sélection",
-          rangeLabel: rangeLabelOf(rangeDays),
-          note: `${rows.length} prospect${rows.length > 1 ? "s" : ""}${note ? ` · ${note}` : ""}`,
-        },
-      });
+        const note = oneLine(body.note, 300);
+        const dateTag = new Date().toISOString().slice(0, 10);
+        const who = req.user.role === "marketing" ? "mes-leads" : "selection";
+        return await sendSheet(res, rows, {
+          format,
+          fileName: `leads-medtour-${who}-${dateTag}`,
+          meta: {
+            platformLabel: req.user.role === "marketing" ? "Mes leads" : "Sélection",
+            rangeLabel: rangeLabelOf(rangeDays),
+            note: `${rows.length} prospect${rows.length > 1 ? "s" : ""}${note ? ` · ${note}` : ""}`,
+          },
+        });
+      } finally {
+        if (big) _bigExportInFlight = false;
+      }
     } catch (err) {
       console.error("[Leads] export failed:", err.message);
       return res.status(500).json({ message: "L'export a échoué" });

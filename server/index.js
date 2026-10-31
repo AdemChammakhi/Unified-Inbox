@@ -118,6 +118,11 @@ app.use(
   require("./routes/support"),
 );
 
+// The Leads view export sends the keys of every row on screen: 90 days or
+// the whole history is several thousand keys, past the 100KB default. Same
+// pattern as above, for that one route only.
+app.use("/api/leads/export", express.json({ limit: "1mb" }));
+
 app.use(
   express.json({
     // Keep the raw body so webhook routes can verify Meta's
