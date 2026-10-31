@@ -23,6 +23,8 @@ const STAGES = Object.freeze([
   { key: "nouveau_lead", label: "Nouveau lead", ordinal: 1 },
   { key: "a_contacter", label: "À contacter", ordinal: 2 },
   { key: "contact_etabli", label: "Contact établi", ordinal: 3 },
+  // Added 31 Oct 2026: the agent asked for the prospect's number
+  { key: "attente_telephone", label: "En attente du numéro de téléphone", ordinal: 3.5 },
   // Shown as "En cours" (management's wording); the code keeps its full name
   { key: "qualification_en_cours", label: "En cours", ordinal: 4 },
   { key: "qualifie", label: "Qualifié", ordinal: 5 },

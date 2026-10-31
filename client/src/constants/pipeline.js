@@ -7,6 +7,7 @@ export const STAGES = [
   { key: "nouveau_lead", label: "Nouveau lead", color: "#6E7A96" },
   { key: "a_contacter", label: "À contacter", color: "#E3A63C" },
   { key: "contact_etabli", label: "Contact établi", color: "#5B9BD9" },
+  { key: "attente_telephone", label: "En attente du numéro de téléphone", color: "#7FB8D8" },
   { key: "qualification_en_cours", label: "En cours", color: "#8FCFA8" },
   { key: "qualifie", label: "Qualifié", color: "#5FBF8A" },
   { key: "offre_envoyee", label: "Offre envoyée / Devis envoyé", color: "#4EC3C3" },

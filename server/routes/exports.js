@@ -58,6 +58,7 @@ const {
 const STAGE_FILLS = {
   a_contacter: "FFE3A63C",
   contact_etabli: "FF5B9BD9",
+  attente_telephone: "FF7FB8D8",
   qualification_en_cours: "FF8FCFA8",
   qualifie: "FF5FBF8A",
   offre_envoyee: "FF4EC3C3",
