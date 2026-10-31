@@ -38,6 +38,11 @@ let _generation = 0;
 function clearLeadsCache() {
   _generation++;
   _cache.clear();
+  // A build already running read the data BEFORE this change. Forget it, so
+  // the next request starts a fresh build instead of joining the old one —
+  // joining it used to hand back (and cache for 30 s) the sheet without the
+  // edit just saved, which looked like the edit had been undone.
+  _inFlight.clear();
 }
 
 // Builds run ONE at a time and concurrent requests for the same sheet share
@@ -60,7 +65,10 @@ function buildOnce(key, platform, since) {
     return { rows: [...rows], truncated: Boolean(rows.truncated) };
   });
   _queue = run.catch(() => {});
-  const tracked = run.finally(() => _inFlight.delete(key));
+  // Only remove our own entry: after a clear, a newer build may hold the key
+  const tracked = run.finally(() => {
+    if (_inFlight.get(key) === tracked) _inFlight.delete(key);
+  });
   _inFlight.set(key, tracked);
   return tracked;
 }

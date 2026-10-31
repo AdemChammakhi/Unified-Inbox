@@ -96,7 +96,11 @@ const AdminDashboard = () => {
 
   useEffect(() => {
     fetchLocks();
-    const interval = setInterval(fetchLocks, 15000);
+    // Polls only while the tab is visible: a dashboard left open in a
+    // background tab used to keep hitting the API every 15 s all day.
+    const interval = setInterval(() => {
+      if (!document.hidden) fetchLocks();
+    }, 15000);
     return () => clearInterval(interval);
   }, [fetchLocks]);
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
@@ -116,18 +116,27 @@ const COLUMNS = [
   { key: "lastMessage", label: "Dernier message", type: "text", width: 300 },
 ];
 
+// Built once: toLocaleString / localeCompare with a locale build a new
+// formatter or collator on every call, and sorting a few thousand rows calls
+// them tens of thousands of times.
+const DATE_FORMAT = new Intl.DateTimeFormat("fr-FR", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const COLLATOR = new Intl.Collator("fr");
+
 const fmtDate = (v) => {
   if (!v) return "";
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("fr-FR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return DATE_FORMAT.format(d);
 };
+
+/** Rows drawn at first, and added per "Afficher plus". */
+const PAGE_ROWS = 200;
 
 const FREIN_LABELS = Object.fromEntries(FREINS.map((f) => [f.code, f.label]));
 
@@ -304,8 +313,19 @@ const Leads = () => {
     };
   }, [rows]);
 
+  // Typing in a filter updates the field at once; the table follows when
+  // React has time, instead of re-filtering every row on each keystroke.
+  const deferredFilters = useDeferredValue(filters);
+
   const filtered = useMemo(() => {
-    const active = Object.entries(filters).filter(([, v]) => v !== "" && v != null);
+    const active = Object.entries(deferredFilters)
+      .filter(([, v]) => v !== "" && v != null)
+      .map(([key, value]) => [
+        key,
+        value,
+        COLUMNS.find((c) => c.key === key),
+        String(value).toLowerCase(),
+      ]);
     // By id; the name only stands in for a sheet built before ids were sent
     let out = mine
       ? rows.filter((row) =>
@@ -314,8 +334,7 @@ const Leads = () => {
       : rows;
     if (active.length > 0) {
       out = out.filter((row) =>
-        active.every(([key, value]) => {
-          const col = COLUMNS.find((c) => c.key === key);
+        active.every(([key, value, col, needle]) => {
           if (col?.type === "select") {
             const picked = selectText(row, key);
             if (key === "frein" && value === FREIN_NONE) return !picked;
@@ -330,14 +349,14 @@ const Leads = () => {
             if (v.startsWith("<")) return raw < Number(v.slice(1));
             return String(raw) === v;
           }
-          return cell.toLowerCase().includes(String(value).toLowerCase());
+          return cell.toLowerCase().includes(needle);
         }),
       );
     }
     const { key, dir } = sort;
     const mul = dir === "asc" ? 1 : -1;
+    const col = COLUMNS.find((c) => c.key === key);
     return [...out].sort((a, b) => {
-      const col = COLUMNS.find((c) => c.key === key);
       if (key === "maturity") {
         // Ascending = hottest first (Chaud, Tiède, Froid, then the closed
         // dossiers Gagné and Perdu). Rows without a level stay last either
@@ -360,20 +379,28 @@ const Leads = () => {
         const fa = cellText(a, key);
         const fb = cellText(b, key);
         if (!fa || !fb) return fa ? -1 : fb ? 1 : 0;
-        return fa.localeCompare(fb, "fr") * mul;
+        return COLLATOR.compare(fa, fb) * mul;
       }
       if (col?.type === "number") return (Number(a[key] || 0) - Number(b[key] || 0)) * mul;
       if (col?.type === "date") {
         return (new Date(a[key] || 0) - new Date(b[key] || 0)) * mul;
       }
-      return cellText(a, key).localeCompare(cellText(b, key), "fr") * mul;
+      return COLLATOR.compare(cellText(a, key), cellText(b, key)) * mul;
     });
-  }, [rows, filters, sort, mine, myId, myName]);
+  }, [rows, deferredFilters, sort, mine, myId, myName]);
+
+  // Each row holds several inputs (stage, typologie, PAX, motif, comment):
+  // drawing thousands at once froze the page. Show the first PAGE_ROWS and
+  // more on demand; back to the first page when the selection changes, but
+  // not after an edit's silent reload.
+  const [shown, setShown] = useState(PAGE_ROWS);
+  useEffect(() => setShown(PAGE_ROWS), [deferredFilters, sort, mine, range]);
+  const visible = useMemo(() => filtered.slice(0, shown), [filtered, shown]);
 
   // What the Excel / CSV buttons export: the rows on screen, in their
   // order, and a line describing how they were chosen for the file's title.
   const exportView = useMemo(() => {
-    const parts = Object.entries(filters)
+    const parts = Object.entries(deferredFilters)
       .filter(([, v]) => v !== "" && v != null)
       .map(([key, value]) => {
         const col = COLUMNS.find((c) => c.key === key);
@@ -387,7 +414,7 @@ const Leads = () => {
       keys: filtered.map((r) => `${r.platform}:${r.customerId}`),
       note: parts.join(" · "),
     };
-  }, [filtered, filters, mine, sort]);
+  }, [filtered, deferredFilters, mine, sort]);
 
   const copyPhone = async (row) => {
     const ok = await copyText(row.phone);
@@ -752,7 +779,7 @@ const Leads = () => {
                   </td>
                 </tr>
               ) : (
-                filtered.map((r, i) => (
+                visible.map((r, i) => (
                   <tr
                     key={rowKey(r)}
                     style={{
@@ -965,6 +992,27 @@ const Leads = () => {
                     })}
                   </tr>
                 ))
+              )}
+              {!loading && filtered.length > shown && (
+                <tr>
+                  <td colSpan={COLUMNS.length} style={styles.empty}>
+                    {shown} prospects affichés sur {filtered.length}.{" "}
+                    <button
+                      className="support-btn"
+                      style={styles.ghost}
+                      onClick={() => setShown((n) => n + PAGE_ROWS)}
+                    >
+                      Afficher {Math.min(PAGE_ROWS, filtered.length - shown)} de plus
+                    </button>{" "}
+                    <button
+                      className="support-btn"
+                      style={styles.ghost}
+                      onClick={() => setShown(filtered.length)}
+                    >
+                      Tout afficher
+                    </button>
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>

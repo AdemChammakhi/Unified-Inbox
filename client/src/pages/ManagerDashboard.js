@@ -1095,7 +1095,10 @@ const ManagerDashboard = () => {
   useEffect(() => {
     if (activeMainTab === "agents") {
       fetchAgentLocks();
-      const interval = setInterval(fetchAgentLocks, 15000);
+      // Only while the tab is visible
+      const interval = setInterval(() => {
+        if (!document.hidden) fetchAgentLocks();
+      }, 15000);
       return () => clearInterval(interval);
     }
   }, [activeMainTab, fetchAgentLocks]);
