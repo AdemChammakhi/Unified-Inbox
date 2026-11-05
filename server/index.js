@@ -28,9 +28,11 @@ const io = new Server(server, {
 app.set("io", io);
 
 const jwt = require("jsonwebtoken");
+const User = require("./models/User");
 
-// Authenticate Socket.IO connections
-io.use((socket, next) => {
+// Authenticate Socket.IO connections. Like `protect`, the account must still
+// exist and be active — a disabled user's live feed stops at reconnect.
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) {
     console.warn("[Socket] Authentication failed: Token missing");
@@ -44,6 +46,11 @@ io.use((socket, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const account = await User.findById(decoded.id).select("isActive");
+    if (!account || account.isActive === false) {
+      console.warn("[Socket] Authentication failed: account missing or disabled");
+      return next(new Error("Authentication error: Account disabled"));
+    }
     socket.user = decoded;
     next();
   } catch (err) {
@@ -56,9 +63,15 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
+  // Each socket sits in its own user's room, taken from the verified token.
+  // The client still emits "join" with its id; any other id is refused, so
+  // no one can listen in on another user's room.
+  const ownRoom = String(socket.user.id);
+  socket.join(ownRoom);
   socket.on("join", (userId) => {
-    socket.join(userId);
-    console.log(`User ${userId} joined room`);
+    if (String(userId) !== ownRoom) {
+      console.warn(`[Socket] Refused join of room ${userId} by user ${ownRoom}`);
+    }
   });
 
   socket.on("disconnect", () => {

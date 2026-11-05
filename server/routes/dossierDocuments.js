@@ -29,7 +29,7 @@ const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const DossierDocument = require("../models/DossierDocument");
 const User = require("../models/User");
-const { protect } = require("../middleware/auth");
+const { protect, ACCOUNT_DISABLED } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 
 const router = express.Router();
@@ -192,6 +192,9 @@ async function protectHeaderOrQuery(req, res, next) {
     req.user = await User.findById(decoded.id).select("-password");
     if (!req.user) {
       return res.status(401).json({ message: "Not authorized, user not found" });
+    }
+    if (req.user.isActive === false) {
+      return res.status(401).json({ message: ACCOUNT_DISABLED });
     }
     return next();
   } catch {
