@@ -65,7 +65,94 @@ const PaxCell = ({ value, onSave }) => {
   );
 };
 
+/**
+ * Phone in a sheet cell: the number the agent recorded on the dossier, as a
+ * text field saved on Enter or when the cursor leaves it; empty clears it.
+ * Keeps the call link and the copy button beside the field once a number is
+ * stored. WhatsApp and phone-call leads never get here: their number is
+ * their identity, not a recorded field.
+ */
+const PhoneCell = ({ value, onSave, copied, onCopy }) => {
+  const stored = value || "";
+  const [text, setText] = useState(stored);
+  useEffect(() => setText(stored), [stored]);
+  const commit = () => {
+    const t = text.trim();
+    if (t === stored) return;
+    onSave(t).catch(() => setText(stored));
+  };
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <input
+        type="tel"
+        value={text}
+        maxLength={30}
+        placeholder="—"
+        title="Numéro de téléphone du prospect (relevé dans la discussion)"
+        aria-label="Numéro de téléphone"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") setText(stored);
+        }}
+        style={{
+          width: stored ? 104 : 118,
+          padding: "3px 6px",
+          borderRadius: 6,
+          border: "1px solid var(--border-primary)",
+          backgroundColor: "var(--bg-card)",
+          color: "var(--text-primary)",
+          fontSize: 12,
+          outline: "none",
+          fontFamily: "'Space Grotesk', sans-serif",
+        }}
+      />
+      {stored && (
+        <>
+          <a
+            href={`tel:${stored.replace(/[^\d+]/g, "")}`}
+            style={styles.phoneLink}
+            title="Appeler"
+            aria-label="Appeler"
+          >
+            <Phone size={12} />
+          </a>
+          <button
+            type="button"
+            className="support-btn"
+            style={styles.copyBtn}
+            onClick={onCopy}
+            title="Copier le numéro"
+            aria-label="Copier le numéro"
+          >
+            {copied ? (
+              <Check size={12} style={{ color: "var(--success)" }} />
+            ) : (
+              <Copy size={12} />
+            )}
+          </button>
+        </>
+      )}
+    </span>
+  );
+};
+
 const EMPTY_CALL = { name: "", phone: "", email: "", typologie: "", pax: "", comment: "" };
+
+/** What the server writes in "Dispatché à" when nobody dispatched the row. */
+const NOT_DISPATCHED = "Non dispatché";
+
+/** The row's dispatch fields once it has none. */
+const NO_DISPATCH = {
+  dispatchId: null,
+  dispatchedTo: NOT_DISPATCHED,
+  dispatchedToId: null,
+  dispatchedBy: "",
+  dispatchedAt: null,
+  dispatchNote: "",
+  dispatchReplied: false,
+};
 
 /**
  * Leads — the prospect sheet, in the app.
@@ -111,6 +198,10 @@ const COLUMNS = [
   { key: "rdvAt", label: "RDV le", type: "date", width: 140 },
   { key: "invoiceRef", label: "Réf. facture", type: "text", width: 130 },
   { key: "agent", label: "Commercial", type: "select", width: 150 },
+  // Dispatching (admin): who was asked to deal with the discussion, by whom.
+  // Rows nobody dispatched read "Non dispatché", so they filter as such.
+  { key: "dispatchedTo", label: "Dispatché à", type: "select", width: 170 },
+  { key: "dispatchedBy", label: "Dispatché par", type: "select", width: 150 },
   { key: "messagesIn", label: "Reçus", type: "number", width: 78 },
   { key: "messagesOut", label: "Envoyés", type: "number", width: 84 },
   { key: "lastMessage", label: "Dernier message", type: "text", width: 300 },
@@ -308,6 +399,8 @@ const Leads = () => {
       maturity: orderedLike(present("maturity"), MATURITY_ORDER),
       frein: orderedLike(present("frein"), FREIN_ORDER),
       agent: build("agent"),
+      dispatchedTo: orderedLike(present("dispatchedTo"), [NOT_DISPATCHED]),
+      dispatchedBy: build("dispatchedBy"),
       // Offer "Non renseigné" only when some row actually lacks a frein.
       freinMissing: rows.some((r) => !selectText(r, "frein")),
     };
@@ -456,6 +549,11 @@ const Leads = () => {
         invoiceRef: d.invoiceRef || "",
         pax: Number.isInteger(d.pax) ? d.pax : null,
         rdvAt: d.appointmentAt || null,
+        // Only the dossier's number is editable (see PhoneCell): WhatsApp
+        // and phone-call rows keep the number they are identified by
+        ...(r.platform !== "whatsapp" && r.platform !== "telephone"
+          ? { phone: d.phone || "" }
+          : {}),
       });
       // The stage and the flag feed the maturity: rebuild quietly
       if (patch.stage !== undefined || patch.isPriority !== undefined) {
@@ -531,6 +629,78 @@ const Leads = () => {
       });
     } finally {
       setCallSaving(false);
+    }
+  };
+
+  /**
+   * Dispatch the discussion to an agent (admin), move it to another one, or
+   * cancel it with "". The agent is put in charge at the same time (the
+   * lock moves), so the "Commercial" cell follows.
+   */
+  const dispatchRow = async (r, agentId) => {
+    const headers = { Authorization: `Bearer ${user?.token}` };
+    if (!agentId) {
+      if (!r.dispatchId) return;
+      if (!window.confirm(`Annuler le dispatch de ${r.name} à ${r.dispatchedTo} ?\n${r.dispatchedTo} reste en charge de la discussion.`)) {
+        return;
+      }
+      try {
+        await axios.delete(`/api/dispatch/${encodeURIComponent(r.dispatchId)}`, { headers });
+        patchRow(r, { ...NO_DISPATCH });
+      } catch (err) {
+        showEditError(err);
+      }
+      return;
+    }
+    const target = agents.find((a) => a._id === agentId);
+    const note = window.prompt(
+      `Dispatcher la discussion avec ${r.name} à ${target ? target.name : "cet agent"}.\nConsigne pour l’agent (facultatif) :`,
+      r.dispatchNote || "",
+    );
+    if (note === null) return;
+    try {
+      const res = r.dispatchId
+        ? await axios.put(
+            `/api/dispatch/${encodeURIComponent(r.dispatchId)}/reassign`,
+            { agentId, note },
+            { headers },
+          )
+        : await axios.post(
+            "/api/dispatch",
+            { platform: r.platform, customerId: r.customerId, agentId, note },
+            { headers },
+          );
+      const d = res.data?.dispatch || {};
+      patchRow(r, {
+        dispatchId: d.id || null,
+        dispatchedTo: d.agentName || NOT_DISPATCHED,
+        dispatchedToId: d.agentId || null,
+        dispatchedBy: d.dispatchedByName || "",
+        dispatchedAt: d.dispatchedAt || null,
+        dispatchNote: d.note || "",
+        dispatchReplied: false,
+        agentId: d.agentId || r.agentId,
+        agent: d.agentName || r.agent,
+      });
+      // The lock moved: the sheet's "Commercial" follows on the next build
+      load({ silent: true });
+    } catch (err) {
+      showEditError(err);
+    }
+  };
+
+  /** The dispatched agent (or an admin / manager) marks the task done. */
+  const closeDispatch = async (r) => {
+    if (!r.dispatchId) return;
+    try {
+      await axios.put(
+        `/api/dispatch/${encodeURIComponent(r.dispatchId)}/done`,
+        {},
+        { headers: { Authorization: `Bearer ${user?.token}` } },
+      );
+      patchRow(r, { ...NO_DISPATCH });
+    } catch (err) {
+      showEditError(err);
     }
   };
 
@@ -883,6 +1053,68 @@ const Leads = () => {
                           </td>
                         );
                       }
+                      if (c.key === "dispatchedTo" && r.customerId) {
+                        const canClose =
+                          r.dispatchId && (canEdit || r.dispatchedToId === myId);
+                        const title = r.dispatchId
+                          ? [
+                              `Dispatché par ${r.dispatchedBy || "?"}${r.dispatchedAt ? ` le ${fmtDate(r.dispatchedAt)}` : ""}`,
+                              r.dispatchNote ? `Consigne : ${r.dispatchNote}` : "",
+                              r.dispatchReplied ? "L’agent a répondu" : "Pas encore de réponse",
+                            ]
+                              .filter(Boolean)
+                              .join("\n")
+                          : "Personne n’a été chargé de cette discussion";
+                        return (
+                          <td key={c.key} style={styles.td} title={title}>
+                            <span style={styles.phoneCell}>
+                              {canAssign && agents.length > 0 ? (
+                                <select
+                                  value={r.dispatchedToId || ""}
+                                  onChange={(e) => dispatchRow(r, e.target.value)}
+                                  title="Dispatcher la discussion à un agent — elle passe en tête de sa liste"
+                                  style={{
+                                    ...styles.plainSelect,
+                                    ...(r.dispatchId ? {} : { color: "var(--text-muted)" }),
+                                  }}
+                                >
+                                  <option value="">{NOT_DISPATCHED}</option>
+                                  {r.dispatchedToId &&
+                                    !agents.some((a) => a._id === r.dispatchedToId) && (
+                                      <option value={r.dispatchedToId}>{r.dispatchedTo}</option>
+                                    )}
+                                  {agents.map((a) => (
+                                    <option key={a._id} value={a._id}>
+                                      {a.name}
+                                      {a.role !== "marketing" ? ` (${a.role})` : ""}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span
+                                  style={{
+                                    ...(r.dispatchId ? {} : { color: "var(--text-muted)" }),
+                                  }}
+                                >
+                                  {r.dispatchId ? `📌 ${r.dispatchedTo}` : NOT_DISPATCHED}
+                                </span>
+                              )}
+                              {canClose && (
+                                <button
+                                  type="button"
+                                  className="support-btn"
+                                  style={styles.copyBtn}
+                                  onClick={() => closeDispatch(r)}
+                                  title="Marquer comme traité"
+                                  aria-label="Marquer comme traité"
+                                >
+                                  <Check size={12} />
+                                </button>
+                              )}
+                            </span>
+                          </td>
+                        );
+                      }
                       if (canAssign && r.customerId && c.key === "agent" && agents.length > 0) {
                         const known = agents.some((a) => a._id === r.agentId);
                         return (
@@ -940,6 +1172,26 @@ const Leads = () => {
                             ) : (
                               cellText(r, c.key)
                             )}
+                          </td>
+                        );
+                      }
+                      if (
+                        canEditRow(r) &&
+                        r.customerId &&
+                        c.key === "phone" &&
+                        r.platform !== "whatsapp" &&
+                        r.platform !== "telephone"
+                      ) {
+                        // Facebook, Instagram and email leads: the number is
+                        // whatever the agent recorded, so it is corrected here
+                        return (
+                          <td key={c.key} style={styles.td} title={r.phone || ""}>
+                            <PhoneCell
+                              value={r.phone}
+                              onSave={(phone) => saveDossier(r, { phone })}
+                              copied={copiedKey === `${r.platform}:${r.phone}`}
+                              onCopy={() => copyPhone(r)}
+                            />
                           </td>
                         );
                       }

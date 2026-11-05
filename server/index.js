@@ -163,6 +163,7 @@ app.use("/api/whatsapp", apiLimiter, require("./routes/whatsapp"));
 app.use("/api/email", apiLimiter, require("./routes/email"));
 app.use("/api/classifications", apiLimiter, require("./routes/classifications"));
 app.use("/api/locks", apiLimiter, require("./routes/locks"));
+app.use("/api/dispatch", apiLimiter, require("./routes/dispatch"));
 app.use("/api/conversations", apiLimiter, require("./routes/conversations"));
 app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
 app.use("/api/exports", exportLimiter, require("./routes/exports"));

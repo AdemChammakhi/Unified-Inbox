@@ -30,6 +30,7 @@ const Message = require("../models/Message");
 const Classification = require("../models/Classification");
 const ConversationLock = require("../models/ConversationLock");
 const IncomingCall = require("../models/IncomingCall");
+const Dispatch = require("../models/Dispatch");
 const User = require("../models/User");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
@@ -61,6 +62,7 @@ const STAGE_FILLS = {
   attente_telephone: "FF7FB8D8",
   qualification_en_cours: "FF8FCFA8",
   qualifie: "FF5FBF8A",
+  opportunite: "FF3FB5A0",
   offre_envoyee: "FF4EC3C3",
   en_reflexion: "FFA98BD6",
   relance: "FFD98CB3",
@@ -85,6 +87,65 @@ const MATURITY_FILLS = {
 
 /** Shown when neither a lock nor a CRM reply names anyone. */
 const UNASSIGNED = "Non attribué";
+const NOT_DISPATCHED = "Non dispatché";
+
+/**
+ * The open dispatches of these customers, keyed "<platform>:<customerId>".
+ * Non-fatal: a sheet without the dispatch columns filled beats no sheet.
+ * @param {Array<[string, string[]]>} byPlatform  [platform, customerIds]
+ */
+async function loadDispatches(byPlatform) {
+  const map = new Map();
+  await Promise.all(
+    byPlatform.map(async ([platform, ids]) => {
+      if (!ids.length) return;
+      try {
+        const rows = await Dispatch.find({
+          status: "open",
+          platform,
+          customerId: { $in: ids },
+        })
+          .select("platform customerId agent dispatchedBy dispatchedAt note firstReplyAt")
+          .populate("agent", "firstName lastName")
+          .populate("dispatchedBy", "firstName lastName")
+          .lean();
+        for (const d of rows) map.set(`${platform}:${d.customerId}`, d);
+      } catch (err) {
+        console.warn(
+          `[Export] dispatch lookup skipped for ${platform} (non-fatal):`,
+          err.message,
+        );
+      }
+    }),
+  );
+  return map;
+}
+
+/** The two dispatch columns of a row, from its open dispatch (or none). */
+function dispatchFields(d) {
+  const name = (u) =>
+    u && typeof u === "object" ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "";
+  if (!d) {
+    return {
+      dispatchId: null,
+      dispatchedTo: NOT_DISPATCHED,
+      dispatchedToId: null,
+      dispatchedBy: "",
+      dispatchedAt: null,
+      dispatchNote: "",
+      dispatchReplied: false,
+    };
+  }
+  return {
+    dispatchId: String(d._id),
+    dispatchedTo: name(d.agent) || "Agent supprimé",
+    dispatchedToId: d.agent ? String(d.agent._id || d.agent) : null,
+    dispatchedBy: name(d.dispatchedBy) || "—",
+    dispatchedAt: d.dispatchedAt || null,
+    dispatchNote: d.note || "",
+    dispatchReplied: Boolean(d.firstReplyAt),
+  };
+}
 
 /** IDs that are US, not prospects (same list as routes/leadInsights.js). */
 function ownIds() {
@@ -544,7 +605,7 @@ async function buildMessageRows({ platform, since }) {
     return byPerson;
   };
 
-  const [classifications, locks, repliers, freins] = await Promise.all([
+  const [classifications, locks, repliers, freins, dispatches] = await Promise.all([
     Classification.find({ conversationId: { $in: allConvIds } })
       .select(
         "conversationId platform stage typologie invoiceRef phone pax isPriority appointmentAt comment updatedAt",
@@ -559,6 +620,7 @@ async function buildMessageRows({ platform, since }) {
           .lean()
       : [],
     loadFreins(),
+    loadDispatches([...personsByPlatform]),
   ]);
   const classByConv = new Map(
     classifications.map((c) => [`${c.platform}:${c.conversationId}`, c]),
@@ -614,6 +676,7 @@ async function buildMessageRows({ platform, since }) {
     const agentId = holder ? String(holder._id) : replier ? String(replier) : null;
 
     const frein = freins.get(`${p.platform}:${p.personId}`) || null;
+    const dispatch = dispatches.get(`${p.platform}:${p.personId}`) || null;
     // Full-history activity when the widening pass supplied it, else the
     // period's own figures
     const maturity = computeMaturity({
@@ -662,6 +725,7 @@ async function buildMessageRows({ platform, since }) {
       rdvAt,
       agent,
       agentId,
+      ...dispatchFields(dispatch),
       messagesIn: p.messagesIn,
       messagesOut: p.messagesOut,
       lastMessage: cutText(p.lastMessage || "", 160),
@@ -699,7 +763,7 @@ async function buildCallRows({ since }) {
   if (calls.length === 0) return [];
   const ids = calls.map((c) => c.customerId);
   const creatorIds = [...new Set(calls.map((c) => c.createdBy).filter(Boolean).map(String))];
-  const [classes, locks, creators, freins] = await Promise.all([
+  const [classes, locks, creators, freins, dispatches] = await Promise.all([
     Classification.find({ platform: "telephone", conversationId: { $in: ids } })
       .select("conversationId stage typologie invoiceRef pax isPriority appointmentAt comment updatedAt")
       .lean(),
@@ -708,6 +772,7 @@ async function buildCallRows({ since }) {
       .lean(),
     creatorIds.length ? User.find({ _id: { $in: creatorIds } }).select("firstName lastName").lean() : [],
     getFreins("telephone", ids).catch(() => new Map()),
+    loadDispatches([["telephone", ids]]),
   ]);
   const clsOf = new Map(classes.map((c) => [c.conversationId, c]));
   const lockOf = new Map(locks.map((l) => [l.conversationId, l]));
@@ -778,6 +843,7 @@ async function buildCallRows({ since }) {
       rdvAt,
       agent: owner ? name(owner) : UNASSIGNED,
       agentId: owner ? String(owner._id) : null,
+      ...dispatchFields(dispatches.get(`telephone:${call.customerId}`) || null),
       messagesIn: 0,
       messagesOut: 0,
       lastMessage: `Appel entrant du ${ddmmTunis.format(new Date(call.lastCallAt))}${repeat}`,
@@ -820,13 +886,15 @@ const HEADERS = [
   "RDV le",
   "Réf. facture",
   "Commercial en charge",
+  "Dispatché à",
+  "Dispatché par",
   "Messages reçus",
   "Messages envoyés",
   "Dernier message",
 ];
 
 // Column widths, in HEADERS order — keep the two arrays the same length
-const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 10, 10, 28, 40, 17, 16, 20, 9, 9, 46];
+const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 10, 10, 28, 40, 17, 16, 20, 20, 20, 9, 9, 46];
 
 // 1-based XLSX column numbers, derived so an inserted column cannot shift them
 const CLASS_COL = HEADERS.indexOf("Étape") + 1;
@@ -850,6 +918,8 @@ function rowValues(r) {
     fmtDate(r.rdvAt),
     r.invoiceRef || "",
     r.agent,
+    r.dispatchedTo || NOT_DISPATCHED,
+    r.dispatchedBy || "",
     r.messagesIn,
     r.messagesOut,
     r.lastMessage,

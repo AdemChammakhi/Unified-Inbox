@@ -12,6 +12,7 @@ module.exports = {
   Contact: require("./Contact"),
   Conversation: require("./Conversation"),
   ConversationLock: require("./ConversationLock"),
+  Dispatch: require("./Dispatch"),
   Message: require("./Message"),
   User: require("./User"),
 };

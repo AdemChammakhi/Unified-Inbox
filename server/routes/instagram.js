@@ -3,6 +3,7 @@ const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { Contact } = require("../models");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
@@ -1266,6 +1267,9 @@ router.post("/send", protect, async (req, res) => {
     allPartsSent = true;
 
     const messageId = lastData?.message_id || lastData?.id || null;
+
+    // A dispatched agent's first answer: the admin's board shows it as started
+    noteDispatchReply("instagram", [lockConvId, recipientId], req.user._id);
 
     // Auto-lock on first reply (marketing agents), now that Meta accepted the
     // message. The message is already delivered, so a lock failure here must

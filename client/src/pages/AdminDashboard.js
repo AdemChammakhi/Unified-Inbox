@@ -104,6 +104,93 @@ const AdminDashboard = () => {
     return () => clearInterval(interval);
   }, [fetchLocks]);
 
+  // ── Dispatching: the discussions handed to agents and still open ──
+  const [dispatches, setDispatches] = useState([]);
+  const [dispatchAgents, setDispatchAgents] = useState([]);
+  const [dispatchError, setDispatchError] = useState("");
+
+  const fetchDispatches = useCallback(async () => {
+    const token = user?.token;
+    if (!token) return;
+    try {
+      const res = await axios.get("/api/dispatch", {
+        params: { status: "open" },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setDispatches(res.data?.items || []);
+    } catch (error) {
+      console.error("Failed to fetch dispatches:", error.message);
+    }
+  }, [user?.token]);
+
+  useEffect(() => {
+    fetchDispatches();
+    const interval = setInterval(() => {
+      if (!document.hidden) fetchDispatches();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [fetchDispatches]);
+
+  useEffect(() => {
+    const token = user?.token;
+    if (!token) return;
+    axios
+      .get("/api/locks/agents", { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => setDispatchAgents(res.data?.agents || []))
+      .catch((err) => console.error("Failed to list agents:", err.message));
+  }, [user?.token]);
+
+  const dispatchAction = async (fn) => {
+    setDispatchError("");
+    try {
+      await fn({ headers: { Authorization: `Bearer ${user?.token}` } });
+      fetchDispatches();
+      fetchLocks();
+    } catch (error) {
+      setDispatchError(error.response?.data?.message || error.message);
+      setTimeout(() => setDispatchError(""), 6000);
+    }
+  };
+
+  const closeDispatch = (d) =>
+    dispatchAction((cfg) =>
+      axios.put(`/api/dispatch/${encodeURIComponent(d.id)}/done`, {}, cfg),
+    );
+
+  const cancelDispatch = (d) => {
+    if (!window.confirm(`Annuler le dispatch de ${d.customerName || d.customerId} à ${d.agentName} ?`)) return;
+    dispatchAction((cfg) => axios.delete(`/api/dispatch/${encodeURIComponent(d.id)}`, cfg));
+  };
+
+  const reassignDispatch = (d, agentId) => {
+    if (!agentId || agentId === d.agentId) return;
+    const target = dispatchAgents.find((a) => a._id === agentId);
+    if (!window.confirm(`Confier cette discussion à ${target ? target.name : "cet agent"} ?`)) return;
+    dispatchAction((cfg) =>
+      axios.put(`/api/dispatch/${encodeURIComponent(d.id)}/reassign`, { agentId }, cfg),
+    );
+  };
+
+  /** "3 j" / "5 h" / "12 min" since a date. */
+  const ageOf = (v) => {
+    const ms = Date.now() - new Date(v).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return "";
+    const min = Math.floor(ms / 60000);
+    if (min < 60) return `${min} min`;
+    const h = Math.floor(min / 60);
+    if (h < 48) return `${h} h`;
+    return `${Math.floor(h / 24)} j`;
+  };
+
+  // Per agent: open dispatches, and how many have no reply yet
+  const dispatchLoad = dispatches.reduce((acc, d) => {
+    const key = d.agentId || "?";
+    if (!acc[key]) acc[key] = { name: d.agentName || "?", open: 0, waiting: 0, active: d.agentActive !== false };
+    acc[key].open += 1;
+    if (!d.firstReplyAt) acc[key].waiting += 1;
+    return acc;
+  }, {});
+
   const handleUnlock = async (conversationId, platform) => {
     if (
       !window.confirm(
@@ -476,6 +563,130 @@ const AdminDashboard = () => {
           )}
         </div>
         <div style={styles.section}>
+          <h2 style={styles.sectionTitle}>Dispatching</h2>
+          <p style={styles.dispatchSub}>
+            Les discussions confiées aux agents et pas encore traitées. Elles
+            restent en tête de la liste de l’agent jusqu’à ce qu’il les marque
+            comme traitées.
+          </p>
+          {dispatchError && (
+            <div role="alert" style={styles.dispatchError}>{dispatchError}</div>
+          )}
+          {Object.keys(dispatchLoad).length > 0 && (
+            <div style={styles.dispatchLoadRow}>
+              {Object.entries(dispatchLoad).map(([id, l]) => (
+                <span
+                  key={id}
+                  style={{
+                    ...styles.dispatchLoadChip,
+                    ...(l.active ? {} : styles.dispatchLoadChipOff),
+                  }}
+                  title={l.active ? "" : "Compte suspendu : à réattribuer"}
+                >
+                  <strong>{l.name}</strong> · {l.open} à traiter
+                  {l.waiting > 0 ? ` · ${l.waiting} sans réponse` : ""}
+                </span>
+              ))}
+            </div>
+          )}
+          {dispatches.length === 0 ? (
+            <div style={styles.empty}>Aucun dispatch en cours.</div>
+          ) : (
+            <div style={styles.tableWrap}>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Plateforme</th>
+                    <th style={styles.th}>Client</th>
+                    <th style={styles.th}>Dispatché à</th>
+                    <th style={styles.th}>Dispatché par</th>
+                    <th style={styles.th}>Depuis</th>
+                    <th style={styles.th}>Réponse</th>
+                    <th style={styles.th}>Consigne</th>
+                    <th style={{ ...styles.th, textAlign: "center" }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dispatches.map((d, i) => (
+                    <tr
+                      key={d.id}
+                      style={{
+                        backgroundColor: i % 2 === 0 ? "transparent" : "var(--bg-hover)",
+                      }}
+                    >
+                      <td style={styles.td}>
+                        <span style={styles.platformPill}>
+                          <PlatformIcon platform={d.platform} size={20} />{" "}
+                          {d.platform.charAt(0).toUpperCase() + d.platform.slice(1)}
+                        </span>
+                      </td>
+                      <td style={styles.td}>
+                        <div style={styles.agentName}>{d.customerName || "—"}</div>
+                        <code style={styles.convId} title={d.customerId}>
+                          {d.customerId.length > 24 ? d.customerId.slice(0, 24) + "…" : d.customerId}
+                        </code>
+                      </td>
+                      <td style={styles.td}>
+                        <select
+                          value={d.agentId || ""}
+                          onChange={(e) => reassignDispatch(d, e.target.value)}
+                          title="Réattribuer à un autre agent"
+                          style={{
+                            ...styles.dispatchSelect,
+                            ...(d.agentActive === false ? { borderColor: "var(--danger)" } : {}),
+                          }}
+                        >
+                          {d.agentId && !dispatchAgents.some((a) => a._id === d.agentId) && (
+                            <option value={d.agentId}>{d.agentName}</option>
+                          )}
+                          {dispatchAgents.map((a) => (
+                            <option key={a._id} value={a._id}>
+                              {a.name}
+                              {a.role !== "marketing" ? ` (${a.role})` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td style={styles.td}>{d.dispatchedByName || "—"}</td>
+                      <td style={styles.td} title={new Date(d.dispatchedAt).toLocaleString()}>
+                        {ageOf(d.dispatchedAt)}
+                      </td>
+                      <td style={styles.td}>
+                        {d.firstReplyAt ? (
+                          <span style={styles.replied} title={new Date(d.firstReplyAt).toLocaleString()}>
+                            Répondu
+                          </span>
+                        ) : (
+                          <span style={styles.waiting}>Sans réponse</span>
+                        )}
+                      </td>
+                      <td style={{ ...styles.td, maxWidth: 260 }} title={d.note}>
+                        {d.note || "—"}
+                      </td>
+                      <td style={{ ...styles.td, textAlign: "center", whiteSpace: "nowrap" }}>
+                        <button
+                          style={styles.doneBtn}
+                          onClick={() => closeDispatch(d)}
+                          title="Marquer comme traité"
+                        >
+                          ✓ Traité
+                        </button>{" "}
+                        <button
+                          style={styles.unlockBtn}
+                          onClick={() => cancelDispatch(d)}
+                          title="Annuler le dispatch (l’agent reste en charge)"
+                        >
+                          ✕ Annuler
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        <div style={styles.section}>
           <h2 style={styles.sectionTitle}>Active Agent Assignments</h2>
 
           {loading ? (
@@ -706,6 +917,70 @@ const styles = {
   agentEmail: {
     fontSize: "11px",
     color: "var(--text-dim)",
+  },
+  dispatchSub: {
+    margin: "-6px 0 14px",
+    fontSize: "13px",
+    color: "var(--text-faint)",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  dispatchError: {
+    marginBottom: "12px",
+    fontSize: "12px",
+    color: "var(--danger)",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  dispatchLoadRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    marginBottom: "14px",
+  },
+  dispatchLoadChip: {
+    fontSize: "12px",
+    padding: "4px 10px",
+    borderRadius: "8px",
+    border: "1px solid var(--accent-border)",
+    backgroundColor: "var(--accent-bg)",
+    color: "var(--text-primary)",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  dispatchLoadChipOff: {
+    borderColor: "var(--danger)",
+    backgroundColor: "transparent",
+  },
+  dispatchSelect: {
+    padding: "4px 6px",
+    borderRadius: "6px",
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "var(--bg-card)",
+    color: "var(--text-primary)",
+    fontSize: "12px",
+    outline: "none",
+    maxWidth: "100%",
+    fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  replied: {
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "var(--success)",
+  },
+  waiting: {
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "var(--danger)",
+  },
+  doneBtn: {
+    padding: "6px 14px",
+    borderRadius: "8px",
+    border: "1px solid var(--accent-border)",
+    backgroundColor: "var(--accent-bg)",
+    color: "var(--accent)",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontWeight: 600,
+    fontFamily: "'Hanken Grotesk', sans-serif",
+    transition: "all 0.2s ease",
   },
   unlockBtn: {
     padding: "6px 14px",

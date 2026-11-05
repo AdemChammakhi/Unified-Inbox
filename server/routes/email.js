@@ -6,6 +6,7 @@ const nodemailer = require("nodemailer");
 const router = express.Router();
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { protect } = require("../middleware/auth");
 const { sanitizeId } = require("../utils/sanitize");
 const { messageTypeFor } = require("../utils/metaPayload");
@@ -383,6 +384,9 @@ router.post("/send", protect, async (req, res) => {
       text: text || "",
       attachments: mailAttachments,
     });
+
+    // A dispatched agent's first answer: the admin's board shows it as started
+    noteDispatchReply("email", [lockConvId, to], req.user._id);
 
     // --- Auto-lock functionality ---
     // Runs only after the mail was accepted. The mail is already sent, so a
