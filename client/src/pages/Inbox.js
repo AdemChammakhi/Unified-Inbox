@@ -20,6 +20,8 @@ import PlatformIcon from "../components/PlatformIcon";
 import EmailBody from "../components/EmailBody";
 import MaturityChip, { AwaitingReplyBadge } from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
+import DispatchControl from "../components/DispatchControl";
+import { useDispatches } from "../hooks/useDispatches";
 import CommentField from "../components/CommentField";
 import RdvForm from "../components/RdvForm";
 import DossierPanel from "../components/DossierPanel";
@@ -32,7 +34,7 @@ import {
   TYPOLOGIES,
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
-import { useLeadInsights } from "../hooks/useLeadInsights";
+import { useLeadInsights, customerIdOf } from "../hooks/useLeadInsights";
 import { SORT_MODES, maturitySortRank } from "../constants/leadQualification";
 
 // Conversation list ordering, remembered per browser.
@@ -337,6 +339,19 @@ const Inbox = () => {
     conversations: recentConversations,
     token: user?.token,
   });
+  // Discussions an admin handed out: mine are pinned at the top of the
+  // list until marked as done; staff also see who holds what.
+  const isStaff = user?.role === "admin" || user?.role === "manager";
+  const {
+    counts: dispatchCounts,
+    loadByAgent: dispatchLoad,
+    getMine: getMyDispatch,
+    getOpen: getOpenDispatch,
+    dispatch: dispatchTo,
+    markDone: markDispatchDone,
+    reassign: reassignDispatch,
+    cancel: cancelDispatch,
+  } = useDispatches({ token: user?.token, role: user?.role });
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -670,6 +685,12 @@ const Inbox = () => {
       }
     });
 
+    // A dispatch made, closed or moved anywhere (Leads, the admin
+    // dashboard, another admin's inbox): refresh the pinned rows and badges
+    socket.on("dispatch:changed", () => {
+      queryClient.invalidateQueries({ queryKey: ["dispatch"] });
+    });
+
     // Listen for reactions
     socket.on("messageReaction", (data) => {
       console.log("Message reaction:", data);
@@ -833,8 +854,25 @@ const Inbox = () => {
     // that, and the recency position is the final tie-breaker. Conversations
     // without insights (still loading, or beyond the first 200) keep their
     // recency order at the end of their group.
+    // Discussions dispatched to me come first, oldest dispatch first,
+    // whatever the sort: they stay there until marked as done.
+    const pinDispatched = (list) => {
+      const pinned = [];
+      const rest = [];
+      list.forEach((conv, index) => {
+        const d = getMyDispatch(conv, activeTab);
+        if (d) {
+          pinned.push({ conv, index, at: new Date(d.dispatchedAt).getTime() || 0 });
+        } else {
+          rest.push(conv);
+        }
+      });
+      if (pinned.length === 0) return list;
+      pinned.sort((a, b) => a.at - b.at || a.index - b.index);
+      return [...pinned.map((x) => x.conv), ...rest];
+    };
     if (sortMode === DEFAULT_SORT || !SORT_KEYS.has(sortMode)) {
-      return [...filtered];
+      return pinDispatched([...filtered]);
     }
     const byMaturity = sortMode === "maturity";
     const decorated = filtered.map((conv, index) => {
@@ -854,7 +892,7 @@ const Inbox = () => {
       if (a.received !== b.received) return b.received - a.received;
       return a.index - b.index;
     });
-    return decorated.map((d) => d.conv);
+    return pinDispatched(decorated.map((d) => d.conv));
   }, [
     recentConversations,
     classifications,
@@ -864,6 +902,8 @@ const Inbox = () => {
     searchDebounced,
     sortMode,
     getInsight,
+    getMyDispatch,
+    activeTab,
   ]);
 
   // When React Query refreshes conversations, sync selectedConv so header/preview stay current
@@ -1385,6 +1425,14 @@ const Inbox = () => {
                 {unreadCounts[p.key] > 0 && (
                   <span style={styles.unreadBadge}>{unreadCounts[p.key]}</span>
                 )}
+                {dispatchCounts[p.key] > 0 && (
+                  <span
+                    style={styles.dispatchTabBadge}
+                    title={`${dispatchCounts[p.key]} discussion${dispatchCounts[p.key] > 1 ? "s" : ""} à traiter`}
+                  >
+                    📌 {dispatchCounts[p.key]}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -1653,14 +1701,41 @@ const Inbox = () => {
                             {conv.participants?.map((p) => p.name).join(", ") ||
                               "Unknown"}
                           </strong>
-                          {lookupBy(locks, conv) && (
-                            <span
-                              style={styles.lockBadge}
-                              title={`Assigned to ${lookupBy(locks, conv).agentName}`}
-                            >
-                              🔒 {lookupBy(locks, conv).agentName?.split(" ")[0]}
-                            </span>
-                          )}
+                          {(() => {
+                            // Dispatched to me: "À traiter"; to someone
+                            // else (staff view): their name; else the lock
+                            const mineD = getMyDispatch(conv, activeTab);
+                            if (mineD) {
+                              return (
+                                <span
+                                  style={styles.dispatchBadge}
+                                  title={`Dispatché par ${mineD.dispatchedByName || "?"}${mineD.note ? ` — ${mineD.note}` : ""}`}
+                                >
+                                  📌 À traiter
+                                </span>
+                              );
+                            }
+                            const openD = isStaff ? getOpenDispatch(conv, activeTab) : null;
+                            if (openD) {
+                              return (
+                                <span
+                                  style={styles.lockBadge}
+                                  title={`Dispatché à ${openD.agentName || "?"} par ${openD.dispatchedByName || "?"}${openD.note ? ` — ${openD.note}` : ""}`}
+                                >
+                                  📌 {openD.agentName?.split(" ")[0]}
+                                </span>
+                              );
+                            }
+                            const lk = lookupBy(locks, conv);
+                            return lk ? (
+                              <span
+                                style={styles.lockBadge}
+                                title={`Assigned to ${lk.agentName}`}
+                              >
+                                🔒 {lk.agentName?.split(" ")[0]}
+                              </span>
+                            ) : null;
+                          })()}
                           <span
                             title={CLASSIFICATION_LABELS[cls]}
                             style={{
@@ -1924,6 +1999,30 @@ const Inbox = () => {
                         is recorded in the bar above the composer — one
                         control, not two. */}
                     <MaturityChip maturity={selectedInsight?.maturity} showReason />
+                    {/* Dispatch: the agent sees the task and closes it,
+                        the admin hands the discussion out */}
+                    <DispatchControl
+                      token={user?.token}
+                      role={user?.role}
+                      userId={user?._id}
+                      platform={activeTab}
+                      customerId={customerIdOf(selectedConv, activeTab)}
+                      mine={getMyDispatch(selectedConv, activeTab)}
+                      open={isStaff ? getOpenDispatch(selectedConv, activeTab) : null}
+                      loadByAgent={dispatchLoad}
+                      onDispatch={async (args) => {
+                        const d = await dispatchTo(args);
+                        fetchLocks();
+                        return d;
+                      }}
+                      onReassign={async (id, agentId, note) => {
+                        const d = await reassignDispatch(id, agentId, note);
+                        fetchLocks();
+                        return d;
+                      }}
+                      onCancel={cancelDispatch}
+                      onDone={markDispatchDone}
+                    />
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"
@@ -3239,6 +3338,35 @@ const styles = {
     padding: "1px 7px",
     marginLeft: "6px",
     whiteSpace: "nowrap",
+  },
+  dispatchBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "10px",
+    fontWeight: 700,
+    color: "#fff",
+    backgroundColor: "var(--accent)",
+    border: "1px solid var(--accent)",
+    borderRadius: "6px",
+    padding: "1px 7px",
+    marginLeft: "6px",
+    whiteSpace: "nowrap",
+  },
+  dispatchTabBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "2px",
+    backgroundColor: "var(--accent)",
+    color: "#fff",
+    borderRadius: "4px",
+    minWidth: "16px",
+    height: "16px",
+    fontSize: "9px",
+    fontWeight: 700,
+    marginLeft: "5px",
+    padding: "0 4px",
   },
   lockBanner: {
     padding: "14px 20px",

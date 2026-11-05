@@ -1,10 +1,10 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const ConversationLock = require("../models/ConversationLock");
-const Message = require("../models/Message");
 const User = require("../models/User");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
+const { assignConversation } = require("../utils/dispatching");
 
 const router = express.Router();
 
@@ -57,32 +57,12 @@ router.put("/assign", protect, authorize("admin"), async (req, res) => {
       }
     }
 
-    // Every key this customer's discussion is stored under (both $or
-    // branches are index-backed: platform+senderId, platform+recipientId)
-    const threadKeys = await Message.distinct("conversationId", {
+    // The same lock move a dispatch makes (utils/dispatching.js)
+    const keys = await assignConversation({
       platform,
-      $or: [{ senderId: customerId }, { recipientId: customerId }],
+      customerId,
+      agentId: agent ? agent._id : null,
     });
-    const keys = [...new Set([customerId, ...threadKeys.filter(Boolean).map(String)])];
-
-    if (!agent) {
-      await ConversationLock.deleteMany({ platform, conversationId: { $in: keys } });
-    } else {
-      const now = new Date();
-      await ConversationLock.bulkWrite(
-        keys.map((conversationId) => ({
-          updateOne: {
-            filter: { conversationId, platform },
-            update: {
-              $set: { lockedBy: agent._id, lockedAt: now },
-              $setOnInsert: { conversationId, platform },
-            },
-            upsert: true,
-          },
-        })),
-        { ordered: false },
-      );
-    }
 
     // The sheet and the insights name the agent in charge from the locks
     try {

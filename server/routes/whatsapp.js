@@ -8,6 +8,7 @@ const {
 } = require("../services/conversationService");
 const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { sanitizeId } = require("../utils/sanitize");
 const { messageTypeFor } = require("../utils/metaPayload");
 
@@ -178,6 +179,9 @@ router.post("/send", protect, async (req, res) => {
         },
       });
     }
+
+    // A dispatched agent's first answer: the admin's board shows it as started
+    noteDispatchReply("whatsapp", [lockConvId, recipientId], req.user._id);
 
     // --- Auto-lock functionality ---
     if (!existingLock) {
