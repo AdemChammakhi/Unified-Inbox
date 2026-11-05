@@ -5,7 +5,7 @@ const Message = require("../models/Message");
 const ConversationLock = require("../models/ConversationLock");
 const { noteDispatchReply } = require("../utils/dispatching");
 const { Contact } = require("../models");
-const { protect } = require("../middleware/auth");
+const { protect, authorize } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 const {
   parseGraphAttachments,
@@ -1429,7 +1429,9 @@ router.post("/send", protect, async (req, res) => {
 });
 
 // POST /api/instagram/extend-token - Exchange short-lived token for a 60-day token
-router.post("/extend-token", protect, async (req, res) => {
+// Admin only: the response carries a long-lived Page token, which works
+// against the Graph API outside the app.
+router.post("/extend-token", protect, authorize("admin"), async (req, res) => {
   try {
     const appId = process.env.FACEBOOK_APP_ID;
     const appSecret = process.env.FACEBOOK_APP_SECRET;

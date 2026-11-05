@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const axios = require("axios");
 const router = express.Router();
 const Message = require("../models/Message");
-const { protect } = require("../middleware/auth");
+const { protect, authorize } = require("../middleware/auth");
 const instagramRoute = require("./instagram");
 const facebookRoute = require("./facebook");
 const emailRoute = require("./email");
@@ -40,7 +40,7 @@ function logWebhook(platform, type, summary) {
 }
 
 // GET /api/webhooks/debug — check webhook health & recent DB messages (admin only)
-router.get("/debug", protect, async (req, res) => {
+router.get("/debug", protect, authorize("admin"), async (req, res) => {
   try {
     const recentMessages = await Message.find()
       .sort({ createdAt: -1 })
@@ -491,11 +491,21 @@ function extractInstagramEvents(entry) {
 
 // Verify Meta's X-Hub-Signature-256 HMAC on webhook POSTs.
 // Requires req.rawBody captured by express.json({ verify }) in server/index.js.
-// Enforced only when FACEBOOK_APP_SECRET is configured, so local setups
-// without a secret keep working.
+// In production a missing FACEBOOK_APP_SECRET rejects every webhook POST:
+// without it nothing proves a payload came from Meta, so anyone could inject
+// fake customer messages. Outside production, local setups without a secret
+// keep working.
 const verifyMetaSignature = (req, res, next) => {
   const secret = process.env.FACEBOOK_APP_SECRET;
-  if (!secret) return next();
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      console.error(
+        `[Webhook] Rejected ${req.path}: FACEBOOK_APP_SECRET is not configured, signatures cannot be verified`,
+      );
+      return res.sendStatus(401);
+    }
+    return next();
+  }
 
   const signature = req.headers["x-hub-signature-256"];
   if (!signature || !req.rawBody) {

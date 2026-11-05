@@ -1,6 +1,9 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 
+// Same wording as the login refusal in routes/auth.js.
+const ACCOUNT_DISABLED = "Ce compte est désactivé. Contactez un administrateur.";
+
 // Protect routes - verify JWT token
 const protect = async (req, res, next) => {
   let token;
@@ -23,6 +26,10 @@ const protect = async (req, res, next) => {
       if (!req.user) {
         return res.status(401).json({ message: "Not authorized, user not found" });
       }
+      // A disabled account loses access at once, not when its token expires.
+      if (req.user.isActive === false) {
+        return res.status(401).json({ message: ACCOUNT_DISABLED });
+      }
       return next();
     } catch (error) {
       return res.status(401).json({ message: "Not authorized, token failed" });
@@ -44,4 +51,4 @@ const authorize = (...roles) => {
   };
 };
 
-module.exports = { protect, authorize };
+module.exports = { protect, authorize, ACCOUNT_DISABLED };
