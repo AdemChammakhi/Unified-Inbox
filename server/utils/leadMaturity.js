@@ -48,7 +48,7 @@ const THRESHOLDS = Object.freeze({
 });
 
 /** Stages whose prospects are given HOT_ADVANCED_DAYS. */
-const ADVANCED_STAGES = new Set(["qualifie", "offre_envoyee"]);
+const ADVANCED_STAGES = new Set(["qualifie", "opportunite", "offre_envoyee"]);
 
 const LEVELS = Object.freeze({
   chaud: "Chaud",
