@@ -65,6 +65,79 @@ const PaxCell = ({ value, onSave }) => {
   );
 };
 
+/**
+ * Phone in a sheet cell: the number the agent recorded on the dossier, as a
+ * text field saved on Enter or when the cursor leaves it; empty clears it.
+ * Keeps the call link and the copy button beside the field once a number is
+ * stored. WhatsApp and phone-call leads never get here: their number is
+ * their identity, not a recorded field.
+ */
+const PhoneCell = ({ value, onSave, copied, onCopy }) => {
+  const stored = value || "";
+  const [text, setText] = useState(stored);
+  useEffect(() => setText(stored), [stored]);
+  const commit = () => {
+    const t = text.trim();
+    if (t === stored) return;
+    onSave(t).catch(() => setText(stored));
+  };
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <input
+        type="tel"
+        value={text}
+        maxLength={30}
+        placeholder="—"
+        title="Numéro de téléphone du prospect (relevé dans la discussion)"
+        aria-label="Numéro de téléphone"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") setText(stored);
+        }}
+        style={{
+          width: stored ? 104 : 118,
+          padding: "3px 6px",
+          borderRadius: 6,
+          border: "1px solid var(--border-primary)",
+          backgroundColor: "var(--bg-card)",
+          color: "var(--text-primary)",
+          fontSize: 12,
+          outline: "none",
+          fontFamily: "'Space Grotesk', sans-serif",
+        }}
+      />
+      {stored && (
+        <>
+          <a
+            href={`tel:${stored.replace(/[^\d+]/g, "")}`}
+            style={styles.phoneLink}
+            title="Appeler"
+            aria-label="Appeler"
+          >
+            <Phone size={12} />
+          </a>
+          <button
+            type="button"
+            className="support-btn"
+            style={styles.copyBtn}
+            onClick={onCopy}
+            title="Copier le numéro"
+            aria-label="Copier le numéro"
+          >
+            {copied ? (
+              <Check size={12} style={{ color: "var(--success)" }} />
+            ) : (
+              <Copy size={12} />
+            )}
+          </button>
+        </>
+      )}
+    </span>
+  );
+};
+
 const EMPTY_CALL = { name: "", phone: "", email: "", typologie: "", pax: "", comment: "" };
 
 /**
@@ -456,6 +529,11 @@ const Leads = () => {
         invoiceRef: d.invoiceRef || "",
         pax: Number.isInteger(d.pax) ? d.pax : null,
         rdvAt: d.appointmentAt || null,
+        // Only the dossier's number is editable (see PhoneCell): WhatsApp
+        // and phone-call rows keep the number they are identified by
+        ...(r.platform !== "whatsapp" && r.platform !== "telephone"
+          ? { phone: d.phone || "" }
+          : {}),
       });
       // The stage and the flag feed the maturity: rebuild quietly
       if (patch.stage !== undefined || patch.isPriority !== undefined) {
@@ -940,6 +1018,26 @@ const Leads = () => {
                             ) : (
                               cellText(r, c.key)
                             )}
+                          </td>
+                        );
+                      }
+                      if (
+                        canEditRow(r) &&
+                        r.customerId &&
+                        c.key === "phone" &&
+                        r.platform !== "whatsapp" &&
+                        r.platform !== "telephone"
+                      ) {
+                        // Facebook, Instagram and email leads: the number is
+                        // whatever the agent recorded, so it is corrected here
+                        return (
+                          <td key={c.key} style={styles.td} title={r.phone || ""}>
+                            <PhoneCell
+                              value={r.phone}
+                              onSave={(phone) => saveDossier(r, { phone })}
+                              copied={copiedKey === `${r.platform}:${r.phone}`}
+                              onCopy={() => copyPhone(r)}
+                            />
                           </td>
                         );
                       }
