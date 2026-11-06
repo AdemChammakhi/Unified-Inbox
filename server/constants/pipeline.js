@@ -11,7 +11,7 @@
  * "En cours" (code qualification_en_cours), "Déplacement agence" and
  * "Injoignable" (client_injoignable) were added on 29 Sept 2026 at
  * management's request; "En attente du numéro de téléphone" on 31 Oct and
- * "Opportunité" on 5 Nov 2026. Labels, the "non_interesse" stage and the typology
+ * "Opportunité" on 5 Nov 2026, "HOPE" on 6 Nov 2026. Labels, the "non_interesse" stage and the typology
  * labels follow the process document PROC-GRC-V01 (« Processus opérationnel
  * de gestion des leads », Oct 2026). TYPOLOGIES is the nature of the
  * request. Both replace the free-text era: values are codes, labels are
@@ -29,6 +29,8 @@ const STAGES = Object.freeze([
   // Shown as "En cours" (management's wording); the code keeps its full name
   { key: "qualification_en_cours", label: "En cours", ordinal: 4 },
   { key: "qualifie", label: "Qualifié", ordinal: 5 },
+  // Added 6 Nov 2026: a lead with real hope, just short of an opportunity
+  { key: "hope", label: "HOPE", ordinal: 5.25 },
   // Added 5 Nov 2026: a qualified lead worth pursuing, before the offer
   { key: "opportunite", label: "Opportunité", ordinal: 5.5 },
   { key: "offre_envoyee", label: "Offre envoyée / Devis envoyé", ordinal: 6 },
