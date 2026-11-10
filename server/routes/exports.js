@@ -246,9 +246,9 @@ async function buildMessageRows({ platform, since }) {
   // NEWEST first, then capped: if the range holds more messages than the cap,
   // we must keep the RECENT ones. Sorting ascending here would hand back the
   // oldest slice and silently drop every current prospect from the sheet —
-  // the opposite of what the team needs. Trade-off: for a prospect whose
-  // thread predates the cap, "premier contact" shows the oldest message we
-  // still hold, not the true first.
+  // the opposite of what the team needs. When the cap is hit, a count of the
+  // whole period done in the database (mergePeriodSummaries, below) restores
+  // the prospects, "premier contact" and counts the cap left out.
   const MESSAGE_CAP = 20000;
   // Only a short preview of the text is ever shown ("Dernier message" is cut
   // to 160 characters) and only WHETHER media exists — never the media. Both
@@ -259,6 +259,19 @@ async function buildMessageRows({ platform, since }) {
   // the whole build.
   const PREVIEW_CHARS = 200;
   const isString = (field) => ({ $eq: [{ $type: field }, "string"] });
+  const hasMediaExpr = {
+    $or: [
+      {
+        $and: [
+          { $isArray: "$attachments" },
+          { $gt: [{ $size: "$attachments" }, 0] },
+        ],
+      },
+      {
+        $and: [isString("$attachmentUrl"), { $ne: ["$attachmentUrl", ""] }],
+      },
+    ],
+  };
   const messages = await Message.aggregate([
     {
       $match: {
@@ -288,34 +301,23 @@ async function buildMessageRows({ platform, since }) {
             "",
           ],
         },
-        hasMedia: {
-          $or: [
-            {
-              $and: [
-                { $isArray: "$attachments" },
-                { $gt: [{ $size: "$attachments" }, 0] },
-              ],
-            },
-            {
-              $and: [
-                isString("$attachmentUrl"),
-                { $ne: ["$attachmentUrl", ""] },
-              ],
-            },
-          ],
-        },
+        hasMedia: hasMediaExpr,
       },
     },
   ]).option({ maxTimeMS: 120000 });
-  const truncated = messages.length === MESSAGE_CAP;
-  if (truncated) {
-    console.warn(
-      `[Export] hit the ${MESSAGE_CAP}-message cap — "premier contact" and message counts are partial for old threads`,
-    );
-  }
+  const hitCap = messages.length === MESSAGE_CAP;
 
   const own = ownIds();
   const ownList = [...own];
+  const whenOf = { $ifNull: ["$timestamp", "$createdAt"] };
+  // Same test as isFromProspect below, in aggregation form
+  const isIncoming = {
+    $and: [
+      { $eq: ["$direction", "incoming"] },
+      { $not: [{ $in: ["$senderId", { $literal: ownList }] }] },
+      { $not: [{ $in: ["$senderName", { $literal: OWN_SENDER_NAMES }] }] },
+    ],
+  };
 
   // An "incoming" row sent by us is a Graph-sync mislabel (instagram.js heals
   // these lazily): it is our reply, and it is counted as one here exactly as
@@ -354,22 +356,12 @@ async function buildMessageRows({ platform, since }) {
   };
 
   const prospects = new Map(); // "<platform>:<personId>" -> row accumulator
-
-  for (const m of messages) {
-    // A refused send was never delivered: it must not count as a reply, move
-    // "Dernier contact", fill "Dernier message" or name an agent. Skipped
-    // before the group is even created, so a failed attempt alone does not
-    // make a prospect row.
-    if (isFailedOutgoing(m)) continue;
-
-    const personId = personOf(m);
-    if (!personId || own.has(personId)) continue;
-
-    const key = `${m.platform}:${personId}`;
+  const prospectFor = (platform, personId) => {
+    const key = `${platform}:${personId}`;
     let p = prospects.get(key);
     if (!p) {
       p = {
-        platform: m.platform,
+        platform,
         personId,
         name: "",
         nameAt: null, // keep the most RECENT non-placeholder name
@@ -395,6 +387,20 @@ async function buildMessageRows({ platform, since }) {
       };
       prospects.set(key, p);
     }
+    return p;
+  };
+
+  for (const m of messages) {
+    // A refused send was never delivered: it must not count as a reply, move
+    // "Dernier contact", fill "Dernier message" or name an agent. Skipped
+    // before the group is even created, so a failed attempt alone does not
+    // make a prospect row.
+    if (isFailedOutgoing(m)) continue;
+
+    const personId = personOf(m);
+    if (!personId || own.has(personId)) continue;
+
+    const p = prospectFor(m.platform, personId);
 
     const when = m.timestamp || m.createdAt;
     if (!p.firstContact || when < p.firstContact) p.firstContact = when;
@@ -447,6 +453,190 @@ async function buildMessageRows({ platform, since }) {
     }
   }
 
+  // The cap was hit: the scan above holds only the newest MESSAGE_CAP
+  // messages, so older prospects are missing and "Premier contact" and the
+  // counts are short for long threads. Re-count the WHOLE period inside the
+  // database instead. It hands back one small summary per person, not the
+  // messages, so it stays light in the 512 MB container however long the
+  // period. Only if it fails does the sheet stay marked as partial.
+  let truncated = false;
+  if (hitCap) {
+    try {
+      await mergePeriodSummaries();
+    } catch (err) {
+      truncated = true;
+      console.warn(
+        `[Export] hit the ${MESSAGE_CAP}-message cap and the full-period count failed — "premier contact" and message counts are partial for old threads:`,
+        err.message,
+      );
+    }
+  }
+
+  async function mergePeriodSummaries() {
+    const nameStr = { $cond: [isString("$senderName"), "$senderName", ""] };
+    // Same test as isPlaceholderName, inverted
+    const isRealName = {
+      $and: [
+        { $ne: [nameStr, ""] },
+        { $ne: [nameStr, "Unknown"] },
+        { $not: [{ $regexMatch: { input: nameStr, regex: "^User .{1,4}$" } }] },
+        { $not: [{ $regexMatch: { input: nameStr, regex: "^[0-9]{6,}$" } }] },
+      ],
+    };
+    const docs = await Message.aggregate([
+      {
+        $match: {
+          ...matchPlatform,
+          ...(since ? { timestamp: { $gte: since } } : {}),
+          // A refused send is skipped, as in the scan (isFailedOutgoing)
+          $nor: [{ direction: { $ne: "incoming" }, status: "failed" }],
+        },
+      },
+      {
+        $project: {
+          platform: 1,
+          conversationId: 1,
+          at: whenOf,
+          incoming: isIncoming,
+          person: { $cond: [isIncoming, "$senderId", "$recipientId"] },
+          name: { $cond: [{ $and: [isIncoming, isRealName] }, nameStr, null] },
+          body: {
+            $trim: {
+              input: {
+                $substrCP: [
+                  { $cond: [isString("$content"), "$content", ""] },
+                  0,
+                  PREVIEW_CHARS,
+                ],
+              },
+            },
+          },
+          media: hasMediaExpr,
+          ad: {
+            $cond: [
+              {
+                $and: [
+                  isIncoming,
+                  isString("$context.title"),
+                  { $ne: ["$context.title", ""] },
+                ],
+              },
+              "$context.title",
+              null,
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { platform: "$platform", person: "$person" },
+          firstAt: { $min: "$at" },
+          lastAt: { $max: "$at" },
+          in: { $sum: { $cond: ["$incoming", 1, 0] } },
+          out: { $sum: { $cond: ["$incoming", 0, 1] } },
+          // $min / $max skip nulls, so non-matching rows do not count
+          lastInAt: { $max: { $cond: ["$incoming", "$at", null] } },
+          lastOutAt: { $max: { $cond: ["$incoming", null, "$at"] } },
+          // Documents compare field by field, so the newest (or, for the ad,
+          // the oldest) `at` wins
+          lastMsg: {
+            $max: {
+              $cond: [
+                { $or: [{ $ne: ["$body", ""] }, "$media"] },
+                { at: "$at", body: "$body", incoming: "$incoming" },
+                null,
+              ],
+            },
+          },
+          name: {
+            $max: {
+              $cond: [{ $ne: ["$name", null] }, { at: "$at", name: "$name" }, null],
+            },
+          },
+          ad: {
+            $min: {
+              $cond: [{ $ne: ["$ad", null] }, { at: "$at", title: "$ad" }, null],
+            },
+          },
+          // The conversations this person wrote in: what maps a reply stored
+          // against a thread id back to them (pass 1, over the whole period)
+          convs: {
+            $addToSet: { $cond: ["$incoming", "$conversationId", null] },
+          },
+        },
+      },
+    ])
+      .allowDiskUse(true)
+      .option({ maxTimeMS: 120000 });
+
+    // Thread -> person, as pass 1 does but from every message in the period
+    const threadToPerson = new Map(convToPerson);
+    for (const d of docs) {
+      const person = d._id.person;
+      if (!d.in || !person || looksLikeThreadId(d._id.platform, person)) continue;
+      for (const c of d.convs || []) {
+        if (c && !threadToPerson.has(`${d._id.platform}:${c}`)) {
+          threadToPerson.set(`${d._id.platform}:${c}`, person);
+        }
+      }
+    }
+
+    const earlier = (a, b) => (!a ? b || null : !b ? a : b < a ? b : a);
+    const later = (a, b) => (!a ? b || null : !b ? a : b > a ? b : a);
+    const newer = (a, b) => (!a?.at ? b || null : !b?.at ? a : b.at > a.at ? b : a);
+    const older = (a, b) => (!a?.at ? b || null : !b?.at ? a : b.at < a.at ? b : a);
+
+    // The summaries split a person's messages by the key they were stored
+    // under, so the ones that resolve to the same person add up
+    const totals = new Map();
+    for (const d of docs) {
+      const platform = d._id.platform;
+      const raw = d._id.person;
+      if (!raw) continue;
+      const personId = threadToPerson.get(`${platform}:${raw}`) || raw;
+      if (own.has(personId)) continue;
+      const key = `${platform}:${personId}`;
+      const t = totals.get(key);
+      if (!t) {
+        totals.set(key, { ...d, platform, personId });
+        continue;
+      }
+      t.firstAt = earlier(t.firstAt, d.firstAt);
+      t.lastAt = later(t.lastAt, d.lastAt);
+      t.in += d.in || 0;
+      t.out += d.out || 0;
+      t.lastInAt = later(t.lastInAt, d.lastInAt);
+      t.lastOutAt = later(t.lastOutAt, d.lastOutAt);
+      t.lastMsg = newer(t.lastMsg, d.lastMsg);
+      t.name = newer(t.name, d.name);
+      t.ad = older(t.ad, d.ad);
+    }
+
+    for (const t of totals.values()) {
+      const p = prospectFor(t.platform, t.personId);
+      p.firstContact = earlier(p.firstContact, t.firstAt);
+      p.lastContact = later(p.lastContact, t.lastAt);
+      // Never below what the scan counted
+      p.messagesIn = Math.max(p.messagesIn, t.in || 0);
+      p.messagesOut = Math.max(p.messagesOut, t.out || 0);
+      p.lastIncomingAt = later(p.lastIncomingAt, t.lastInAt);
+      p.lastOutgoingAt = later(p.lastOutgoingAt, t.lastOutAt);
+      const msg = t.lastMsg;
+      if (msg?.at && (!p.lastMessageAt || msg.at > p.lastMessageAt)) {
+        p.lastMessage = `${msg.incoming ? "Prospect" : "Commercial"} : ${msg.body || "[pièce jointe]"}`;
+        p.lastMessageAt = msg.at;
+      }
+      if (t.name?.at && (!p.nameAt || t.name.at > p.nameAt)) {
+        p.name = t.name.name;
+        p.nameAt = t.name.at;
+      }
+      if (t.ad?.at && (!p.adTitleAt || t.ad.at < p.adTitleAt)) {
+        p.adTitle = t.ad.title;
+        p.adTitleAt = t.ad.at;
+      }
+    }
+  }
+
   // Drop outbound-only groups still keyed by a thread id: those are the
   // unrepairable half of the case above (a reply with no inbound message in
   // range to link it to a person). Better absent than a phantom prospect.
@@ -476,15 +666,6 @@ async function buildMessageRows({ platform, since }) {
   // so "Commercial en charge" still names the last agent who answered when
   // that reply is older than the chosen period (and no lock names anyone).
   const personIds = [...prospects.values()].map((p) => p.personId);
-  const whenOf = { $ifNull: ["$timestamp", "$createdAt"] };
-  // Same test as isFromProspect above, in aggregation form
-  const isIncoming = {
-    $and: [
-      { $eq: ["$direction", "incoming"] },
-      { $not: [{ $in: ["$senderId", { $literal: ownList }] }] },
-      { $not: [{ $in: ["$senderName", { $literal: OWN_SENDER_NAMES }] }] },
-    ],
-  };
   const isDeliveredReply = {
     $and: [{ $not: [isIncoming] }, { $ne: ["$status", "failed"] }],
   };
