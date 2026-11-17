@@ -7,17 +7,19 @@ const { protect, authorize } = require("../middleware/auth");
 
 // Counts of "clients" are distinct customers who wrote: one conversation per
 // customer per platform (server/db/conversations.js), over incoming messages
-// by the time they were stored (created_*), as the MongoDB version counted
-// by createdAt.
+// by the time they were SENT (sent_*), never stored (created_*): opening an
+// old thread syncs its history from Graph today, and must not count it as
+// today's clients (decisions.md open item 4, closed by D14; the MongoDB
+// version made the same change in PR #20).
 
-/** WHERE fragment: a message stored at or after the @<prefix>_date/_time pair. */
-const storedSince = (prefix) =>
-  `(m.created_date > @${prefix}_date OR (m.created_date = @${prefix}_date AND m.created_time >= @${prefix}_time))`;
+/** WHERE fragment: a message sent at or after the @<prefix>_date/_time pair. */
+const sentSince = (prefix) =>
+  `(m.sent_date > @${prefix}_date OR (m.sent_date = @${prefix}_date AND m.sent_time >= @${prefix}_time))`;
 
 async function distinctClientsSince(prefix, params) {
   return db.scalar(
     `SELECT COUNT(DISTINCT m.conversation_id) FROM dbo.message m
-     WHERE m.sender_type = N'contact' AND ${storedSince(prefix)}`,
+     WHERE m.sender_type = N'contact' AND ${sentSince(prefix)}`,
     params,
   );
 }
@@ -27,7 +29,7 @@ async function clientsByPlatform(params) {
     await db.query(
       `SELECT _id = c.platform, count = COUNT(DISTINCT m.conversation_id)
        FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
-       WHERE m.sender_type = N'contact' AND ${storedSince("since")}
+       WHERE m.sender_type = N'contact' AND ${sentSince("since")}
        GROUP BY c.platform
        ORDER BY count DESC`,
       params,
@@ -77,12 +79,12 @@ router.get(
         // Daily series — distinct clients per day per platform
         db
           .query(
-            `SELECT date = CONVERT(char(10), m.created_date, 23), c.platform,
+            `SELECT date = CONVERT(char(10), m.sent_date, 23), c.platform,
                     count = COUNT(DISTINCT m.conversation_id)
              FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
-             WHERE m.sender_type = N'contact' AND ${storedSince("since")}
-             GROUP BY m.created_date, c.platform
-             ORDER BY m.created_date`,
+             WHERE m.sender_type = N'contact' AND ${sentSince("since")}
+             GROUP BY m.sent_date, c.platform
+             ORDER BY m.sent_date`,
             params,
           )
           .then((r) => r.rows),
@@ -268,11 +270,11 @@ router.get("/ad-attribution", protect, async (req, res) => {
       await db.query(
         `WITH active AS (
            SELECT c.campaign_id, c.conversation_id, c.platform,
-                  n = COUNT(*), last_at = MAX(dbo.fn_DateTimeCombine(m.created_date, m.created_time))
+                  n = COUNT(*), last_at = MAX(dbo.fn_DateTimeCombine(m.sent_date, m.sent_time))
            FROM dbo.conversations c
            JOIN dbo.message m ON m.conversation_id = c.conversation_id
            WHERE c.campaign_id IS NOT NULL AND c.deleted_date IS NULL
-             AND m.sender_type = N'contact' AND ${storedSince("since")}
+             AND m.sender_type = N'contact' AND ${sentSince("since")}
            GROUP BY c.campaign_id, c.conversation_id, c.platform
          )
          SELECT TOP (50) k.campaign_id, k.external_id, k.title, k.permalink,
@@ -332,10 +334,10 @@ router.get("/marketing-summary", protect, async (req, res) => {
           .query(
             `SELECT TOP (5) m.message_id, c.platform, c.participant_name, m.content,
                     customer_key = COALESCE(c.participant_external_id, c.external_id),
-                    created_at = dbo.fn_DateTimeCombine(m.created_date, m.created_time)
+                    sent_at = dbo.fn_DateTimeCombine(m.sent_date, m.sent_time)
              FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
              WHERE m.sender_type = N'contact'
-             ORDER BY m.created_date DESC, m.created_time DESC, m.message_id DESC`,
+             ORDER BY m.sent_date DESC, m.sent_time DESC, m.message_id DESC`,
           )
           .then((r) => r.rows),
       ]);
@@ -348,7 +350,8 @@ router.get("/marketing-summary", protect, async (req, res) => {
         ? `User ${String(m.customer_key).slice(-4)}`
         : m.participant_name,
       content: m.content || "",
-      createdAt: m.created_at,
+      // The dashboard reads createdAt; it gets the time the message was sent
+      createdAt: m.sent_at,
     }));
 
     return res.json({

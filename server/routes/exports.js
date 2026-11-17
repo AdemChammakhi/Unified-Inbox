@@ -36,6 +36,7 @@ const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
 const { computeMaturity } = require("../utils/leadMaturity");
 const { freinLabel, getFreins } = require("../utils/leadFrein");
+const dispatches = require("../db/dispatches");
 
 const PLATFORM_LABELS = {
   instagram: "Instagram",
@@ -55,8 +56,11 @@ const { STAGE_LABEL, TYPOLOGY_LABEL } = require("../constants/pipeline");
 const STAGE_FILLS = {
   a_contacter: "FFE3A63C",
   contact_etabli: "FF5B9BD9",
+  attente_telephone: "FF7FB8D8",
   qualification_en_cours: "FF8FCFA8",
   qualifie: "FF5FBF8A",
+  hope: "FF4FBA95",
+  opportunite: "FF3FB5A0",
   offre_envoyee: "FF4EC3C3",
   en_reflexion: "FFA98BD6",
   relance: "FFD98CB3",
@@ -81,6 +85,47 @@ const MATURITY_FILLS = {
 
 /** Shown when neither a lock nor a CRM reply names anyone. */
 const UNASSIGNED = "Non attribué";
+const NOT_DISPATCHED = "Non dispatché";
+
+/**
+ * The open dispatches, keyed "<platform>:<customerId>" (db/dispatches.js).
+ * Non-fatal: a sheet without the dispatch columns filled beats no sheet.
+ */
+async function loadDispatches() {
+  const map = new Map();
+  try {
+    for (const d of await dispatches.list({ status: "open", limit: 5000 })) {
+      map.set(`${d.platform}:${d.customerId}`, d);
+    }
+  } catch (err) {
+    console.warn("[Export] dispatch lookup skipped (non-fatal):", err.message);
+  }
+  return map;
+}
+
+/** The dispatch columns of a row, from its open dispatch (or none). */
+function dispatchFields(d) {
+  if (!d) {
+    return {
+      dispatchId: null,
+      dispatchedTo: NOT_DISPATCHED,
+      dispatchedToId: null,
+      dispatchedBy: "",
+      dispatchedAt: null,
+      dispatchNote: "",
+      dispatchReplied: false,
+    };
+  }
+  return {
+    dispatchId: d.id,
+    dispatchedTo: d.agentName || "Agent supprimé",
+    dispatchedToId: d.agentId || null,
+    dispatchedBy: d.dispatchedByName || "—",
+    dispatchedAt: d.dispatchedAt || null,
+    dispatchNote: d.note || "",
+    dispatchReplied: Boolean(d.firstReplyAt),
+  };
+}
 
 /** IDs that are US, not prospects (same list as routes/leadInsights.js). */
 function ownIds() {
@@ -271,6 +316,8 @@ async function buildMessageRows({ platform, since }) {
     }),
   );
 
+  const openDispatches = await loadDispatches();
+
   // One clock for the whole sheet, so every row is judged at the same instant
   const now = new Date();
 
@@ -358,6 +405,7 @@ async function buildMessageRows({ platform, since }) {
       rdvAt,
       agent,
       agentId,
+      ...dispatchFields(openDispatches.get(`${p.platform}:${p.personId}`) || null),
       messagesIn: p.msgs_in,
       messagesOut: p.msgs_out,
       lastMessage: cutText(lastMessage, 160),
@@ -405,7 +453,7 @@ async function buildCallRows({ since }) {
   const leads = await conversations.callLeads();
   if (leads.length === 0) return [];
 
-  const [stats, extrasByContact, names, freins] = await Promise.all([
+  const [stats, extrasByContact, names, freins, openDispatches] = await Promise.all([
     conversations.callStats(leads.map((l) => l.id)),
     conversations.extrasFor(leads.map((l) => l.contactId)),
     users.namesByIds(leads.flatMap((l) => [l.lockedBy, l.classifiedBy])),
@@ -413,6 +461,7 @@ async function buildCallRows({ since }) {
       "telephone",
       leads.map((l) => l.customerId).filter(Boolean),
     ).catch(() => new Map()),
+    loadDispatches(),
   ]);
   const now = new Date();
 
@@ -490,6 +539,7 @@ async function buildCallRows({ since }) {
       rdvAt,
       agent: owner ? names.get(owner) : UNASSIGNED,
       agentId: owner ? String(owner) : null,
+      ...dispatchFields(openDispatches.get(`telephone:${customerId}`) || null),
       messagesIn: 0,
       messagesOut: 0,
       lastMessage: `Appel entrant du ${fmtDayMonth(lastCallAt)}${repeat}`,
@@ -532,13 +582,15 @@ const HEADERS = [
   "RDV le",
   "Réf. facture",
   "Commercial en charge",
+  "Dispatché à",
+  "Dispatché par",
   "Messages reçus",
   "Messages envoyés",
   "Dernier message",
 ];
 
 // Column widths, in HEADERS order — keep the two arrays the same length
-const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 10, 10, 28, 40, 17, 16, 20, 9, 9, 46];
+const COLUMN_WIDTHS = [11, 34, 24, 15, 26, 17, 17, 17, 18, 10, 10, 28, 40, 17, 16, 20, 20, 20, 9, 9, 46];
 
 // 1-based XLSX column numbers, derived so an inserted column cannot shift them
 const CLASS_COL = HEADERS.indexOf("Étape") + 1;
@@ -562,6 +614,8 @@ function rowValues(r) {
     fmtDate(r.rdvAt),
     r.invoiceRef || "",
     r.agent,
+    r.dispatchedTo || NOT_DISPATCHED,
+    r.dispatchedBy || "",
     r.messagesIn,
     r.messagesOut,
     r.lastMessage,
@@ -619,7 +673,9 @@ async function toXlsx(rows, meta) {
   ws.mergeCells(1, 1, 1, HEADERS.length);
   const title = ws.getCell(1, 1);
   title.value =
-    `Prospects Medtour CRM — ${meta.platformLabel} — ${meta.rangeLabel} — exporté le ${fmtDate(new Date())}` +
+    `Prospects Medtour CRM — ${meta.platformLabel} — ${meta.rangeLabel}` +
+    (meta.note ? ` — ${meta.note}` : "") +
+    ` — exporté le ${fmtDate(new Date())}` +
     (rows.truncated
       ? "   ⚠ EXPORT TRONQUÉ : « Premier contact » et les compteurs sont partiels pour les anciens échanges."
       : "");
@@ -667,6 +723,30 @@ async function toXlsx(rows, meta) {
   ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: HEADERS.length } };
 
   return wb.xlsx.writeBuffer();
+}
+
+const rangeLabelOf = (rangeDays) =>
+  rangeDays ? `${rangeDays} derniers jours` : "tout l'historique";
+
+/**
+ * Write `rows` as the prospect file. Shared with the Leads page's export of
+ * the rows on screen (routes/leads.js), so both files read the same.
+ * `fileName` has no extension; `meta.note`, when set, is appended to the
+ * xlsx title band (e.g. the filters the rows were chosen with).
+ */
+async function sendSheet(res, rows, { format, fileName, meta }) {
+  if (format === "csv") {
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}.csv"`);
+    return res.send(toCsv(rows));
+  }
+  const buffer = await toXlsx(rows, meta);
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+  res.setHeader("Content-Disposition", `attachment; filename="${fileName}.xlsx"`);
+  return res.send(Buffer.from(buffer));
 }
 
 // Single-flight guard. The rate limiter caps how OFTEN exports are asked for,
@@ -724,34 +804,16 @@ router.get(
 
         const dateTag = new Date().toISOString().slice(0, 10);
         const platTag = platform || "tous-canaux";
-        const meta = {
-          platformLabel: platform
-            ? PLATFORM_LABELS[platform]
-            : "Tous les canaux",
-          rangeLabel: rangeDays
-            ? `${rangeDays} derniers jours`
-            : "tout l'historique",
-        };
-
-        if (format === "csv") {
-          res.setHeader("Content-Type", "text/csv; charset=utf-8");
-          res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="prospects-medtour-${platTag}-${dateTag}.csv"`,
-          );
-          return res.send(toCsv(rows));
-        }
-
-        const buffer = await toXlsx(rows, meta);
-        res.setHeader(
-          "Content-Type",
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        );
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename="prospects-medtour-${platTag}-${dateTag}.xlsx"`,
-        );
-        return res.send(Buffer.from(buffer));
+        return await sendSheet(res, rows, {
+          format,
+          fileName: `prospects-medtour-${platTag}-${dateTag}`,
+          meta: {
+            platformLabel: platform
+              ? PLATFORM_LABELS[platform]
+              : "Tous les canaux",
+            rangeLabel: rangeLabelOf(rangeDays),
+          },
+        });
       } finally {
         _exportInFlight = false;
       }
@@ -763,4 +825,6 @@ router.get(
 );
 
 module.exports = router;
+module.exports.sendSheet = sendSheet;
+module.exports.rangeLabelOf = rangeLabelOf;
 module.exports.buildProspectRows = buildProspectRows;
