@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { Star, CalendarDays, FileText } from "lucide-react";
+import { Star, CalendarDays } from "lucide-react";
 import { TYPOLOGIES } from "../constants/pipeline";
-import DossierDocuments from "./DossierDocuments";
 import RdvForm from "./RdvForm";
 
 /**
@@ -207,12 +206,6 @@ const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true })
         <RdvForm dossier={d} onSave={onSave} canEdit={canEdit} />
       </div>
 
-      <div style={styles.docs}>
-        <div style={styles.label}>
-          <FileText size={12} /> Pièces jointes du dossier
-        </div>
-        <DossierDocuments platform={platform} customerId={customerId} compact />
-      </div>
     </div>
   );
 };
@@ -309,7 +302,6 @@ const styles = {
     fontSize: 12,
     color: "var(--danger)",
   },
-  docs: { display: "flex", flexDirection: "column", gap: 6 },
 };
 
 export default DossierPanel;
