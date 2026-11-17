@@ -3,6 +3,7 @@ const conversations = require("../db/conversations");
 const users = require("../db/users");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
+const { assignConversation } = require("../utils/dispatching");
 
 const router = express.Router();
 
@@ -56,19 +57,9 @@ router.put("/assign", protect, authorize("admin"), async (req, res) => {
       }
     }
 
-    // The customer's conversation, created when nothing is stored yet (as
-    // the lock upsert did), reopened when it had been deleted
-    let conv = await conversations.resolve(platform, [customerId], { includeDeleted: true });
-    if (!conv) {
-      conv = conversations.isThreadId(platform, customerId)
-        ? await conversations.ensureForThread({ platform, threadId: customerId })
-        : await conversations.ensureForCustomer({ platform, customerId });
-    } else if (conv.deletedAt) {
-      conv = conv.customerId
-        ? await conversations.ensureForCustomer({ platform, customerId: conv.customerId })
-        : await conversations.ensureForThread({ platform, threadId: conv.externalId });
-    }
-    await conversations.assign(conv.id, agent ? agent._id : null);
+    // The same move a dispatch makes (utils/dispatching.js): the customer's
+    // conversation, created or reopened when needed, gets the agent
+    await assignConversation({ platform, customerId, agentId: agent ? agent._id : null });
 
     // The sheet and the insights name the agent in charge from the locks
     try {

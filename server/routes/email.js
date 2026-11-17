@@ -5,6 +5,7 @@ const { simpleParser } = require("mailparser");
 const nodemailer = require("nodemailer");
 const router = express.Router();
 const { protect } = require("../middleware/auth");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { sanitizeId } = require("../utils/sanitize");
 const { storeCrmSend } = require("../services/conversationService");
 const conversations = require("../db/conversations");
@@ -416,6 +417,9 @@ router.post("/send", protect, async (req, res) => {
     } catch (dbErr) {
       console.error("[Email] DB save error after send (non-fatal):", dbErr.message);
     }
+
+    // A dispatched agent's first answer: the admin's board shows it as started
+    noteDispatchReply("email", [lockConvId, to], req.user._id);
 
     // --- Auto-lock functionality ---
     // Runs only after the mail was accepted, and never fails the request.

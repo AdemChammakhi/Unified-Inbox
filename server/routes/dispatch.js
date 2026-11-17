@@ -12,20 +12,19 @@
  * as PUT /api/locks/assign), so they alone can reply. Cancelling or
  * closing a dispatch leaves the lock where it is: the agent stays in charge
  * of the lead, only the task is over.
+ *
+ * SQL Server storage: server/db/dispatches.js (decision D13, rows only).
  */
 
 "use strict";
 
 const express = require("express");
-const mongoose = require("mongoose");
 const router = express.Router();
-const Dispatch = require("../models/Dispatch");
-const User = require("../models/User");
-const Message = require("../models/Message");
-const IncomingCall = require("../models/IncomingCall");
+const dispatches = require("../db/dispatches");
+const users = require("../db/users");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
-const { assignConversation } = require("../utils/dispatching");
+const { conversationFor, assignConversation } = require("../utils/dispatching");
 
 const NOTE_MAX = 300;
 const STATUSES = new Set(["open", "done", "cancelled", "all"]);
@@ -39,70 +38,11 @@ const cleanNote = (v) =>
     .trim()
     .slice(0, NOTE_MAX);
 
-/** The client-facing shape; `agent` and `dispatchedBy` are populated. */
-function publicDispatch(d, names) {
-  const agent = d.agent && typeof d.agent === "object" ? d.agent : null;
-  const by = d.dispatchedBy && typeof d.dispatchedBy === "object" ? d.dispatchedBy : null;
-  const agentId = agent ? String(agent._id) : d.agent ? String(d.agent) : null;
-  const byId = by ? String(by._id) : d.dispatchedBy ? String(d.dispatchedBy) : null;
-  return {
-    id: String(d._id),
-    platform: d.platform,
-    customerId: d.customerId,
-    customerName: (names && names.get(`${d.platform}:${d.customerId}`)) || "",
-    agentId,
-    agentName: fullName(agent),
-    dispatchedById: byId,
-    dispatchedByName: fullName(by),
-    dispatchedAt: d.dispatchedAt,
-    note: d.note || "",
-    status: d.status,
-    firstReplyAt: d.firstReplyAt || null,
-    closedAt: d.closedAt || null,
-  };
-}
-
-/**
- * Who the customers are, for the board: the sender name of their latest
- * incoming message, or the name recorded with the call. One query per
- * platform present, never per row.
- */
-async function customerNames(dispatches) {
-  const names = new Map();
-  const byPlatform = new Map();
-  for (const d of dispatches) {
-    if (!byPlatform.has(d.platform)) byPlatform.set(d.platform, new Set());
-    byPlatform.get(d.platform).add(d.customerId);
-  }
-  await Promise.all(
-    [...byPlatform].map(async ([platform, ids]) => {
-      try {
-        if (platform === "telephone") {
-          const calls = await IncomingCall.find({ customerId: { $in: [...ids] } })
-            .select("customerId name")
-            .lean();
-          for (const c of calls) names.set(`${platform}:${c.customerId}`, c.name || "");
-          return;
-        }
-        const rows = await Message.aggregate([
-          { $match: { platform, direction: "incoming", senderId: { $in: [...ids] } } },
-          { $sort: { createdAt: -1 } },
-          { $group: { _id: "$senderId", name: { $first: "$senderName" } } },
-        ]);
-        for (const r of rows) names.set(`${platform}:${r._id}`, r.name || "");
-      } catch (err) {
-        console.error("[Dispatch] customer names skipped (non-fatal):", err.message);
-      }
-    }),
-  );
-  return names;
-}
-
 async function loadAgent(agentId) {
-  if (typeof agentId !== "string" || !mongoose.Types.ObjectId.isValid(agentId)) {
+  if ((typeof agentId !== "string" && typeof agentId !== "number") || !users.userIdOf(agentId)) {
     return { error: "Agent invalide." };
   }
-  const agent = await User.findById(agentId).select("firstName lastName isActive role").lean();
+  const agent = await users.findById(agentId);
   if (!agent || agent.isActive === false) {
     return { error: "Agent introuvable ou suspendu." };
   }
@@ -126,26 +66,37 @@ function clearCaches() {
 /** Tell the agent's browser and every admin board. */
 function broadcast(req, event, dispatch) {
   const io = req.app.get("io");
-  if (!io) return;
+  if (!io || !dispatch) return;
   const payload = { event, dispatch };
-  if (dispatch.agentId) io.to(dispatch.agentId).emit("dispatch:new", payload);
+  if (dispatch.agentId) io.to(String(dispatch.agentId)).emit("dispatch:new", payload);
   io.emit("dispatch:changed", payload);
 }
 
-async function populated(id) {
-  return Dispatch.findById(id)
-    .populate("agent", "firstName lastName")
-    .populate("dispatchedBy", "firstName lastName")
-    .lean();
+/** Answer a status error thrown by db/dispatches.js, or a 500. */
+function fail(res, error, fallback, tag) {
+  if (error && error.status && error.status < 500) {
+    return res.status(error.status).json({ message: error.message });
+  }
+  console.error(`Dispatch ${tag} error:`, error && error.message);
+  return res.status(500).json({ message: fallback });
 }
 
-/** Close the open dispatch of a customer, if any, as cancelled. */
-async function cancelOpen(platform, customerId, userId) {
-  return Dispatch.findOneAndUpdate(
-    { platform, customerId, status: "open" },
-    { $set: { status: "cancelled", closedAt: new Date(), closedBy: userId } },
-    { new: true },
-  ).lean();
+const validId = (req, res) => {
+  if (!dispatches.isId(req.params.id)) {
+    res.status(400).json({ message: "Dispatch invalide." });
+    return false;
+  }
+  return true;
+};
+
+/**
+ * The customer id a dispatch is stored under: the one the Leads sheet and
+ * the send routes use. A Meta thread id is resolved to its customer when
+ * the conversation knows one.
+ */
+async function canonicalCustomer(platform, customerId) {
+  const conv = await conversationFor(platform, customerId);
+  return conv.customerId || customerId;
 }
 
 // POST /api/dispatch  { platform, customerId, agentId, note? }
@@ -153,53 +104,43 @@ router.post("/", protect, authorize("admin"), async (req, res) => {
   try {
     const body = req.body || {};
     const platform = sanitizePlatform(body.platform);
-    const customerId = sanitizeId(body.customerId);
-    if (!platform || !customerId) {
+    const rawCustomer = sanitizeId(body.customerId);
+    if (!platform || !rawCustomer) {
       return res.status(400).json({ message: "Plateforme et client obligatoires." });
     }
     const { agent, error } = await loadAgent(body.agentId);
     if (error) return res.status(400).json({ message: error });
 
+    const customerId = await canonicalCustomer(platform, rawCustomer);
     // One open dispatch per customer: a new one replaces the current one
-    await cancelOpen(platform, customerId, req.user._id);
-    const created = await Dispatch.create({
+    const id = await dispatches.create({
       platform,
       customerId,
-      agent: agent._id,
-      dispatchedBy: req.user._id,
+      agentId: agent._id,
+      byId: req.user._id,
       note: cleanNote(body.note),
     });
-    const keys = await assignConversation({ platform, customerId, agentId: agent._id });
+    await assignConversation({ platform, customerId, agentId: agent._id });
     clearCaches();
 
-    const dispatch = publicDispatch(await populated(created._id));
+    const dispatch = await dispatches.byId(id);
     broadcast(req, "created", dispatch);
-    console.log(
-      `[Dispatch] ${platform}:${customerId} → ${fullName(agent)} by ${fullName(req.user)} (${keys.length} key(s))`,
-    );
+    console.log(`[Dispatch] ${platform}:${customerId} → ${fullName(agent)} by ${fullName(req.user)}`);
     return res.json({ success: true, dispatch });
   } catch (error) {
-    console.error("Dispatch create error:", error.message);
-    return res.status(500).json({ message: "Impossible de dispatcher la discussion." });
+    return fail(res, error, "Impossible de dispatcher la discussion.", "create");
   }
 });
 
 // GET /api/dispatch/mine — my open dispatches, oldest first, every platform
 router.get("/mine", protect, async (req, res) => {
   try {
-    const rows = await Dispatch.find({ agent: req.user._id, status: "open" })
-      .sort({ dispatchedAt: 1 })
-      .limit(500)
-      .populate("agent", "firstName lastName")
-      .populate("dispatchedBy", "firstName lastName")
-      .lean();
-    const items = rows.map((d) => publicDispatch(d));
+    const items = await dispatches.list({ status: "open", agentId: req.user._id, limit: 500 });
     const counts = {};
     for (const d of items) counts[d.platform] = (counts[d.platform] || 0) + 1;
     return res.json({ items, counts });
   } catch (error) {
-    console.error("Dispatch mine error:", error.message);
-    return res.status(500).json({ message: "Impossible de charger vos dispatchs." });
+    return fail(res, error, "Impossible de charger vos dispatchs.", "mine");
   }
 });
 
@@ -210,136 +151,102 @@ router.get("/", protect, authorize("admin", "manager"), async (req, res) => {
     if (!STATUSES.has(status)) {
       return res.status(400).json({ message: "Statut invalide." });
     }
-    const filter = status === "all" ? {} : { status };
+    let platform = null;
     if (req.query.platform) {
-      const platform = sanitizePlatform(req.query.platform);
+      platform = sanitizePlatform(req.query.platform);
       if (!platform) return res.status(400).json({ message: "Plateforme invalide." });
-      filter.platform = platform;
     }
+    let agentId = null;
     if (req.query.agentId) {
-      if (
-        typeof req.query.agentId !== "string" ||
-        !mongoose.Types.ObjectId.isValid(req.query.agentId)
-      ) {
+      if (typeof req.query.agentId !== "string" || !users.userIdOf(req.query.agentId)) {
         return res.status(400).json({ message: "Agent invalide." });
       }
-      filter.agent = req.query.agentId;
+      agentId = String(users.userIdOf(req.query.agentId));
     }
-    const rows = await Dispatch.find(filter)
-      .sort(status === "open" ? { dispatchedAt: 1 } : { closedAt: -1, dispatchedAt: -1 })
-      .limit(1000)
-      .populate("agent", "firstName lastName isActive")
-      .populate("dispatchedBy", "firstName lastName")
-      .lean();
-    const names = await customerNames(rows);
-    const items = rows.map((d) => ({
-      ...publicDispatch(d, names),
-      agentActive: !(d.agent && d.agent.isActive === false),
-    }));
+    const items = await dispatches.list({
+      status: status === "all" ? null : status,
+      platform,
+      agentId,
+      limit: 1000,
+    });
     return res.json({ items });
   } catch (error) {
-    console.error("Dispatch list error:", error.message);
-    return res.status(500).json({ message: "Impossible de charger les dispatchs." });
+    return fail(res, error, "Impossible de charger les dispatchs.", "list");
   }
 });
-
-async function findOpen(req, res) {
-  const id = req.params.id;
-  if (typeof id !== "string" || !mongoose.Types.ObjectId.isValid(id)) {
-    res.status(400).json({ message: "Dispatch invalide." });
-    return null;
-  }
-  const d = await Dispatch.findById(id).lean();
-  if (!d) {
-    res.status(404).json({ message: "Dispatch introuvable." });
-    return null;
-  }
-  if (d.status !== "open") {
-    res.status(409).json({ message: "Ce dispatch est déjà clos." });
-    return null;
-  }
-  return d;
-}
 
 // PUT /api/dispatch/:id/done — the assigned agent, an admin or a manager
 router.put("/:id/done", protect, async (req, res) => {
   try {
-    const d = await findOpen(req, res);
-    if (!d) return undefined;
+    if (!validId(req, res)) return undefined;
     const isStaff = req.user.role === "admin" || req.user.role === "manager";
-    if (!isStaff && String(d.agent) !== String(req.user._id)) {
-      return res.status(403).json({ message: "Ce dispatch est attribué à un autre agent." });
-    }
-    await Dispatch.updateOne(
-      { _id: d._id, status: "open" },
-      { $set: { status: "done", closedAt: new Date(), closedBy: req.user._id } },
-    );
+    const before = await dispatches.close(req.params.id, {
+      status: "done",
+      byId: req.user._id,
+      allow: (it) =>
+        isStaff || String(it.agentId) === String(req.user._id)
+          ? null
+          : "Ce dispatch est attribué à un autre agent.",
+    });
     clearCaches();
-    const dispatch = publicDispatch(await populated(d._id));
+    const dispatch = await dispatches.byId(req.params.id);
     broadcast(req, "done", dispatch);
-    console.log(`[Dispatch] ${d.platform}:${d.customerId} done by ${fullName(req.user)}`);
+    console.log(`[Dispatch] ${before.platform}:${before.customerId} done by ${fullName(req.user)}`);
     return res.json({ success: true, dispatch });
   } catch (error) {
-    console.error("Dispatch done error:", error.message);
-    return res.status(500).json({ message: "Impossible de clore le dispatch." });
+    return fail(res, error, "Impossible de clore le dispatch.", "done");
   }
 });
 
 // PUT /api/dispatch/:id/reassign  { agentId, note? } — admin
 router.put("/:id/reassign", protect, authorize("admin"), async (req, res) => {
   try {
-    const d = await findOpen(req, res);
-    if (!d) return undefined;
+    if (!validId(req, res)) return undefined;
     const body = req.body || {};
+    const current = await dispatches.openItem(req.params.id);
     const { agent, error } = await loadAgent(body.agentId);
     if (error) return res.status(400).json({ message: error });
 
-    await Dispatch.updateOne(
-      { _id: d._id, status: "open" },
-      { $set: { status: "cancelled", closedAt: new Date(), closedBy: req.user._id } },
-    );
-    const created = await Dispatch.create({
-      platform: d.platform,
-      customerId: d.customerId,
-      agent: agent._id,
-      dispatchedBy: req.user._id,
-      note: body.note === undefined ? d.note || "" : cleanNote(body.note),
+    // Cancels the current one (one open per customer) and opens the new one
+    const id = await dispatches.create({
+      platform: current.platform,
+      customerId: current.customerId,
+      agentId: agent._id,
+      byId: req.user._id,
+      note: body.note === undefined ? current.note || "" : cleanNote(body.note),
     });
     await assignConversation({
-      platform: d.platform,
-      customerId: d.customerId,
+      platform: current.platform,
+      customerId: current.customerId,
       agentId: agent._id,
     });
     clearCaches();
-    const dispatch = publicDispatch(await populated(created._id));
+    const dispatch = await dispatches.byId(id);
     broadcast(req, "reassigned", dispatch);
     console.log(
-      `[Dispatch] ${d.platform}:${d.customerId} reassigned → ${fullName(agent)} by ${fullName(req.user)}`,
+      `[Dispatch] ${current.platform}:${current.customerId} reassigned → ${fullName(agent)} by ${fullName(req.user)}`,
     );
     return res.json({ success: true, dispatch });
   } catch (error) {
-    console.error("Dispatch reassign error:", error.message);
-    return res.status(500).json({ message: "Impossible de réattribuer le dispatch." });
+    return fail(res, error, "Impossible de réattribuer le dispatch.", "reassign");
   }
 });
 
 // DELETE /api/dispatch/:id — admin: cancel (the lock stays with the agent)
 router.delete("/:id", protect, authorize("admin"), async (req, res) => {
   try {
-    const d = await findOpen(req, res);
-    if (!d) return undefined;
-    await Dispatch.updateOne(
-      { _id: d._id, status: "open" },
-      { $set: { status: "cancelled", closedAt: new Date(), closedBy: req.user._id } },
-    );
+    if (!validId(req, res)) return undefined;
+    const before = await dispatches.close(req.params.id, {
+      status: "cancelled",
+      byId: req.user._id,
+    });
     clearCaches();
-    const dispatch = publicDispatch(await populated(d._id));
+    const dispatch = await dispatches.byId(req.params.id);
     broadcast(req, "cancelled", dispatch);
-    console.log(`[Dispatch] ${d.platform}:${d.customerId} cancelled by ${fullName(req.user)}`);
+    console.log(`[Dispatch] ${before.platform}:${before.customerId} cancelled by ${fullName(req.user)}`);
     return res.json({ success: true, dispatch });
   } catch (error) {
-    console.error("Dispatch cancel error:", error.message);
-    return res.status(500).json({ message: "Impossible d’annuler le dispatch." });
+    return fail(res, error, "Impossible d’annuler le dispatch.", "cancel");
   }
 });
 

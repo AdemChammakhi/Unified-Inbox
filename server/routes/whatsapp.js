@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
 const { protect } = require("../middleware/auth");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { storeCrmSend } = require("../services/conversationService");
 const conversations = require("../db/conversations");
 const messages = require("../db/messages");
@@ -176,6 +177,9 @@ router.post("/send", protect, async (req, res) => {
         },
       });
     }
+
+    // A dispatched agent's first answer: the admin's board shows it as started
+    noteDispatchReply("whatsapp", [lockConvId, recipientId], req.user._id);
 
     // --- Auto-lock functionality ---
     const lockTarget = saved?.conversation?.id || existing?.id || null;

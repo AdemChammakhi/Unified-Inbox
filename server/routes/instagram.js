@@ -2,6 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const router = express.Router();
 const { protect, authorize } = require("../middleware/auth");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
 const {
   getContactAvatarMap,
@@ -1007,6 +1008,9 @@ router.post("/send", protect, async (req, res) => {
     } catch (dbErr) {
       console.error("DB save error (non-fatal):", dbErr.message);
     }
+
+    // A dispatched agent's first answer: the admin's board shows it as started
+    noteDispatchReply("instagram", [lockConvId, recipientId], req.user._id);
 
     // Auto-lock on first reply (agents), now that Meta accepted the message.
     // The message is already delivered, so a lock failure here must never
