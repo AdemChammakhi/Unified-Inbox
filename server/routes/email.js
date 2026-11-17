@@ -9,6 +9,7 @@ const ConversationLock = require("../models/ConversationLock");
 const { noteDispatchReply } = require("../utils/dispatching");
 const { protect } = require("../middleware/auth");
 const { sanitizeId } = require("../utils/sanitize");
+const { bulkUpsert } = require("../utils/duplicateKey");
 const { messageTypeFor } = require("../utils/metaPayload");
 const { UPLOAD_DIR } = require("./uploads");
 
@@ -258,7 +259,7 @@ router.get("/conversations", protect, async (req, res) => {
     });
 
     if (syncOps.length > 0) {
-      Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
+      bulkUpsert(Message, syncOps).catch((err) =>
         console.error("Email message sync error (non-fatal):", err.message),
       );
     }

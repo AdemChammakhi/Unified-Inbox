@@ -6,6 +6,7 @@ const ConversationLock = require("../models/ConversationLock");
 const { noteDispatchReply } = require("../utils/dispatching");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
+const { retryOnDuplicateKey, bulkUpsert } = require("../utils/duplicateKey");
 const {
   parseGraphAttachments,
   messageTypeFor,
@@ -84,7 +85,9 @@ async function storeFbCrmSend({
   sentBy,
 }) {
   if (messageId) {
-    return Message.updateOne(
+    // Retried once if the echo inserts the same id at the same moment: the
+    // second pass then claims the echo's row.
+    return retryOnDuplicateKey(() => Message.updateOne(
       { externalId: messageId },
       {
         $set: {
@@ -106,7 +109,7 @@ async function storeFbCrmSend({
         },
       },
       { upsert: true },
-    );
+    ));
   }
   return Message.create({
     platform: "facebook",
@@ -319,7 +322,7 @@ async function fetchFacebookConversations(slim = false) {
 
   // Flush the DB sync as a single unordered bulk upsert (non-blocking)
   if (syncOps.length > 0) {
-    Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
+    bulkUpsert(Message, syncOps).catch((err) =>
       console.error("FB message sync error (non-fatal):", err.message),
     );
   }
@@ -647,7 +650,7 @@ router.get("/messages-paged", protect, async (req, res) => {
               };
             });
           if (pageSyncOps.length > 0) {
-            await Message.bulkWrite(pageSyncOps, { ordered: false });
+            await bulkUpsert(Message, pageSyncOps);
           }
       }
     };

@@ -145,10 +145,27 @@ messageSchema.index(
   { platform: 1, timestamp: -1 },
   { name: "messages_recent" },
 );
-// For webhook upsert lookups by external platform message ID
+// One row per platform message id. Every write upserts on it, and only a
+// UNIQUE index stops two concurrent upserts (a retried webhook, a webhook
+// racing a Graph sync) from both inserting. Partial so rows without an id
+// (null, "") are not indexed. Built and back-filled by
+// db/migrateMessageExternalIds.js, which also drops the old plain
+// "messages_extId" index; racing writers use utils/duplicateKey.js.
 messageSchema.index(
   { externalId: 1 },
-  { sparse: true, name: "messages_extId" },
+  {
+    unique: true,
+    partialFilterExpression: { externalId: { $gt: "" } },
+    name: "uniq_messages_extId",
+  },
+);
+// Dashboards: distinct inbound clients over a date range, by platform. The
+// range is on `timestamp` (when the message was sent), never `createdAt`
+// (when the row was stored: a Graph sync stores old history today).
+// platform + senderId make the distinct-client counts index-only.
+messageSchema.index(
+  { direction: 1, timestamp: -1, platform: 1, senderId: 1 },
+  { name: "messages_analytics" },
 );
 
 module.exports = mongoose.model("Message", messageSchema);

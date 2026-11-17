@@ -9,6 +9,7 @@ const facebookRoute = require("./facebook");
 const emailRoute = require("./email");
 const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
+const { retryOnDuplicateKey } = require("../utils/duplicateKey");
 const {
   parseMetaReferral,
   parseWhatsAppReferral,
@@ -582,7 +583,7 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
               const waContext = parseWhatsAppReferral(msg.referral);
               const waText = whatsAppMessageText(msg);
 
-              const newMessage = await Message.findOneAndUpdate(
+              const newMessage = await retryOnDuplicateKey(() => Message.findOneAndUpdate(
                 { externalId: safeMsgId },
                 {
                   $setOnInsert: {
@@ -605,7 +606,7 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
                   },
                 },
                 { upsert: true, new: true }
-              );
+              ));
 
               console.log("[Webhook:WhatsApp] Message saved/upserted:", newMessage._id);
 
@@ -802,7 +803,7 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
               console.warn("[Webhook:IG] Skipping message with invalid mid");
               continue;
             }
-            const igSavedMsg = await Message.findOneAndUpdate(
+            const igSavedMsg = await retryOnDuplicateKey(() => Message.findOneAndUpdate(
               { externalId: safeMsgMid },
               {
                 $setOnInsert: {
@@ -822,7 +823,7 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
                 },
               },
               { upsert: true, new: true, includeResultMetadata: true },
-            );
+            ));
 
             const wasInserted = igSavedMsg.lastErrorObject?.updatedExisting === false;
             if (wasInserted) {
@@ -992,7 +993,7 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
             });
 
             const safeFbMid = sanitizeId(message.mid);
-            const fbSavedMsg = await Message.findOneAndUpdate(
+            const fbSavedMsg = await retryOnDuplicateKey(() => Message.findOneAndUpdate(
               { externalId: safeFbMid },
               {
                 $setOnInsert: {
@@ -1012,7 +1013,7 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
                 },
               },
               { upsert: true, new: true, includeResultMetadata: true },
-            );
+            ));
 
             // Only emit socket event if this was a NEW insert (not a duplicate upsert)
             const fbWasInserted = fbSavedMsg.lastErrorObject?.updatedExisting === false;

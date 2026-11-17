@@ -14,6 +14,17 @@ const connectDB = async () => {
         }
       })
       .catch((e) => console.error("[Startup] Classification key migration failed:", e.message));
+    // Idempotent: drop duplicate copies of a message (backed up first) and
+    // make Message.externalId unique, so they cannot come back.
+    require("../db/migrateMessageExternalIds")()
+      .then((r) => {
+        if (!r.alreadyUnique) {
+          console.log(
+            `[Startup] Message ids made unique: ${r.removed} duplicate row(s) removed`,
+          );
+        }
+      })
+      .catch((e) => console.error("[Startup] Message id uniqueness migration failed:", e.message));
     // Idempotent: derive the pipeline stage on records that predate it.
     require("../db/migrateStages")()
       .then((r) => {
