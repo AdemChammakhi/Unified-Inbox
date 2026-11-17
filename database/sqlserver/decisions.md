@@ -5,8 +5,9 @@ owner decision in code without a new entry here.**
 
 D1 to D4 and E1 to E8 were first recorded on 15 Sept 2026 in the gitignored
 `docs/migration/decisions.md`; they are copied here unchanged, with D5 to D8
-(24 Sept 2026) superseding parts of them, and D9 (6 Oct 2026) replacing the
-scripts with their revision.
+(24 Sept 2026) superseding parts of them, D9 (6 Oct 2026) replacing the
+scripts with their revision, D10 and D11 (29 Oct 2026) bringing back the
+stages and the 22 Oct features, and D12 to D15 (17 Nov 2026) the next update.
 
 ---
 
@@ -159,6 +160,94 @@ spécifié" (E24).
 
 Four defects of the revision cannot be absorbed by the app with rows alone.
 They are the schema owner's to fix in the scripts (open item 8).
+**(The two fields stay in the database, but the agents work with stages
+again: D10.)**
+
+### D10. The stages of production, each stored as a fixed (Étape, Qualification) pair
+*Decided by the project owner, 29 Oct 2026, when production main (22 Oct)
+was merged into the port.*
+
+The agents keep main's stage pipeline (16 stages then, 19 since D12). The
+database keeps D9's two fields: each stage is written as one fixed, distinct
+pair (`STAGE_TO_PAIR` in `server/constants/pipeline.js`) and read back from it
+(`PAIR_TO_STAGE`). A pair no stage owns — one the scripts' lead import wrote,
+or a hand edit — reads as its qualification when that settles it (won, lost,
+unreachable), else as the first stage of its Étape (`stageOfPair`). Power BI
+reads the two fields; the warehouse's won and lost flags follow the
+qualification's group as before. Replaces E25's mapping for the migration.
+
+### D11. Features without a table come back as rows, or read-only
+*Decided by the project owner, 29 Oct 2026. Partly reverses D6.*
+
+- The dossier extras of 22 Oct (PAX, comment, RDV place / agency / agent),
+  the priority flag and the invoice reference: one JSON value, the "dossier"
+  custom field of the customer's contact. The prospect phone recorded by the
+  agent: `contacts.phone`.
+- Phone leads ("Appel entrant"): a conversation on platform `call` with the
+  customer id `appel-<digits>`, and one `dbo.call_log` row per call.
+- Message templates and the agencies & partners directory: read from the seed
+  files in `server/data/`, read-only (the pages hide their editors; writes
+  answer 405).
+- Dossier documents stay removed (D6).
+
+*(D10 and D11 were first written on 29 Oct in a working copy that was lost
+before it was committed; they are recorded again here on 17 Nov 2026 from the
+session notes, unchanged.)*
+
+### D12. Pairs of the three stages added after the port
+*Decided by the project owner, 17 Nov 2026 ("set A").*
+
+Main added "En attente du numéro de téléphone" (31 Oct), "Opportunité"
+(5 Nov) and "HOPE" (6 Nov). Each takes a pair no stage owned, all three in the
+qualification group "En cours":
+
+| Stage | Étape | Qualification |
+|---|---|---|
+| En attente du numéro de téléphone | Nouveau lead | En cours |
+| HOPE | Contact établi | En réflexion |
+| Opportunité | Offre présentée | En cours |
+
+The first keeps the Étape "Nouveau lead" although it sits after "Contact
+établi" on the line: it was the only free in-progress pair before it. The
+other set offered (B) followed the line exactly but put HOPE in the group
+Nouveau.
+
+### D13. The dispatch board, as rows
+*Decided by the project owner, 17 Nov 2026.*
+
+Main's dispatch board (an admin hands a discussion to an agent with a note,
+followed open / done / cancelled, with the agent's first reply) is kept
+without a table:
+
+- the agent in charge is the conversation's lock holder and
+  `assigned_to_user_id` (`utils/dispatching.js`, the same move as an admin's
+  reassignment from the Leads sheet);
+- each dispatch is an item of the JSON "dispatch" custom field of the
+  customer's contact (`server/db/dispatches.js`): `{"seq": n, "items": [...]}`,
+  each item naming its platform and customer id; ids are
+  `<contact_id>.<seq>`; writes are serialized per contact with
+  `sp_getapplock`; lists read every item with `OPENJSON`; every open item and
+  the 50 most recent closed ones are kept per contact.
+
+The API and its JSON are main's, so the client is main's.
+
+### D14. Dashboards count by the time a message was sent
+*Decided by the project owner, 17 Nov 2026. Closes open item 4.*
+
+The client counts of the dashboards and the ad-attribution panel filter and
+group on `message.sent_date/sent_time`, not `created_*`: opening an old thread
+syncs its history today, and must not count as today's clients. The same
+change was made on MongoDB (PR #20). No index covers `sent_date` without the
+conversation id, and none can be added (D5): these counts scan `message`, as
+they did on `created_*`.
+
+### D15. Power BI may read the warehouse
+*Decided by the project owner, 17 Nov 2026.*
+
+The scripts create the user `powerbi_reader` in UnifiedBoxDW but grant it
+nothing, so every SELECT was refused. `deploy.sh` adds it to `db_datareader`
+on UnifiedBoxDW only: a role membership, not a schema change. Who receives
+its password stays open item 6.
 
 ---
 
@@ -193,7 +282,7 @@ all. The owner may override any of them.
 | E22 | The scripts fix the 10 qualification labels and the 4 groups, not which label goes in which group. The app's: Nouveau lead → Nouveau; En attente de réponse, En cours, En réflexion → En cours; Dossier confirmé → Gagné, terminal; Injoignable → Perdu, not terminal (the customer may still answer); Non intéressé, Prix trop élevé, Offre concurrente, Réservation annulée → Perdu, terminal. Sort orders follow the funnel (1 to 7) and this list (1 to 10) | The warehouse's `is_won_flag` reads the group; a lost qualification makes a lead Froid in the maturity rules, a Gagné one or an Étape from Réservation passée on makes it Chaud |
 | E23 | At every start, and before each warehouse load, the app inserts the reference labels that are missing and puts back the group, terminal flag and sort order of the ones it knows when they differ. Rows only | `usp_load_leads_from_staging` inserts a label it does not know yet with group Nouveau and sort order 99: a won lead imported before the app's first start would otherwise never count as won |
 | E24 | The motif of an unknown typologie is "Non spécifié", the label `usp_load_leads_from_staging` creates and uses, instead of D4's "Non renseigné" | One row for both writers |
-| E25 | Old dossiers map onto Étape + Qualification (`PREVIOUS_STAGE_TO_MODEL`, used by the migration): Nouveau lead → Nouveau lead / Nouveau lead; À contacter → Nouveau lead / En cours; Contact établi and Qualifié → Contact établi / En cours; Offre envoyée and Relance → Offre présentée / En attente de réponse; En réflexion → Offre présentée / En réflexion; Réservation → Réservation passée / En cours; Paiement → Paiement en cours / En cours; Dossier confirmé and Départ → Dossier confirmé / Dossier confirmé; Perdu → Nouveau lead / Non intéressé, or Prix trop élevé / Offre concurrente when the customer's last frein is Prix / Comparaison. The six classifications older than the pipeline first take the stage the pipeline's own migration gave them (`LEGACY_TO_STAGE`: Cible and RDV → Qualifié, Hors cible → Perdu, Suivi → Relance, Priorité → À contacter, Non classifié → Nouveau lead) | MongoDB recorded no step reached before a loss, so a lost lead starts the funnel again; the frein is the only recorded loss reason |
+| E25 | **Replaced by D10: the migration now writes each stage's fixed pair (`STAGE_TO_PAIR`).** Old dossiers mapped onto Étape + Qualification (`PREVIOUS_STAGE_TO_MODEL`, used by the migration): Nouveau lead → Nouveau lead / Nouveau lead; À contacter → Nouveau lead / En cours; Contact établi and Qualifié → Contact établi / En cours; Offre envoyée and Relance → Offre présentée / En attente de réponse; En réflexion → Offre présentée / En réflexion; Réservation → Réservation passée / En cours; Paiement → Paiement en cours / En cours; Dossier confirmé and Départ → Dossier confirmé / Dossier confirmé; Perdu → Nouveau lead / Non intéressé, or Prix trop élevé / Offre concurrente when the customer's last frein is Prix / Comparaison. The six classifications older than the pipeline first take the stage the pipeline's own migration gave them (`LEGACY_TO_STAGE`: Cible and RDV → Qualifié, Hors cible → Perdu, Suivi → Relance, Priorité → À contacter, Non classifié → Nouveau lead) | MongoDB recorded no step reached before a loss, so a lost lead starts the funnel again; the frein is the only recorded loss reason |
 | E26 | The warehouse's `dim_status` holds the three statuses `CK_conv_status` allows (open, pending, resolved); the app writes only open | The 23 Sept rows for snoozed and spam can no longer occur |
 | E27 | Every (Étape, Qualification) pair a conversation takes — at creation, at each dossier edit and in the migration — is registered in `classification_qualification_matrix` when new. Rows only | The scripts' lead import fills that table with the pairs it imports; a reader of it (Power BI) would otherwise never see the app's pairs |
 
@@ -210,11 +299,13 @@ These do not block code work, but they block production cutover.
    period is not built.
 3. **Access to production data** for the dry-run migration, and the rules for
    handling that personal data. The script is tested on synthetic data only.
-4. **KPI definition changes.** Analytics counts still use ingestion time
-   (`message.created_*`), which inflates numbers for synced history.
+4. ~~**KPI definition changes.** Analytics counts still use ingestion time
+   (`message.created_*`), which inflates numbers for synced history.~~
+   Closed by D14.
 5. **Deletes.** E12 is the provisional answer; confirm or override it.
 6. **Power BI access.** Who gets the `powerbi_reader` password, and how the
-   reports reach port 1433 (SSH tunnel or gateway).
+   reports reach port 1433 (SSH tunnel or gateway). It can read the warehouse
+   since D15.
 7. **Project notes.** `CLAUDE.md` §5–§11, §17, §18 and
    `docs/migration/decisions.md` in the main checkout still describe MongoDB;
    they are the owner's files to update.
@@ -233,3 +324,19 @@ These do not block code work, but they block production cutover.
      so one blank cell cancels the whole import.
    - The UnifiedBox1 script also creates `usp_load_fact_call`, which reads
      warehouse tables and cannot run there. Harmless to the app.
+9. **More defects in the 5 Oct scripts**, found on 17 Nov 2026 (not in item 8):
+   - `usp_load_leads_from_staging` also cancels the whole import when two
+     staging rows share a phone or an email (`UQ_contacts_phone` /
+     `UQ_contacts_email`), when a creation date is not `dd/mm/yyyy`
+     (`created_date` is NOT NULL), or when a platform is outside
+     `CK_channels_platform` (`telephone`, `messenger`). Contacts without a
+     phone are matched on the display name alone, so two namesakes become one.
+   - `usp_load_fact_call` takes the agent from the destination extension
+     only: an outbound call's agent is the caller (the source), so outbound
+     calls fall to the default agent or -1.
+   - `usp_load_fact_qualification_duration` numbers the history by date and
+     merges on that number, but never updates `entered_at` nor removes rows
+     that no longer exist: a history row inserted earlier, or history deleted
+     with its conversation (E12), shifts the numbers and leaves stale durations.
+   - Minor: the fact loaders build date keys with `FORMAT()` row by row, slow
+     on large tables.

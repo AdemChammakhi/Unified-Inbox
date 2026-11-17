@@ -29,19 +29,25 @@
  *    an incoming message, the recipient of ours, a thread id mapped to the
  *    customer who wrote in it. A Graph thread id becomes the conversation's
  *    external_id. Sends the platform refused (status "failed") are not copied.
- *  - classifications → the conversation's dossier. The 12-stage pipeline maps
- *    onto the scripts' two fields, Étape (classification_id) and
- *    Qualification (qualification_id), through PREVIOUS_STAGE_TO_MODEL; the
- *    six classifications older than the pipeline go through LEGACY_TO_STAGE
- *    first; a lost lead's reason comes from its frein (LOSS_REASON_BY_FREIN).
- *    Typologie and RDV are copied. Priority and invoice reference are left
- *    behind (D6).
+ *  - classifications → the conversation's dossier. Each of the 19 stages is a
+ *    fixed (Étape, Qualification) pair (STAGE_TO_PAIR, decisions D10 and
+ *    D12); the six classifications older than the pipeline go through
+ *    LEGACY_TO_STAGE first. Typologie and RDV date are copied; PAX, invoice
+ *    reference, priority, comment and the RDV place / agency / agent go to
+ *    the contact's "dossier" custom field (D11), the agency as its seed key
+ *    in the read-only partners library; the prospect phone to contacts.phone
+ *    when the contact has none.
  *  - conversation locks → locked_by / assigned_to.
+ *  - incoming calls → one conversation on platform "call" per number
+ *    ("appel-<digits>"), a contact found or created by that number, and its
+ *    dbo.call_log rows; their dossier, lock and frein as for the others.
+ *  - dispatches → the "dispatch" custom field of the customer's contact (D13).
  *  - the first ad a customer came from → dbo.campaigns + conversations.campaign_id.
  *  - Not copied (D3, D6): message context beyond that ad, extra attachments,
  *    attachment names, delivery status (only "read" survives), per-message
- *    sender names, email subject/HTML, partners, templates, dossier documents,
- *    and attachment URLs longer than 500 characters (Meta's, long expired).
+ *    sender names, email subject/HTML, partners and templates (read-only seed
+ *    files on SQL Server), dossier documents, and attachment URLs longer than
+ *    500 characters (Meta's, long expired).
  */
 
 "use strict";
@@ -55,12 +61,17 @@ require("dotenv").config({ path: path.join(root, ".env") });
 const { getPool, sql, closePool } = require(path.join(root, "server/db/sql"));
 const { ensureReferenceRows, refs } = require(path.join(root, "server/db/reference"));
 const {
-  PREVIOUS_STAGE_TO_MODEL,
-  LOSS_REASON_BY_FREIN,
+  STAGE_TO_PAIR,
   LEGACY_TO_STAGE,
-  DEFAULT_QUALIFICATION,
+  DEFAULT_STAGE,
+  isStage,
   isTypology,
 } = require(path.join(root, "server/constants/pipeline"));
+
+/** The Qualification every new lead starts with (its first history row). */
+const START_QUALIFICATION = STAGE_TO_PAIR[DEFAULT_STAGE][1];
+/** Closed dispatches kept per contact (server/db/dispatches.js). */
+const DISPATCH_CLOSED_KEPT = 50;
 
 const args = process.argv.slice(2);
 const argValue = (name) => {
@@ -162,12 +173,15 @@ async function main() {
   const r = refs();
 
   // Read everything but messages (those are streamed twice)
-  const [mUsers, mChannels, mContacts, mClassifications, mLocks] = await Promise.all([
+  const [mUsers, mChannels, mContacts, mClassifications, mLocks, mPartners, mCalls, mDispatches] = await Promise.all([
     mdb.collection("users").find({}).toArray(),
     mdb.collection("channels").find({}).toArray(),
     mdb.collection("contacts").find({}).toArray(),
     mdb.collection("classifications").find({}).toArray(),
     mdb.collection("conversationlocks").find({}).toArray(),
+    mdb.collection("partners").find({}).toArray(),
+    mdb.collection("incomingcalls").find({}).toArray(),
+    mdb.collection("dispatches").find({}).toArray(),
   ]);
 
   const own = new Set(
@@ -264,8 +278,14 @@ async function main() {
   };
   const newest = (a, b, field) => (!a || dateOf(b[field]) > dateOf(a[field]) ? b : a);
   const dossierOf = new Map(); // personKey -> classification doc
+  const callDossierOf = new Map(); // "appel-<digits>" -> classification doc
   for (const c of mClassifications) {
     const platform = platformOf(c.platform);
+    if (platform === "telephone" && c.conversationId) {
+      const k = String(c.conversationId);
+      callDossierOf.set(k, newest(callDossierOf.get(k), c, "updatedAt"));
+      continue;
+    }
     if (!PLATFORMS.has(platform) || !c.conversationId) continue;
     const person = personOfKey(platform, c.conversationId);
     if (!person || own.has(person) || person.length > 255) continue;
@@ -274,8 +294,14 @@ async function main() {
     personFor(platform, person); // a dossier without messages still gets its conversation
   }
   const lockOf = new Map();
+  const callLockOf = new Map(); // "appel-<digits>" -> lock doc
   for (const l of mLocks) {
     const platform = platformOf(l.platform);
+    if (platform === "telephone" && l.conversationId) {
+      const k = String(l.conversationId);
+      callLockOf.set(k, newest(callLockOf.get(k), l, "lockedAt"));
+      continue;
+    }
     if (!PLATFORMS.has(platform) || !l.conversationId) continue;
     const person = personOfKey(platform, l.conversationId);
     if (!person || own.has(person) || person.length > 255) continue;
@@ -414,6 +440,9 @@ async function main() {
     );
     const identityOwner = new Map(); // "<platform>:<ext>" -> contact record
     const contactRows = [];
+    const callFreins = new Map(); // "appel-<digits>" -> freins (contacts of phone leads)
+    const freinsIn = (custom) =>
+      [custom.leadFrein, ...(Array.isArray(custom.leadFreinHistory) ? custom.leadFreinHistory : [])].filter(Boolean);
     const usedPhones = new Set();
     const usedMailboxes = new Set();
     for (const c of contactsSorted) {
@@ -431,6 +460,13 @@ async function main() {
         identities.push({ platform, ext, i });
       }
       const custom = c.customFields && typeof c.customFields === "object" && !Array.isArray(c.customFields) ? c.customFields : {};
+      // A phone lead's frein sits on a contact whose identity is "telephone"
+      for (const i of c.platformIdentities || []) {
+        if (i && i.platform === "telephone" && i.externalId) {
+          const k = String(i.externalId);
+          callFreins.set(k, [...(callFreins.get(k) || []), ...freinsIn(custom)]);
+        }
+      }
       if (identities.length === 0 && mergedInto) {
         // A duplicate: its frein history joins the survivor's
         mergedInto.freins.push(...[custom.leadFrein, ...(Array.isArray(custom.leadFreinHistory) ? custom.leadFreinHistory : [])].filter(Boolean));
@@ -468,6 +504,129 @@ async function main() {
     for (const p of persons.values()) {
       if (!p.person || isThreadId(p.platform, p.person)) continue;
       if (!identityOwner.has(`${p.platform}:${p.person}`)) newContact(p.platform, p.person, p.name);
+    }
+
+    // ── Phone leads: one contact per number, shared with the WhatsApp contact
+    // of the same number when there is one (as db/contacts.js ensureByPhone)
+    const digitsOf = (v) => String(v || "").replace(/\D/g, "");
+    const byPhone = new Map(); // digits -> contact record
+    for (const rec of contactRows) {
+      const own = digitsOf(rec.c.phone);
+      if (own.length >= 6 && !byPhone.has(own)) byPhone.set(own, rec);
+      for (const { platform, ext } of rec.identities) {
+        if (platform === "whatsapp" && /^\+?\d{6,25}$/.test(ext) && !byPhone.has(digitsOf(ext))) byPhone.set(digitsOf(ext), rec);
+      }
+    }
+    const callLeads = []; // { call, customer, digits, rec }
+    const callOf = new Map(); // customer -> lead
+    for (const call of mCalls) {
+      const customer = fit(call.customerId, 255);
+      const digits = customer && /^appel-\d{6,25}$/.test(customer) ? customer.slice(6) : null;
+      if (!digits || callOf.has(customer)) {
+        count("incoming calls skipped (no number or duplicate)");
+        continue;
+      }
+      let rec = byPhone.get(digits);
+      if (!rec) {
+        rec = {
+          id: crypto.randomUUID(),
+          c: {
+            displayName: call.name || `+${digits}`,
+            phone: `+${digits}`,
+            email: call.email || null,
+            createdAt: call.createdAt,
+            updatedAt: call.updatedAt,
+            firstContactAt: call.firstCallAt,
+            lastContactAt: call.lastCallAt,
+          },
+          custom: {},
+          identities: [],
+          freins: [],
+        };
+        contactRows.push(rec);
+        byPhone.set(digits, rec);
+        count("contacts created for phone leads");
+      } else if (!rec.c.email && call.email) {
+        rec.c = { ...rec.c, email: call.email };
+      }
+      rec.freins.push(...(callFreins.get(customer) || []));
+      const lead = { call, customer, digits, rec };
+      callLeads.push(lead);
+      callOf.set(customer, lead);
+    }
+    const recordOf = (platform, customerId) =>
+      platform === "telephone"
+        ? callOf.get(String(customerId))?.rec || null
+        : identityOwner.get(`${platform}:${personOfKey(platform, customerId)}`) || null;
+
+    // ── Dossier extras (the "dossier" custom field) and the prospect phone
+    const seedKeyOf = new Map(mPartners.filter((p) => p.seedKey).map((p) => [String(p._id), String(p.seedKey)]));
+    const extrasOf = (d) => {
+      const comment = typeof d.comment === "string" ? d.comment.trim().slice(0, 1000) : "";
+      const agency = d.appointmentAgency ? String(d.appointmentAgency) : "";
+      if (agency && !seedKeyOf.has(agency)) count("RDV agencies kept by name only (not in the partners library)");
+      return {
+        invoiceRef: fit(d.invoiceRef, 60) || "",
+        pax: Number.isInteger(d.pax) && d.pax >= 1 && d.pax <= 999 ? d.pax : null,
+        isPriority: d.isPriority === true,
+        comment,
+        commentBy: comment && d.commentBy ? String(uid(d.commentBy) || "") || null : null,
+        commentAt: comment ? dateOf(d.commentAt)?.toISOString() || null : null,
+        appointmentPlace: fit(d.appointmentPlace, 60) || "",
+        appointmentAgencyId: agency ? seedKeyOf.get(agency) || "" : "",
+        appointmentAgencyName: fit(d.appointmentAgencyName, 200) || "",
+        appointmentAgent: fit(d.appointmentAgent, 120) || "",
+      };
+    };
+    const hasExtras = (x) =>
+      Boolean(x.invoiceRef || x.pax || x.isPriority || x.comment || x.appointmentPlace || x.appointmentAgencyId || x.appointmentAgencyName || x.appointmentAgent);
+    const attachDossier = (rec, d) => {
+      if (!rec || !d) return;
+      const at = dateOf(d.updatedAt, d.createdAt) || new Date(0);
+      const extras = extrasOf(d);
+      if (hasExtras(extras) && (!rec.dossier || at > rec.dossier.at)) rec.dossier = { extras, at };
+      const phone = fit(d.phone, 30);
+      if (phone && !rec.c.phone) rec.c = { ...rec.c, phone };
+    };
+    for (const [key, d] of dossierOf) {
+      const [platform, ...rest] = key.split(":");
+      attachDossier(identityOwner.get(`${platform}:${rest.join(":")}`), d);
+    }
+    for (const [customer, d] of callDossierOf) attachDossier(callOf.get(customer)?.rec, d);
+
+    // ── Dispatches (the "dispatch" custom field, server/db/dispatches.js)
+    const isoOf = (v) => dateOf(v)?.toISOString() || null;
+    const sortedDispatches = [...mDispatches].sort((a, b) => (dateOf(a.dispatchedAt) || 0) - (dateOf(b.dispatchedAt) || 0));
+    for (const d of sortedDispatches) {
+      const platform = platformOf(d.platform);
+      const customer = platform === "telephone" ? fit(d.customerId, 255) : personOfKey(platform, d.customerId);
+      const rec = customer ? recordOf(platform, customer) : null;
+      if (!rec) {
+        count("dispatches skipped (customer not found)");
+        continue;
+      }
+      rec.dispatch = rec.dispatch || { seq: 0, items: [] };
+      rec.dispatch.seq += 1;
+      rec.dispatch.items.push({
+        seq: rec.dispatch.seq,
+        platform,
+        customerId: customer,
+        agentId: String(uid(d.agent) || ""),
+        dispatchedById: String(uid(d.dispatchedBy) || ""),
+        dispatchedAt: isoOf(d.dispatchedAt) || isoOf(d.createdAt),
+        note: typeof d.note === "string" ? d.note.slice(0, 300) : "",
+        status: ["open", "done", "cancelled"].includes(d.status) ? d.status : "cancelled",
+        firstReplyAt: isoOf(d.firstReplyAt),
+        closedAt: isoOf(d.closedAt),
+        closedById: d.closedBy ? String(uid(d.closedBy) || "") || null : null,
+      });
+      count(`dispatches (${d.status})`);
+    }
+    for (const rec of contactRows) {
+      if (!rec.dispatch) continue;
+      const closed = rec.dispatch.items.filter((it) => it.status !== "open");
+      const drop = new Set(closed.slice(0, Math.max(0, closed.length - DISPATCH_CLOSED_KEPT)));
+      rec.dispatch.items = rec.dispatch.items.filter((it) => !drop.has(it));
     }
 
     const contactValues = [];
@@ -520,8 +679,13 @@ async function main() {
         fieldValues.push({ c: rec.id, k: "leadFreinHistory", v: JSON.stringify(history.slice(-20).map(remap)) });
         count("freins");
       }
+      if (rec.dossier) {
+        fieldValues.push({ c: rec.id, k: "dossier", v: JSON.stringify(rec.dossier.extras) });
+        count("dossier extras (PAX, comment, RDV place…)");
+      }
+      if (rec.dispatch) fieldValues.push({ c: rec.id, k: "dispatch", v: JSON.stringify(rec.dispatch) });
       for (const [k, v] of Object.entries(rec.custom)) {
-        if (k === "leadFrein" || k === "leadFreinHistory" || v === undefined || v === null) continue;
+        if (["leadFrein", "leadFreinHistory", "dossier", "dispatch"].includes(k) || v === undefined || v === null) continue;
         fieldValues.push({ c: rec.id, k: k.slice(0, 100), v: typeof v === "string" ? v : JSON.stringify(v) });
       }
       for (const tag of new Set((c.tags || []).map((t) => fit(t, 100)).filter(Boolean))) tagValues.push({ c: rec.id, t: tag });
@@ -583,6 +747,8 @@ async function main() {
     }
 
     // ── Conversations ────────────────────────────────────────────────────────
+    const stageOfDossier = (dossier, fallback) =>
+      isStage(dossier?.stage) ? dossier.stage : LEGACY_TO_STAGE[dossier?.classification] || fallback;
     const convRows = [];
     const usedExternal = new Set(); // "<platform>:<external_id>"
     for (const p of persons.values()) {
@@ -600,26 +766,14 @@ async function main() {
       const contact = customer ? identityOwner.get(`${p.platform}:${customer}`) : null;
       const identity = contact?.identities.find((x) => x.platform === p.platform && x.ext === customer)?.i;
 
-      // The 12-stage pipeline (or the six classifications before it) onto
-      // the scripts' Étape + Qualification; a lost lead's reason is its frein
-      let previous = dossier?.stage;
-      if (!PREVIOUS_STAGE_TO_MODEL[previous]) previous = LEGACY_TO_STAGE[dossier?.classification] || "nouveau_lead";
-      const [stage, mapped] = PREVIOUS_STAGE_TO_MODEL[previous];
-      let qualificationKey = mapped;
-      if (previous === "perdu") {
-        const lastFrein = (contact?.freins || [])
-          .filter((f) => f && f.code)
-          .sort((a, b) => (dateOf(a.setAt) || 0) - (dateOf(b.setAt) || 0))
-          .pop();
-        if (LOSS_REASON_BY_FREIN[lastFrein?.code]) {
-          qualificationKey = LOSS_REASON_BY_FREIN[lastFrein.code];
-          count("lost leads given their frein as loss reason");
-        }
-      }
-      if (dossier) count(`dossiers from stage ${previous}`);
+      // The stage (or the six classifications before the pipeline) as its
+      // fixed (Étape, Qualification) pair
+      const stage = stageOfDossier(dossier, DEFAULT_STAGE);
+      const [etapeKey, qualificationKey] = STAGE_TO_PAIR[stage];
+      if (dossier) count(`dossiers at stage ${stage}`);
       const typologie = isTypology(dossier?.typologie) ? dossier.typologie : "";
       const qualification = r.qualificationToId[qualificationKey];
-      const classification = r.stageToClassification[stage];
+      const classification = r.etapeToId[etapeKey];
       const created = dateOf(p.first, dossier?.createdAt, lock?.lockedAt) || new Date();
       const touched = dateOf(dossier?.updatedAt);
       const updated = [p.last, touched].filter(Boolean).reduce((a, b) => (b > a ? b : a), created);
@@ -628,7 +782,6 @@ async function main() {
       const lockedAt = lockedBy ? dateOf(lock.lockedAt, lock.createdAt) || created : null;
       const expires = lockedBy ? dateOf(lock.expiresAt) : null;
       const name = !isPlaceholderName(p.name, customer) ? p.name : !isPlaceholderName(identity?.name, customer) ? identity.name : customer && p.platform === "email" ? customer : "Unknown";
-      if (dossier && (dossier.isPriority || dossier.invoiceRef)) count("dossier fields left behind (priority / invoice ref)");
       convRows.push({
         key,
         p: p.platform, e: fit(external, 255), ch: await channelFor(p.platform), ct: contact?.id || null,
@@ -641,6 +794,36 @@ async function main() {
         qualificationKey, touched, createdAt: created,
       });
     }
+    // Phone leads: the conversation the app creates for a call
+    // (db/conversations.js ensureForCall), with the lead's dossier and lock
+    for (const lead of callLeads) {
+      const { call, customer, rec } = lead;
+      const dossier = callDossierOf.get(customer);
+      const lock = callLockOf.get(customer);
+      const stage = stageOfDossier(dossier, "contact_etabli");
+      const [etapeKey, qualificationKey] = STAGE_TO_PAIR[stage];
+      if (dossier) count(`dossiers at stage ${stage}`);
+      const typologie = isTypology(dossier?.typologie) ? dossier.typologie : "";
+      const created = dateOf(call.firstCallAt, call.createdAt) || new Date();
+      const touched = dateOf(dossier?.updatedAt) || created;
+      const updated = [dateOf(call.lastCallAt), touched].filter(Boolean).reduce((a, b) => (b > a ? b : a), created);
+      const rdv = dateOf(dossier?.appointmentAt);
+      const lockedBy = uid(lock?.lockedBy);
+      const lockedAt = lockedBy ? dateOf(lock.lockedAt, lock.createdAt) || created : null;
+      convRows.push({
+        key: `telephone:${customer}`,
+        p: "call", e: customer, ch: await channelFor("call"), ct: rec.id,
+        pn: fit(call.name, 255) || "Unknown", pa: null, px: customer,
+        cls: r.etapeToId[etapeKey], qual: r.qualificationToId[qualificationKey], mot: r.typologyToMotif[typologie], camp: null,
+        cb: uid(dossier?.classifiedBy) || uid(call.createdBy), cd: dPart(touched), ctm: tPart(touched),
+        rd: dPart(rdv), rt: tPart(rdv),
+        lb: lockedBy, ld: dPart(lockedAt), lt: tPart(lockedAt), ed: null, et: null,
+        crd: dPart(created), crt: tPart(created), upd: dPart(updated), upt: tPart(updated),
+        qualificationKey, touched, createdAt: created,
+      });
+      count("phone leads");
+    }
+
     const conversationId = new Map(); // personKey -> conversation_id
     await inBatches(convRows, async (rows) => {
       const inserted = await q(
@@ -673,7 +856,7 @@ async function main() {
     for (const row of convRows) {
       const id = conversationId.get(row.key);
       historyValues.push({ c: id, q: r.defaults.qualificationId, u: null, d: row.crd, t: row.crt });
-      if (row.qualificationKey !== DEFAULT_QUALIFICATION) {
+      if (row.qualificationKey !== START_QUALIFICATION) {
         const at = row.touched && row.touched > row.createdAt ? row.touched : new Date(row.createdAt.getTime() + 1000);
         historyValues.push({ c: id, q: row.qual, u: row.cb, d: dPart(at), t: tPart(at) });
       }
@@ -685,6 +868,37 @@ async function main() {
         { rows: json(rows) },
       ),
     );
+
+    // ── The calls of the phone leads (dbo.call_log) ──────────────────────────
+    // MongoDB kept the first and last call and a count: the first call is
+    // dated at firstCallAt, every later one at lastCallAt.
+    const callRows = [];
+    for (const { call, customer, digits } of callLeads) {
+      const convId = conversationId.get(`telephone:${customer}`);
+      if (!convId) continue;
+      const first = dateOf(call.firstCallAt, call.createdAt) || new Date();
+      const last = dateOf(call.lastCallAt) || first;
+      const n = Math.max(1, Number.isInteger(call.callCount) ? call.callCount : 1);
+      if (n > 2) count("calls dated at the lead's last call (their own date was not kept)", n - 2);
+      for (let i = 0; i < n; i += 1) {
+        const when = i === 0 ? first : last;
+        callRows.push({
+          ch: await channelFor("call"), c: convId, s: fit(call.phone, 30) || `+${digits}`.slice(0, 30),
+          ref: `MIG/${convId}-${i}`, d: dPart(when), t: tPart(when),
+        });
+      }
+    }
+    await inBatches(callRows, (rows) =>
+      q(
+        `INSERT dbo.call_log (channel_id, conversation_id, source_number, ring_group, destination_number, src_channel_ref,
+                              dst_channel_ref, cost_center, call_status, duration_seconds, direction, is_answered_flag,
+                              call_date, call_time, source_channel)
+         SELECT ch, c, s, NULL, N'agence', ref, NULL, NULL, N'ANSWERED', 0, N'inbound', 1, d, t, N'crm'
+         FROM OPENJSON(@rows) WITH (ch int, c int, s nvarchar(30), ref nvarchar(100), d date, t time(0))`,
+        { rows: json(rows) },
+      ),
+    );
+    count("phone calls", callRows.length);
 
     // ── Pass 2 over messages: the rows themselves, oldest first ──────────────
     const contactOfConversation = new Map(convRows.map((row) => [conversationId.get(row.key), row.ct]));
@@ -783,7 +997,7 @@ async function main() {
                       locks = (SELECT COUNT(*) FROM dbo.conversations WHERE locked_by_user_id IS NOT NULL),
                       campaigns = (SELECT COUNT(*) FROM dbo.campaigns)`)
     )[0];
-    console.log("\nMongoDB read:", JSON.stringify({ users: mUsers.length, channels: mChannels.length, contacts: mContacts.length, classifications: mClassifications.length, locks: mLocks.length }));
+    console.log("\nMongoDB read:", JSON.stringify({ users: mUsers.length, channels: mChannels.length, contacts: mContacts.length, classifications: mClassifications.length, locks: mLocks.length, incomingCalls: mCalls.length, dispatches: mDispatches.length, partners: mPartners.length }));
     console.log("Report:");
     for (const [k, v] of Object.entries(report).sort()) console.log(`  ${k}: ${v}`);
     console.log("SQL Server now holds:", JSON.stringify(check));

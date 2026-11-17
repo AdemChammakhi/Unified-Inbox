@@ -6,6 +6,7 @@
 #
 # Then (idempotent, rows and principals only, never schema):
 #  - the warehouse's unknown members and statuses (warehouse-rows.sql);
+#  - read access to UnifiedBoxDW for powerbi_reader (db_datareader);
 #  - with UNIFIEDBOX_APP_PASSWORD set, the backend's login unifiedbox_app
 #    (app-login.sql).
 #
@@ -46,6 +47,14 @@ done
 
 sqlcmd -i "${dir}/warehouse-rows.sql"
 echo "Warehouse unknown members and statuses ensured."
+
+# The script creates the user powerbi_reader but grants it nothing, so Power
+# BI would be refused every SELECT (decision D15). Read-only on the warehouse
+# only: a role membership, idempotent, no schema change.
+sqlcmd -Q "USE [UnifiedBoxDW];
+IF IS_ROLEMEMBER(N'db_datareader', N'powerbi_reader') = 0
+  ALTER ROLE [db_datareader] ADD MEMBER [powerbi_reader];"
+echo "powerbi_reader can read UnifiedBoxDW."
 
 if [ -n "${UNIFIEDBOX_APP_PASSWORD:-}" ]; then
   # Letters and digits only (it is written into a quoted SQL literal), and
