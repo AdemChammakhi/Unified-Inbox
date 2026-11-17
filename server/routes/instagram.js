@@ -7,6 +7,7 @@ const { noteDispatchReply } = require("../utils/dispatching");
 const { Contact } = require("../models");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
+const { retryOnDuplicateKey, bulkUpsert } = require("../utils/duplicateKey");
 const {
   parseGraphAttachments,
   messageTypeFor,
@@ -164,7 +165,9 @@ async function storeIgCrmSend({
   sentBy,
 }) {
   if (messageId) {
-    return Message.updateOne(
+    // Retried once if the echo inserts the same id at the same moment: the
+    // second pass then claims the echo's row.
+    return retryOnDuplicateKey(() => Message.updateOne(
       { externalId: messageId },
       {
         $set: {
@@ -186,7 +189,7 @@ async function storeIgCrmSend({
         },
       },
       { upsert: true },
-    );
+    ));
   }
   return Message.create({
     platform: "instagram",
@@ -535,7 +538,7 @@ async function fetchInstagramConversations(slim = false) {
 
   // Flush the DB sync as a single unordered bulk upsert (non-blocking)
   if (syncOps.length > 0) {
-    Message.bulkWrite(syncOps, { ordered: false }).catch((err) =>
+    bulkUpsert(Message, syncOps).catch((err) =>
       console.error("IG message sync error (non-fatal):", err.message),
     );
   }
@@ -972,7 +975,7 @@ router.get("/messages-paged", protect, async (req, res) => {
               };
             });
           if (pageSyncOps.length > 0) {
-            await Message.bulkWrite(pageSyncOps, { ordered: false });
+            await bulkUpsert(Message, pageSyncOps);
           }
       }
     };

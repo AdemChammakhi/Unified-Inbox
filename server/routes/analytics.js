@@ -5,6 +5,11 @@ const ConversationLock = require("../models/ConversationLock");
 const Classification = require("../models/Classification");
 const { protect, authorize } = require("../middleware/auth");
 
+// Every date range on Message filters `timestamp` (when the message was
+// sent), never `createdAt` (when the row was stored): opening an old thread
+// syncs its history from Graph today, and must not count it as today's
+// clients. Served by the "messages_analytics" index (models/Message.js).
+
 // GET /api/analytics/summary?range=7  (range: 1, 7, 30)
 router.get(
   "/summary",
@@ -29,39 +34,39 @@ router.get(
       ] = await Promise.all([
         // Distinct clients in range (1 per sender, not per message)
         Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: since } } },
+          { $match: { direction: "incoming", timestamp: { $gte: since } } },
           { $group: { _id: "$senderId" } },
           { $count: "count" },
         ]),
         // Distinct clients today
         Message.aggregate([
           {
-            $match: { direction: "incoming", createdAt: { $gte: todayStart } },
+            $match: { direction: "incoming", timestamp: { $gte: todayStart } },
           },
           { $group: { _id: "$senderId" } },
           { $count: "count" },
         ]),
         // Distinct clients this week
         Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: weekStart } } },
+          { $match: { direction: "incoming", timestamp: { $gte: weekStart } } },
           { $group: { _id: "$senderId" } },
           { $count: "count" },
         ]),
         // Distinct clients by platform
         Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: since } } },
+          { $match: { direction: "incoming", timestamp: { $gte: since } } },
           { $group: { _id: { platform: "$platform", senderId: "$senderId" } } },
           { $group: { _id: "$_id.platform", count: { $sum: 1 } } },
           { $sort: { count: -1 } },
         ]),
         // Daily series — distinct clients per day per platform
         Message.aggregate([
-          { $match: { direction: "incoming", createdAt: { $gte: since } } },
+          { $match: { direction: "incoming", timestamp: { $gte: since } } },
           {
             $group: {
               _id: {
                 date: {
-                  $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+                  $dateToString: { format: "%Y-%m-%d", date: "$timestamp" },
                 },
                 platform: "$platform",
                 senderId: "$senderId",
@@ -275,7 +280,7 @@ router.get("/ad-attribution", protect, async (req, res) => {
         $match: {
           direction: "incoming",
           context: { $ne: null },
-          createdAt: { $gte: since },
+          timestamp: { $gte: since },
         },
       },
       {
@@ -298,7 +303,7 @@ router.get("/ad-attribution", protect, async (req, res) => {
           platforms: { $addToSet: "$platform" },
           attributedMessages: { $sum: 1 },
           senders: { $addToSet: "$senderId" },
-          lastAt: { $max: "$createdAt" },
+          lastAt: { $max: "$timestamp" },
         },
       },
       { $match: { _id: { $ne: null } } },
@@ -316,7 +321,7 @@ router.get("/ad-attribution", protect, async (req, res) => {
           $match: {
             direction: "incoming",
             senderId: { $in: allSenders },
-            createdAt: { $gte: since },
+            timestamp: { $gte: since },
           },
         },
         { $group: { _id: "$senderId", count: { $sum: 1 } } },
@@ -368,34 +373,41 @@ router.get("/marketing-summary", protect, async (req, res) => {
     ] = await Promise.all([
       // Distinct clients in selected range
       Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: since } } },
+        { $match: { direction: "incoming", timestamp: { $gte: since } } },
         { $group: { _id: "$senderId" } },
         { $count: "count" },
       ]),
       // Distinct clients today
       Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: todayStart } } },
+        { $match: { direction: "incoming", timestamp: { $gte: todayStart } } },
         { $group: { _id: "$senderId" } },
         { $count: "count" },
       ]),
       // Distinct clients this week
       Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: weekStart } } },
+        { $match: { direction: "incoming", timestamp: { $gte: weekStart } } },
         { $group: { _id: "$senderId" } },
         { $count: "count" },
       ]),
       // Distinct clients by platform in selected range
       Message.aggregate([
-        { $match: { direction: "incoming", createdAt: { $gte: since } } },
+        { $match: { direction: "incoming", timestamp: { $gte: since } } },
         { $group: { _id: { platform: "$platform", senderId: "$senderId" } } },
         { $group: { _id: "$_id.platform", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       Message.find({ direction: "incoming" })
-        .sort({ createdAt: -1 })
+        .sort({ timestamp: -1 })
         .limit(5)
-        .select("platform senderName content createdAt"),
+        .select("platform senderName content timestamp createdAt")
+        .lean(),
     ]);
+    // The dashboard reads `createdAt`; give it the time the message was
+    // sent, not when a sync happened to store it.
+    for (const m of recentMessages) {
+      m.createdAt = m.timestamp || m.createdAt;
+      delete m.timestamp;
+    }
 
     const rangeCount = rangeCountRes[0]?.count || 0;
     const todayCount = todayCountRes[0]?.count || 0;
