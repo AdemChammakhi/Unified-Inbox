@@ -1,27 +1,23 @@
 import React, { useEffect, useState } from "react";
-import { CalendarDays, X } from "lucide-react";
+import { Star, CalendarDays, FileText } from "lucide-react";
 import { TYPOLOGIES } from "../constants/pipeline";
+import DossierDocuments from "./DossierDocuments";
+import RdvForm from "./RdvForm";
 
 /**
- * DossierPanel — the customer's file, beyond the étape and the
- * qualification (both set from the conversation header): typologie of the
- * request and RDV date. Every field saves on its own; the parent persists
- * through PUT /api/classifications and passes the stored values back as
- * `dossier`.
+ * DossierPanel — the customer's file, beyond the pipeline stage: typologie
+ * of the request, priority flag, the appointment (RdvForm), invoice
+ * reference and attached documents. Every field saves on its own; the
+ * parent persists through PUT /api/classifications and passes the stored
+ * values back as `dossier`.
  *
  * Props:
- *   dossier    { stage, qualification, typologie, appointmentAt } | undefined
+ *   dossier    { typologie, isPriority, invoiceRef, appointmentAt,
+ *                appointmentPlace, appointmentAgencyId, appointmentAgent }
  *   onSave     (patch) => Promise   — patch holds only the changed field(s)
+ *   platform, customerId            — for the documents list
  *   canEdit    boolean
  */
-
-const toLocalInput = (value) => {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
 
 const formatRdv = (value) => {
   if (!value) return "";
@@ -36,15 +32,25 @@ const formatRdv = (value) => {
   });
 };
 
-const DossierPanel = ({ dossier, onSave, canEdit = true }) => {
+const DossierPanel = ({ dossier, onSave, platform, customerId, canEdit = true }) => {
   const d = dossier || {};
-  const [rdv, setRdv] = useState(toLocalInput(d.appointmentAt));
+  const [invoice, setInvoice] = useState(d.invoiceRef || "");
+  const [phone, setPhone] = useState(d.phone || "");
+  const storedPax = Number.isInteger(d.pax) ? String(d.pax) : "";
+  const [pax, setPax] = useState(storedPax);
   const [saving, setSaving] = useState("");
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    setRdv(toLocalInput(d.appointmentAt));
-  }, [d.appointmentAt]);
+    setPax(storedPax);
+  }, [storedPax]);
+
+  useEffect(() => {
+    setInvoice(d.invoiceRef || "");
+  }, [d.invoiceRef]);
+  useEffect(() => {
+    setPhone(d.phone || "");
+  }, [d.phone]);
 
   const save = async (field, patch) => {
     setSaving(field);
@@ -78,49 +84,135 @@ const DossierPanel = ({ dossier, onSave, canEdit = true }) => {
           </select>
         </label>
 
+        {/* Number of travellers the request is for */}
         <label style={styles.field}>
-          <span style={styles.label}>
-            <CalendarDays size={12} /> Rendez-vous
-          </span>
+          <span style={styles.label}>Nombre de PAX</span>
           <span style={styles.inline}>
             <input
-              type="datetime-local"
-              style={{ ...styles.input, flex: 1, colorScheme: "dark light" }}
-              value={rdv}
-              disabled={!canEdit || busy("appointmentAt")}
-              onChange={(e) => setRdv(e.target.value)}
+              style={{ ...styles.input, flex: 1 }}
+              type="number"
+              min={1}
+              max={999}
+              value={pax}
+              placeholder="ex. 4"
+              disabled={!canEdit || busy("pax")}
+              onChange={(e) => setPax(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save("pax", { pax: pax.trim() === "" ? null : Number(pax) });
+              }}
             />
-            {canEdit && rdv && rdv !== toLocalInput(d.appointmentAt) && (
+            {canEdit && pax.trim() !== storedPax && (
               <button
                 className="inbox-send-action"
                 style={styles.smallBtn}
-                disabled={busy("appointmentAt")}
-                onClick={() =>
-                  save("appointmentAt", { appointmentAt: new Date(rdv).toISOString() })
-                }
+                disabled={busy("pax")}
+                onClick={() => save("pax", { pax: pax.trim() === "" ? null : Number(pax) })}
               >
-                Confirmer
-              </button>
-            )}
-            {canEdit && d.appointmentAt && (
-              <button
-                className="inbox-tab-btn"
-                style={styles.iconBtn}
-                title="Retirer le rendez-vous"
-                disabled={busy("appointmentAt")}
-                onClick={() => save("appointmentAt", { appointmentAt: null })}
-              >
-                <X size={13} />
+                {busy("pax") ? "…" : "Enregistrer"}
               </button>
             )}
           </span>
-          {d.appointmentAt && (
-            <span style={styles.hint}>Fixé le {formatRdv(d.appointmentAt)}</span>
-          )}
+        </label>
+
+        <label style={styles.field}>
+          <span style={styles.label}>Référence de facture</span>
+          <span style={styles.inline}>
+            <input
+              style={{ ...styles.input, flex: 1 }}
+              value={invoice}
+              maxLength={60}
+              placeholder="ex. F-2026-0142"
+              disabled={!canEdit || busy("invoiceRef")}
+              onChange={(e) => setInvoice(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save("invoiceRef", { invoiceRef: invoice.trim() });
+              }}
+            />
+            {canEdit && invoice.trim() !== (d.invoiceRef || "") && (
+              <button
+                className="inbox-send-action"
+                style={styles.smallBtn}
+                disabled={busy("invoiceRef")}
+                onClick={() => save("invoiceRef", { invoiceRef: invoice.trim() })}
+              >
+                {busy("invoiceRef") ? "…" : "Enregistrer"}
+              </button>
+            )}
+          </span>
+        </label>
+
+        {/* The prospect's number, recorded from the conversation: WhatsApp
+            leads already are their number, the other platforms have none */}
+        <label style={styles.field}>
+          <span style={styles.label}>Téléphone</span>
+          <span style={styles.inline}>
+            <input
+              style={{ ...styles.input, flex: 1 }}
+              type="tel"
+              value={phone}
+              maxLength={30}
+              placeholder={
+                platform === "whatsapp" && customerId
+                  ? `+${customerId} (WhatsApp)`
+                  : "ex. +216 98 000 000"
+              }
+              disabled={!canEdit || busy("phone")}
+              onChange={(e) => setPhone(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") save("phone", { phone: phone.trim() });
+              }}
+            />
+            {canEdit && phone.trim() !== (d.phone || "") && (
+              <button
+                className="inbox-send-action"
+                style={styles.smallBtn}
+                disabled={busy("phone")}
+                onClick={() => save("phone", { phone: phone.trim() })}
+              >
+                {busy("phone") ? "…" : "Enregistrer"}
+              </button>
+            )}
+          </span>
+        </label>
+
+        <label style={{ ...styles.field, justifyContent: "flex-end" }}>
+          <span style={styles.label}>Priorité</span>
+          <button
+            type="button"
+            className="inbox-tab-btn"
+            style={{
+              ...styles.toggle,
+              ...(d.isPriority ? styles.toggleOn : {}),
+            }}
+            disabled={!canEdit || busy("isPriority")}
+            onClick={() => save("isPriority", { isPriority: !d.isPriority })}
+            aria-pressed={Boolean(d.isPriority)}
+          >
+            <Star size={13} fill={d.isPriority ? "currentColor" : "none"} />
+            {d.isPriority ? "Dossier prioritaire" : "Marquer prioritaire"}
+          </button>
         </label>
       </div>
 
       {error && <div style={styles.error} role="alert">{error}</div>}
+
+      {/* The appointment: date, place, agency and agent, saved together */}
+      <div style={styles.rdv}>
+        <div style={styles.label}>
+          <CalendarDays size={12} /> Rendez-vous
+          {d.appointmentAt && (
+            <span style={styles.rdvHint}>· fixé le {formatRdv(d.appointmentAt)}</span>
+          )}
+        </div>
+        <RdvForm dossier={d} onSave={onSave} canEdit={canEdit} />
+      </div>
+
+      <div style={styles.docs}>
+        <div style={styles.label}>
+          <FileText size={12} /> Pièces jointes du dossier
+        </div>
+        <DossierDocuments platform={platform} customerId={customerId} compact />
+      </div>
     </div>
   );
 };
@@ -181,10 +273,43 @@ const styles = {
     display: "inline-flex",
   },
   hint: { fontSize: 11, color: "var(--text-muted)" },
+  rdv: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    paddingTop: 10,
+    borderTop: "1px solid var(--border-primary)",
+  },
+  rdvHint: {
+    fontSize: 11,
+    fontWeight: 500,
+    textTransform: "none",
+    letterSpacing: 0,
+    color: "var(--text-muted)",
+  },
+  toggle: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "7px 11px",
+    borderRadius: 8,
+    border: "1px solid var(--border-primary)",
+    backgroundColor: "transparent",
+    color: "var(--text-muted)",
+    fontSize: 12.5,
+    cursor: "pointer",
+  },
+  toggleOn: {
+    color: "#E3A63C",
+    borderColor: "#E3A63C88",
+    backgroundColor: "#E3A63C1a",
+    fontWeight: 700,
+  },
   error: {
     fontSize: 12,
     color: "var(--danger)",
   },
+  docs: { display: "flex", flexDirection: "column", gap: 6 },
 };
 
 export default DossierPanel;

@@ -29,9 +29,11 @@ const io = new Server(server, {
 app.set("io", io);
 
 const jwt = require("jsonwebtoken");
+const users = require("./db/users");
 
-// Authenticate Socket.IO connections
-io.use((socket, next) => {
+// Authenticate Socket.IO connections. Like `protect`, the account must still
+// exist and be active — a disabled user's live feed stops at reconnect.
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) {
     console.warn("[Socket] Authentication failed: Token missing");
@@ -45,6 +47,11 @@ io.use((socket, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const account = await users.findById(decoded.id);
+    if (!account || account.isActive === false) {
+      console.warn("[Socket] Authentication failed: account missing or disabled");
+      return next(new Error("Authentication error: Account disabled"));
+    }
     socket.user = decoded;
     next();
   } catch (err) {
@@ -57,9 +64,15 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
+  // Each socket sits in its own user's room, taken from the verified token.
+  // The client still emits "join" with its id; any other id is refused, so
+  // no one can listen in on another user's room.
+  const ownRoom = String(socket.user.id);
+  socket.join(ownRoom);
   socket.on("join", (userId) => {
-    socket.join(userId);
-    console.log(`User ${userId} joined room`);
+    if (String(userId) !== ownRoom) {
+      console.warn(`[Socket] Refused join of room ${userId} by user ${ownRoom}`);
+    }
   });
 
   socket.on("disconnect", () => {
@@ -119,6 +132,11 @@ app.use(
   require("./routes/support"),
 );
 
+// The Leads view export sends the keys of every row on screen: 90 days or
+// the whole history is several thousand keys, past the 100KB default. Same
+// pattern as above, for that one route only.
+app.use("/api/leads/export", express.json({ limit: "1mb" }));
+
 app.use(
   express.json({
     // Keep the raw body so webhook routes can verify Meta's
@@ -159,6 +177,7 @@ app.use("/api/whatsapp", apiLimiter, require("./routes/whatsapp"));
 app.use("/api/email", apiLimiter, require("./routes/email"));
 app.use("/api/classifications", apiLimiter, require("./routes/classifications"));
 app.use("/api/locks", apiLimiter, require("./routes/locks"));
+app.use("/api/dispatch", apiLimiter, require("./routes/dispatch"));
 app.use("/api/conversations", apiLimiter, require("./routes/conversations"));
 app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
 app.use("/api/exports", exportLimiter, require("./routes/exports"));

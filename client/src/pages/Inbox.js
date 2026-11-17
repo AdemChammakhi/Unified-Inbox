@@ -18,23 +18,24 @@ import { useAuth } from "../context/AuthContext";
 import { Search, RefreshCw, Send, Paperclip } from "lucide-react";
 import PlatformIcon from "../components/PlatformIcon";
 import EmailBody from "../components/EmailBody";
-import MaturityChip from "../components/MaturityChip";
+import MaturityChip, { AwaitingReplyBadge } from "../components/MaturityChip";
 import FreinSelector from "../components/FreinSelector";
+import DispatchControl from "../components/DispatchControl";
+import { useDispatches } from "../hooks/useDispatches";
+import CommentField from "../components/CommentField";
+import RdvForm from "../components/RdvForm";
 import DossierPanel from "../components/DossierPanel";
+import TemplatesPanel from "../components/TemplatesPanel";
 import {
   STAGES,
   STAGE_LABELS,
   STAGE_COLORS,
   DEFAULT_STAGE,
-  QUALIFICATIONS,
-  DEFAULT_QUALIFICATION,
-  qualificationColor,
-  qualificationLabel,
   TYPOLOGIES,
   TYPOLOGY_LABELS,
 } from "../constants/pipeline";
-import { useLeadInsights } from "../hooks/useLeadInsights";
-import { SORT_MODES, MATURITY_RANK } from "../constants/leadQualification";
+import { useLeadInsights, customerIdOf } from "../hooks/useLeadInsights";
+import { SORT_MODES, maturitySortRank } from "../constants/leadQualification";
 
 // Conversation list ordering, remembered per browser.
 const SORT_STORAGE_KEY = "inbox.sortMode";
@@ -81,6 +82,29 @@ const formatAppointment = (value) => {
   });
 };
 
+/**
+ * Size the composer to its content, up to COMPOSER_MAX. scrollHeight leaves
+ * the borders out, so they are added back: without them the field is two
+ * pixels short and shows a scrollbar on a single line. The scrollbar only
+ * appears once the text outgrows the cap.
+ */
+const COMPOSER_MAX = 160;
+const fitComposer = (el) => {
+  if (!el) return;
+  // Empty is one line, whatever the width: Chrome counts a wrapped
+  // placeholder in scrollHeight, and the column may still be laying out.
+  if (!el.value) {
+    el.style.height = "";
+    el.style.overflowY = "hidden";
+    return;
+  }
+  el.style.height = "auto";
+  const borders = el.offsetHeight - el.clientHeight;
+  const wanted = el.scrollHeight + borders;
+  el.style.height = `${Math.min(wanted, COMPOSER_MAX)}px`;
+  el.style.overflowY = wanted > COMPOSER_MAX ? "auto" : "hidden";
+};
+
 /** Value for <input type="datetime-local">, which needs local time, no zone. */
 const toLocalInputValue = (value) => {
   const d = value ? new Date(value) : new Date();
@@ -103,9 +127,15 @@ const lookupBy = (map, conv) => {
   return pid ? map[pid] : undefined;
 };
 
-/** Qualification of a conversation; no dossier yet reads as the default. */
-const qualificationOf = (dossiers, conv) =>
-  lookupBy(dossiers, conv)?.qualification || DEFAULT_QUALIFICATION;
+// Labels for the "replying to…" context card (ads, posts, stories)
+const CONTEXT_KIND_LABELS = {
+  ad: "Replied to your ad",
+  post: "Replied to your post",
+  story_reply: "Replied to your story",
+  share: "Shared a post",
+  story_mention: "Mentioned you in a story",
+  referral: "Came from a link",
+};
 
 // WhatsApp media is served through our authenticated proxy; <img>/<video>
 // tags can't send headers, so the JWT rides along as a query param.
@@ -132,24 +162,35 @@ const Inbox = () => {
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [classifications, setClassifications] = useState({});
   const [appointments, setAppointments] = useState({});
-  // customerId -> { stage, qualification, typologie, appointmentAt }
+  // customerId -> { stage, typologie, invoiceRef, isPriority, appointmentAt }
   const [dossiers, setDossiers] = useState({});
   const [dossierOpen, setDossierOpen] = useState(false);
+  // Canned replies beside the discussion; stays open across conversations.
+  const [templatesOpen, setTemplatesOpen] = useState(false);
   const replyFieldRef = useRef(null);
 
-  // Grow the composer with its content, and shrink it back after a send
-  // (clearing the text fires no change event).
+  // Grow the composer with its content (templates arrive without a change
+  // event) and shrink it back after a send.
+  // Also on selection (the field only exists once a conversation is open)
+  // and when the templates column changes the width; measured again on the
+  // next frame, once that layout has settled.
   useEffect(() => {
-    const el = replyFieldRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-  }, [replyText]);
+    fitComposer(replyFieldRef.current);
+    const frame = requestAnimationFrame(() =>
+      fitComposer(replyFieldRef.current),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [replyText, selectedConv?.id, activeTab, templatesOpen]);
+
+  // The wrapping depends on the width, so follow the window too.
+  useEffect(() => {
+    const onResize = () => fitComposer(replyFieldRef.current);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   // { conversationId, value } while the agent is picking an RDV date
   const [rdvDraft, setRdvDraft] = useState(null);
   const [classFilter, setClassFilter] = useState("all");
-  // "all" | a qualification key
-  const [qualificationFilter, setQualificationFilter] = useState("all");
   // "all" | "none" (not yet recorded) | a typologie key
   const [typologyFilter, setTypologyFilter] = useState("all");
   const [sortMode, setSortMode] = useState(readSortMode);
@@ -298,6 +339,19 @@ const Inbox = () => {
     conversations: recentConversations,
     token: user?.token,
   });
+  // Discussions an admin handed out: mine are pinned at the top of the
+  // list until marked as done; staff also see who holds what.
+  const isStaff = user?.role === "admin" || user?.role === "manager";
+  const {
+    counts: dispatchCounts,
+    loadByAgent: dispatchLoad,
+    getMine: getMyDispatch,
+    getOpen: getOpenDispatch,
+    dispatch: dispatchTo,
+    markDone: markDispatchDone,
+    reassign: reassignDispatch,
+    cancel: cancelDispatch,
+  } = useDispatches({ token: user?.token, role: user?.role });
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -406,6 +460,7 @@ const Inbox = () => {
                 fromId: message.fromId || data.senderId,
                 time: message.time,
                 attachments: message.attachments || [],
+                context: message.context || null,
               },
             ],
             _fromSocket: true,
@@ -454,6 +509,7 @@ const Inbox = () => {
                 fromId: message.fromId,
                 time: message.time,
                 attachments: message.attachments || [],
+                context: message.context || null,
               };
               const existingIdx = (prev.messages || []).findIndex(
                 (m) => m.id === message.id,
@@ -524,6 +580,7 @@ const Inbox = () => {
                     fromId: message.fromId,
                     time: message.time,
                     attachments: message.attachments || [],
+                    context: message.context || null,
                   },
                 ],
               };
@@ -628,6 +685,12 @@ const Inbox = () => {
       }
     });
 
+    // A dispatch made, closed or moved anywhere (Leads, the admin
+    // dashboard, another admin's inbox): refresh the pinned rows and badges
+    socket.on("dispatch:changed", () => {
+      queryClient.invalidateQueries({ queryKey: ["dispatch"] });
+    });
+
     // Listen for reactions
     socket.on("messageReaction", (data) => {
       console.log("Message reaction:", data);
@@ -696,9 +759,9 @@ const Inbox = () => {
   }, [activeTab, user?.token, logout, navigate]);
 
   // Save one or more dossier fields for a conversation. `patch` holds any of
-  // { stage (code), qualification (code), typologie, appointmentAt (ISO
-  // string, or null to clear) }. The header selects, the RDV bar and the
-  // DossierPanel all go through here.
+  // { classification (stage code), typologie, invoiceRef, isPriority,
+  // appointmentAt (ISO string, or null to clear) }. The stage select, the RDV
+  // bar and the DossierPanel all go through here.
   const updateClassification = async (conversationId, patch) => {
     const conv =
       selectedConvRef.current?.id === conversationId
@@ -740,9 +803,9 @@ const Inbox = () => {
         return next;
       });
       setRdvDraft(null);
-      // Maturity reads the stage, the qualification and the RDV: the server
-      // already dropped its cached insights, so refetch the chip and the
-      // maturity sort now rather than at the next 60 s poll.
+      // Maturity reads the classification (Hors cible, Priorité, RDV): the
+      // server already dropped its cached insights, so refetch the chip and
+      // the maturity sort now rather than at the next 60 s poll.
       queryClient.invalidateQueries({ queryKey: ["leadInsights", activeTab] });
     } catch (error) {
       console.error("Failed to update classification:", error.message);
@@ -760,11 +823,6 @@ const Inbox = () => {
         const cls = lookupBy(classifications, conv) || DEFAULT_STAGE;
         return cls === classFilter;
       });
-    }
-    if (qualificationFilter !== "all") {
-      filtered = filtered.filter(
-        (conv) => qualificationOf(dossiers, conv) === qualificationFilter,
-      );
     }
     if (typologyFilter !== "all") {
       const wanted = typologyFilter === "none" ? "" : typologyFilter;
@@ -796,8 +854,25 @@ const Inbox = () => {
     // that, and the recency position is the final tie-breaker. Conversations
     // without insights (still loading, or beyond the first 200) keep their
     // recency order at the end of their group.
+    // Discussions dispatched to me come first, oldest dispatch first,
+    // whatever the sort: they stay there until marked as done.
+    const pinDispatched = (list) => {
+      const pinned = [];
+      const rest = [];
+      list.forEach((conv, index) => {
+        const d = getMyDispatch(conv, activeTab);
+        if (d) {
+          pinned.push({ conv, index, at: new Date(d.dispatchedAt).getTime() || 0 });
+        } else {
+          rest.push(conv);
+        }
+      });
+      if (pinned.length === 0) return list;
+      pinned.sort((a, b) => a.at - b.at || a.index - b.index);
+      return [...pinned.map((x) => x.conv), ...rest];
+    };
     if (sortMode === DEFAULT_SORT || !SORT_KEYS.has(sortMode)) {
-      return [...filtered];
+      return pinDispatched([...filtered]);
     }
     const byMaturity = sortMode === "maturity";
     const decorated = filtered.map((conv, index) => {
@@ -806,9 +881,8 @@ const Inbox = () => {
         conv,
         index,
         insight,
-        rank: byMaturity
-          ? (MATURITY_RANK[insight?.maturity?.level] ?? 3)
-          : 0,
+        // Prospects waiting for an answer first, then hottest first
+        rank: byMaturity ? maturitySortRank(insight?.maturity) : 0,
         received: Number(insight?.messagesIn) || 0,
       };
     });
@@ -818,17 +892,18 @@ const Inbox = () => {
       if (a.received !== b.received) return b.received - a.received;
       return a.index - b.index;
     });
-    return decorated.map((d) => d.conv);
+    return pinDispatched(decorated.map((d) => d.conv));
   }, [
     recentConversations,
     classifications,
     classFilter,
     dossiers,
-    qualificationFilter,
     typologyFilter,
     searchDebounced,
     sortMode,
     getInsight,
+    getMyDispatch,
+    activeTab,
   ]);
 
   // When React Query refreshes conversations, sync selectedConv so header/preview stay current
@@ -1286,8 +1361,6 @@ const Inbox = () => {
     }
   };
 
-  // Qualification of the open conversation, for its header select
-  const selectedQualification = qualificationOf(dossiers, selectedConv);
   // Insights of the open conversation, and the frein save bound to it
   const selectedInsight = selectedConv ? getInsight(selectedConv) : null;
   const saveSelectedFrein = (code, note) => saveFrein(selectedConv, code, note);
@@ -1295,7 +1368,7 @@ const Inbox = () => {
   // qualify a conversation assigned to a colleague (admins and managers can).
   const selectedLock = selectedConv ? lookupBy(locks, selectedConv) : null;
   const freinLockedTo =
-    user?.role === "agent" &&
+    user?.role === "marketing" &&
     selectedLock &&
     selectedLock.agentId !== user?._id
       ? selectedLock.agentName || "un autre agent"
@@ -1352,6 +1425,14 @@ const Inbox = () => {
                 {unreadCounts[p.key] > 0 && (
                   <span style={styles.unreadBadge}>{unreadCounts[p.key]}</span>
                 )}
+                {dispatchCounts[p.key] > 0 && (
+                  <span
+                    style={styles.dispatchTabBadge}
+                    title={`${dispatchCounts[p.key]} discussion${dispatchCounts[p.key] > 1 ? "s" : ""} à traiter`}
+                  >
+                    📌 {dispatchCounts[p.key]}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -1407,73 +1488,48 @@ const Inbox = () => {
               </select>
             </div>
 
-            {/* Étape, qualification and typologie filters — selects rather
-                than rows of pills. Each label wraps with its select. */}
+            {/* Pipeline stage filter — twelve stages, so a select rather
+                than a row of pills */}
             <div style={styles.classFilterBar}>
-              <label style={styles.filterGroup}>
-                <span style={styles.sortLabel}>Étape :</span>
-                <select
-                  className="inbox-class-dropdown"
-                  value={classFilter}
-                  onChange={(e) => setClassFilter(e.target.value)}
-                  style={{
-                    ...styles.classSelect,
-                    flex: 1,
-                    color:
-                      classFilter === "all"
-                        ? "var(--text-primary)"
-                        : CLASSIFICATION_COLORS[classFilter],
-                  }}
-                >
-                  <option value="all">Toutes les étapes</option>
-                  {STAGES.map((s) => (
-                    <option key={s.key} value={s.key}>{s.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={styles.filterGroup}>
-                <span style={styles.sortLabel}>Qualification :</span>
-                <select
-                  className="inbox-class-dropdown"
-                  value={qualificationFilter}
-                  onChange={(e) => setQualificationFilter(e.target.value)}
-                  style={{
-                    ...styles.classSelect,
-                    flex: 1,
-                    color:
-                      qualificationFilter === "all"
-                        ? "var(--text-primary)"
-                        : qualificationColor(qualificationFilter),
-                  }}
-                >
-                  <option value="all">Toutes les qualifications</option>
-                  {QUALIFICATIONS.map((q) => (
-                    <option key={q.key} value={q.key}>{q.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={styles.filterGroup}>
-                <span style={styles.sortLabel}>Typologie :</span>
-                <select
-                  className="inbox-class-dropdown"
-                  value={typologyFilter}
-                  onChange={(e) => setTypologyFilter(e.target.value)}
-                  style={{
-                    ...styles.classSelect,
-                    flex: 1,
-                    color:
-                      typologyFilter === "all"
-                        ? "var(--text-primary)"
-                        : "var(--accent)",
-                  }}
-                >
-                  <option value="all">Toutes les typologies</option>
-                  <option value="none">Non renseignée</option>
-                  {TYPOLOGIES.map((t) => (
-                    <option key={t.key} value={t.key}>{t.label}</option>
-                  ))}
-                </select>
-              </label>
+              <span style={styles.sortLabel}>Étape :</span>
+              <select
+                className="inbox-class-dropdown"
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                style={{
+                  ...styles.classSelect,
+                  flex: 1,
+                  color:
+                    classFilter === "all"
+                      ? "var(--text-primary)"
+                      : CLASSIFICATION_COLORS[classFilter],
+                }}
+              >
+                <option value="all">Toutes les étapes</option>
+                {STAGES.map((s) => (
+                  <option key={s.key} value={s.key}>{s.label}</option>
+                ))}
+              </select>
+              <span style={styles.sortLabel}>Typologie :</span>
+              <select
+                className="inbox-class-dropdown"
+                value={typologyFilter}
+                onChange={(e) => setTypologyFilter(e.target.value)}
+                style={{
+                  ...styles.classSelect,
+                  flex: 1,
+                  color:
+                    typologyFilter === "all"
+                      ? "var(--text-primary)"
+                      : "var(--accent)",
+                }}
+              >
+                <option value="all">Toutes les typologies</option>
+                <option value="none">Non renseignée</option>
+                {TYPOLOGIES.map((t) => (
+                  <option key={t.key} value={t.key}>{t.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Conversation Items */}
@@ -1536,8 +1592,6 @@ const Inbox = () => {
               ) : (
                 sortedConversations.map((conv, index) => {
                   const cls = lookupBy(classifications, conv) || DEFAULT_STAGE;
-                  const qual = qualificationOf(dossiers, conv);
-                  const qualColor = qualificationColor(qual);
                   const isSelected = selectedConv?.id === conv.id;
                   const isUnread = unreadConvIds.has(conv.id);
                   const insight = getInsight(conv);
@@ -1647,14 +1701,41 @@ const Inbox = () => {
                             {conv.participants?.map((p) => p.name).join(", ") ||
                               "Unknown"}
                           </strong>
-                          {lookupBy(locks, conv) && (
-                            <span
-                              style={styles.lockBadge}
-                              title={`Assigned to ${lookupBy(locks, conv).agentName}`}
-                            >
-                              🔒 {lookupBy(locks, conv).agentName?.split(" ")[0]}
-                            </span>
-                          )}
+                          {(() => {
+                            // Dispatched to me: "À traiter"; to someone
+                            // else (staff view): their name; else the lock
+                            const mineD = getMyDispatch(conv, activeTab);
+                            if (mineD) {
+                              return (
+                                <span
+                                  style={styles.dispatchBadge}
+                                  title={`Dispatché par ${mineD.dispatchedByName || "?"}${mineD.note ? ` — ${mineD.note}` : ""}`}
+                                >
+                                  📌 À traiter
+                                </span>
+                              );
+                            }
+                            const openD = isStaff ? getOpenDispatch(conv, activeTab) : null;
+                            if (openD) {
+                              return (
+                                <span
+                                  style={styles.lockBadge}
+                                  title={`Dispatché à ${openD.agentName || "?"} par ${openD.dispatchedByName || "?"}${openD.note ? ` — ${openD.note}` : ""}`}
+                                >
+                                  📌 {openD.agentName?.split(" ")[0]}
+                                </span>
+                              );
+                            }
+                            const lk = lookupBy(locks, conv);
+                            return lk ? (
+                              <span
+                                style={styles.lockBadge}
+                                title={`Assigned to ${lk.agentName}`}
+                              >
+                                🔒 {lk.agentName?.split(" ")[0]}
+                              </span>
+                            ) : null;
+                          })()}
                           <span
                             title={CLASSIFICATION_LABELS[cls]}
                             style={{
@@ -1669,25 +1750,9 @@ const Inbox = () => {
                             }}
                           />
                         </div>
-                        {(qual !== DEFAULT_QUALIFICATION ||
-                          lookupBy(dossiers, conv)?.typologie ||
+                        {(lookupBy(dossiers, conv)?.typologie ||
                           lookupBy(appointments, conv)) && (
                           <div style={styles.rowTags}>
-                            {/* Qualification, once the lead has moved on
-                                from "Nouveau lead" */}
-                            {qual !== DEFAULT_QUALIFICATION && (
-                              <span
-                                title="Qualification du lead"
-                                style={{
-                                  ...styles.rowQualification,
-                                  color: qualColor,
-                                  backgroundColor: `${qualColor}1a`,
-                                  border: `1px solid ${qualColor}55`,
-                                }}
-                              >
-                                {qualificationLabel(qual)}
-                              </span>
-                            )}
                             {lookupBy(dossiers, conv)?.typologie && (
                               <span style={styles.rowTypology}>
                                 {TYPOLOGY_LABELS[lookupBy(dossiers, conv).typologie]}
@@ -1735,6 +1800,9 @@ const Inbox = () => {
                           </small>
                           {insight && (
                             <span style={styles.convInsights}>
+                              {insight.maturity?.awaitingReply && (
+                                <AwaitingReplyBadge compact />
+                              )}
                               {insight.needsQualification && (
                                 <span
                                   style={styles.qualifyMarker}
@@ -1803,14 +1871,12 @@ const Inbox = () => {
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) =>
                         updateClassification(selectedConv.id, {
-                          stage: e.target.value,
+                          classification: e.target.value,
                         })
                       }
                       className="inbox-class-dropdown"
-                      title="Étape du parcours de vente"
                       style={{
                         ...styles.classSelect,
-                        maxWidth: 140,
                         color:
                           CLASSIFICATION_COLORS[
                             lookupBy(classifications, selectedConv) || DEFAULT_STAGE
@@ -1823,30 +1889,6 @@ const Inbox = () => {
                     >
                       {STAGES.map((s) => (
                         <option key={s.key} value={s.key}>{s.label}</option>
-                      ))}
-                    </select>
-                    {/* Qualification: where the lead stands now, loss
-                        reasons included — independent of the stage */}
-                    <select
-                      value={selectedQualification}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) =>
-                        updateClassification(selectedConv.id, {
-                          qualification: e.target.value,
-                        })
-                      }
-                      className="inbox-class-dropdown"
-                      title="Qualification du lead"
-                      style={{
-                        ...styles.classSelect,
-                        maxWidth: 140,
-                        color: qualificationColor(selectedQualification),
-                        borderColor:
-                          qualificationColor(selectedQualification) + "55",
-                      }}
-                    >
-                      {QUALIFICATIONS.map((q) => (
-                        <option key={q.key} value={q.key}>{q.label}</option>
                       ))}
                     </select>
                     {/* Typologie of the request, beside the stage: what
@@ -1878,6 +1920,12 @@ const Inbox = () => {
                         <option key={t.key} value={t.key}>{t.label}</option>
                       ))}
                     </select>
+                    {/* Priority, when set (edited in the panel) */}
+                    {lookupBy(dossiers, selectedConv)?.isPriority && (
+                      <span style={styles.priorityChip} title="Dossier prioritaire">
+                        ★ Prioritaire
+                      </span>
+                    )}
                     {/* Booked appointment, once set; the date is independent
                         of the stage */}
                     {lookupBy(appointments, selectedConv) &&
@@ -1885,7 +1933,16 @@ const Inbox = () => {
                         <button
                           className="inbox-rdv-chip"
                           style={styles.rdvChip}
-                          title="Change the appointment"
+                          title={
+                            [
+                              lookupBy(dossiers, selectedConv)?.appointmentAgencyName ||
+                                lookupBy(dossiers, selectedConv)?.appointmentPlace,
+                              lookupBy(dossiers, selectedConv)?.appointmentAgent &&
+                                `avec ${lookupBy(dossiers, selectedConv).appointmentAgent}`,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || "Modifier le rendez-vous"
+                          }
                           onClick={() =>
                             setRdvDraft({
                               conversationId: selectedConv.id,
@@ -1896,6 +1953,8 @@ const Inbox = () => {
                           }
                         >
                           📅 {formatAppointment(lookupBy(appointments, selectedConv))}
+                          {lookupBy(dossiers, selectedConv)?.appointmentPlace &&
+                            ` · ${lookupBy(dossiers, selectedConv).appointmentPlace}`}
                         </button>
                       )}
                     {!lookupBy(appointments, selectedConv) && !rdvDraft && (
@@ -1919,15 +1978,51 @@ const Inbox = () => {
                         ...styles.rdvCancel,
                         ...(dossierOpen ? styles.dossierBtnOn : {}),
                       }}
-                      title="Dossier client : typologie, RDV"
+                      title="Dossier client : typologie, facture, priorité, pièces jointes"
                       onClick={() => setDossierOpen((v) => !v)}
                     >
                       📁 Dossier
                     </button>
-                    {/* Lead maturity (reason in the tooltip). The motif /
-                        frein is recorded in the bar above the composer —
-                        one control, not two. */}
-                    <MaturityChip maturity={selectedInsight?.maturity} />
+                    <button
+                      className="inbox-tab-btn"
+                      style={{
+                        ...styles.rdvCancel,
+                        ...(templatesOpen ? styles.dossierBtnOn : {}),
+                      }}
+                      title="Modèles de messages : réponses prêtes à insérer"
+                      onClick={() => setTemplatesOpen((v) => !v)}
+                    >
+                      📝 Modèles
+                    </button>
+                    {/* Lead maturity with its reason written out ("Chaud ·
+                        À répondre — message reçu hier"). The motif / frein
+                        is recorded in the bar above the composer — one
+                        control, not two. */}
+                    <MaturityChip maturity={selectedInsight?.maturity} showReason />
+                    {/* Dispatch: the agent sees the task and closes it,
+                        the admin hands the discussion out */}
+                    <DispatchControl
+                      token={user?.token}
+                      role={user?.role}
+                      userId={user?._id}
+                      platform={activeTab}
+                      customerId={customerIdOf(selectedConv, activeTab)}
+                      mine={getMyDispatch(selectedConv, activeTab)}
+                      open={isStaff ? getOpenDispatch(selectedConv, activeTab) : null}
+                      loadByAgent={dispatchLoad}
+                      onDispatch={async (args) => {
+                        const d = await dispatchTo(args);
+                        fetchLocks();
+                        return d;
+                      }}
+                      onReassign={async (id, agentId, note) => {
+                        const d = await reassignDispatch(id, agentId, note);
+                        fetchLocks();
+                        return d;
+                      }}
+                      onCancel={cancelDispatch}
+                      onDone={markDispatchDone}
+                    />
                     {(user?.role === "admin" || user?.role === "manager") && (
                       <button
                         className="inbox-delete-btn"
@@ -1973,70 +2068,43 @@ const Inbox = () => {
                   </div>
                 </div>
 
-                {/* RDV date picker — shown while booking or changing */}
+                {/* Booking or changing the RDV: date, place, agency and the
+                    agent receiving the customer, saved together */}
                 {rdvDraft?.conversationId === selectedConv.id && (
                   <div style={styles.rdvBar}>
-                    <span style={styles.rdvBarLabel}>
-                      📅 Date du rendez-vous
-                    </span>
-                    <input
-                      type="datetime-local"
-                      className="inbox-rdv-input"
-                      style={styles.rdvInput}
-                      value={rdvDraft.value}
-                      autoFocus
-                      onChange={(e) =>
-                        setRdvDraft((prev) => ({
-                          ...prev,
-                          value: e.target.value,
-                        }))
+                    <RdvForm
+                      key={`rdv:${activeTab}:${selectedConv.id}`}
+                      dossier={lookupBy(dossiers, selectedConv)}
+                      onSave={(patch) =>
+                        updateClassification(selectedConv.id, patch)
                       }
+                      onCancel={() => setRdvDraft(null)}
                     />
-                    <button
-                      className="inbox-send-action"
-                      style={styles.rdvSave}
-                      disabled={!rdvDraft.value}
-                      onClick={() =>
-                        updateClassification(selectedConv.id, {
-                          appointmentAt: new Date(rdvDraft.value).toISOString(),
-                        })
-                      }
-                    >
-                      Confirmer
-                    </button>
-                    {lookupBy(appointments, selectedConv) && (
-                      <button
-                        className="inbox-tab-btn"
-                        style={styles.rdvCancel}
-                        onClick={() =>
-                          updateClassification(selectedConv.id, {
-                            appointmentAt: null,
-                          })
-                        }
-                      >
-                        Retirer le RDV
-                      </button>
-                    )}
-                    <button
-                      className="inbox-tab-btn"
-                      style={styles.rdvCancel}
-                      onClick={() => setRdvDraft(null)}
-                    >
-                      Annuler
-                    </button>
                   </div>
                 )}
 
-                {/* Dossier client: typologie, RDV */}
+                {/* Dossier client: typologie, facture, priorité, RDV, pièces jointes */}
                 {dossierOpen && (
                   <DossierPanel
                     key={`${activeTab}:${selectedConv.id}`}
                     dossier={lookupBy(dossiers, selectedConv)}
                     onSave={(patch) => updateClassification(selectedConv.id, patch)}
+                    platform={activeTab}
+                    customerId={
+                      activeTab === "email"
+                        ? selectedConv.email ||
+                          selectedConv.participants?.[0]?.email ||
+                          selectedConv.id
+                        : selectedConv.participants?.[0]?.id || selectedConv.id
+                    }
                     canEdit
                   />
                 )}
 
+                {/* Thread (messages + composer) with the templates column
+                    beside it when open */}
+                <div style={styles.threadRow}>
+                <div style={styles.threadMain}>
                 <div className="inbox-msg-scroll" style={styles.messageList}>
                   {selectedConv._hasMoreMessages && activeTab !== "email" && (
                     <button
@@ -2090,6 +2158,49 @@ const Inbox = () => {
                         }}
                       >
                         <small style={styles.msgFrom}>{msg.from}</small>
+                        {/* Ad / post / story the customer is replying to */}
+                        {msg.context && (
+                          <a
+                            href={msg.context.url || undefined}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              ...styles.contextCard,
+                              cursor: msg.context.url ? "pointer" : "default",
+                            }}
+                            onClick={(e) => {
+                              if (!msg.context.url) e.preventDefault();
+                            }}
+                          >
+                            {msg.context.photoUrl && (
+                              <img
+                                src={msg.context.photoUrl}
+                                alt=""
+                                loading="lazy"
+                                style={styles.contextThumb}
+                                onError={(e) => {
+                                  e.target.style.display = "none";
+                                }}
+                              />
+                            )}
+                            <div style={{ minWidth: 0 }}>
+                              <div style={styles.contextKind}>
+                                {CONTEXT_KIND_LABELS[msg.context.kind] ||
+                                  "In reply to"}
+                              </div>
+                              {msg.context.title && (
+                                <div style={styles.contextTitle}>
+                                  {msg.context.title}
+                                </div>
+                              )}
+                              {msg.context.body && (
+                                <div style={styles.contextBody}>
+                                  {msg.context.body}
+                                </div>
+                              )}
+                            </div>
+                          </a>
+                        )}
                         {/* Subject for emails */}
                         {isEmail && msg.subject && (
                           <p
@@ -2273,13 +2384,27 @@ const Inbox = () => {
                       ? "Qualification requise : indiquez le motif ou le frein principal de cet échange."
                       : "Motif / frein de l’échange"}
                   </span>
-                  <FreinSelector
-                    key={`qualify:${activeTab}:${selectedConv.id}`}
-                    value={selectedInsight?.frein || null}
-                    onSave={saveSelectedFrein}
-                    required={Boolean(selectedInsight?.needsQualification)}
-                    disabled={Boolean(freinLockedTo)}
-                  />
+                  {/* Motif and comment travel together: the pair wraps under
+                      the label when the thread is narrow, never apart */}
+                  <div style={styles.qualifyControls}>
+                    <FreinSelector
+                      key={`qualify:${activeTab}:${selectedConv.id}`}
+                      value={selectedInsight?.frein || null}
+                      onSave={saveSelectedFrein}
+                      required={Boolean(selectedInsight?.needsQualification)}
+                      disabled={Boolean(freinLockedTo)}
+                    />
+                    {/* Free comment on the discussion, kept on the customer's
+                        dossier (same record as the typologie) */}
+                    <CommentField
+                      key={`comment:${activeTab}:${selectedConv.id}`}
+                      value={lookupBy(dossiers, selectedConv)?.comment || ""}
+                      onSave={(comment) =>
+                        updateClassification(selectedConv.id, { comment })
+                      }
+                      disabled={Boolean(freinLockedTo)}
+                    />
+                  </div>
                 </div>
 
                 {/* Reply Box */}
@@ -2337,8 +2462,8 @@ const Inbox = () => {
                         >
                           {uploadingFile ? "…" : <Paperclip size={16} />}
                         </button>
-                        {/* Textarea so a reply can span several lines:
-                            Enter sends, Shift+Enter adds a line */}
+                        {/* Textarea so inserted templates keep their line
+                            breaks: Enter sends, Shift+Enter adds a line */}
                         <textarea
                           ref={replyFieldRef}
                           className="inbox-reply-field"
@@ -2346,8 +2471,7 @@ const Inbox = () => {
                           rows={1}
                           onChange={(e) => {
                             setReplyText(e.target.value);
-                            e.target.style.height = "auto";
-                            e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+                            fitComposer(e.target);
                           }}
                           placeholder="Type a message…"
                           style={styles.replyInput}
@@ -2374,6 +2498,22 @@ const Inbox = () => {
                     </div>
                   );
                 })()}
+                </div>
+                {templatesOpen && (
+                  <TemplatesPanel
+                    platform={activeTab}
+                    customerName={selectedConv.participants?.[0]?.name || ""}
+                    onInsert={(text) => {
+                      setReplyText((prev) => {
+                        const cur = prev.trimEnd();
+                        return cur ? `${cur}\n${text}` : text;
+                      });
+                      setTimeout(() => replyFieldRef.current?.focus(), 0);
+                    }}
+                    onClose={() => setTemplatesOpen(false)}
+                  />
+                )}
+                </div>
               </>
             ) : (
               <div style={styles.noConv}>
@@ -2543,12 +2683,6 @@ const styles = {
     overflowX: "hidden",
     backgroundColor: "var(--bg-nav)",
     transition: "background-color 0.3s ease",
-  },
-  // One filter of the bar: its label and select wrap together
-  filterGroup: {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
   },
   classFilterBtn: {
     padding: "4px 9px",
@@ -2728,6 +2862,13 @@ const styles = {
     color: "var(--text-primary)",
     lineHeight: 1.4,
   },
+  qualifyControls: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "8px 12px",
+    flex: "2 1 420px",
+    minWidth: 0,
+  },
   // Same bar once the motif is recorded (or before any reply): quiet
   freinBar: {
     display: "flex",
@@ -2878,7 +3019,21 @@ const styles = {
     transition: "border-color 0.25s ease, box-shadow 0.25s ease",
     resize: "none",
     maxHeight: 160,
-    overflowY: "auto",
+    // fitComposer switches this to "auto" once the text outgrows the cap
+    overflowY: "hidden",
+    boxSizing: "border-box",
+  },
+  threadRow: {
+    flex: 1,
+    display: "flex",
+    minHeight: 0,
+  },
+  threadMain: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+    minHeight: 0,
   },
   sendBtn: {
     width: "40px",
@@ -2950,6 +3105,8 @@ const styles = {
     marginLeft: "5px",
     padding: "0 4px",
   },
+  // Provenance stamp — dashed border like a passport stamp: it certifies
+  // which ad/post/story this customer arrived from.
   rdvChip: {
     display: "inline-flex",
     alignItems: "center",
@@ -2964,6 +3121,16 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
     fontFamily: "'Space Grotesk', sans-serif",
+  },
+  priorityChip: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: "#E3A63C",
+    backgroundColor: "#E3A63C1a",
+    border: "1px solid #E3A63C66",
+    borderRadius: 6,
+    padding: "3px 8px",
+    whiteSpace: "nowrap",
   },
   typologyChip: {
     fontSize: 10.5,
@@ -2993,14 +3160,6 @@ const styles = {
     color: "var(--accent)",
     backgroundColor: "var(--accent-glow)",
     border: "1px solid var(--accent)55",
-    borderRadius: 5,
-    padding: "1px 6px",
-    whiteSpace: "nowrap",
-  },
-  // Colour, background and border come from the qualification
-  rowQualification: {
-    fontSize: 10,
-    fontWeight: 700,
     borderRadius: 5,
     padding: "1px 6px",
     whiteSpace: "nowrap",
@@ -3060,6 +3219,49 @@ const styles = {
     fontSize: 12.5,
     cursor: "pointer",
     fontFamily: "'Hanken Grotesk', sans-serif",
+  },
+  contextCard: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    padding: "8px 10px",
+    margin: "4px 0 8px",
+    borderRadius: "8px",
+    backgroundColor: "rgba(0,0,0,0.14)",
+    border: "1.5px dashed rgba(140,140,150,0.5)",
+    textDecoration: "none",
+    color: "inherit",
+    maxWidth: "100%",
+  },
+  contextThumb: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    objectFit: "cover",
+    flexShrink: 0,
+  },
+  contextKind: {
+    fontSize: 9,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: "1.2px",
+    opacity: 0.75,
+    marginBottom: 2,
+    fontFamily: "'Space Grotesk', sans-serif",
+  },
+  contextTitle: {
+    fontSize: 12,
+    fontWeight: 700,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  contextBody: {
+    fontSize: 11,
+    opacity: 0.8,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   attachBtn: {
     width: "40px",
@@ -3136,6 +3338,35 @@ const styles = {
     padding: "1px 7px",
     marginLeft: "6px",
     whiteSpace: "nowrap",
+  },
+  dispatchBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "10px",
+    fontWeight: 700,
+    color: "#fff",
+    backgroundColor: "var(--accent)",
+    border: "1px solid var(--accent)",
+    borderRadius: "6px",
+    padding: "1px 7px",
+    marginLeft: "6px",
+    whiteSpace: "nowrap",
+  },
+  dispatchTabBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "2px",
+    backgroundColor: "var(--accent)",
+    color: "#fff",
+    borderRadius: "4px",
+    minWidth: "16px",
+    height: "16px",
+    fontSize: "9px",
+    fontWeight: 700,
+    marginLeft: "5px",
+    padding: "0 4px",
   },
   lockBanner: {
     padding: "14px 20px",

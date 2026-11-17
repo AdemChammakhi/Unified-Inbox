@@ -95,7 +95,10 @@ const Support = () => {
 
   useEffect(() => {
     fetchTickets();
-    const id = setInterval(fetchTickets, POLL_MS);
+    // Only while the tab is visible
+    const id = setInterval(() => {
+      if (!document.hidden) fetchTickets();
+    }, POLL_MS);
     return () => clearInterval(id);
   }, [fetchTickets]);
 

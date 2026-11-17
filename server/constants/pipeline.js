@@ -10,7 +10,8 @@
  * docs/PLAN-PILOTAGE-COMMERCIAL.md §2.2).
  * "En cours" (code qualification_en_cours), "Déplacement agence" and
  * "Injoignable" (client_injoignable) were added on 29 Sept 2026 at
- * management's request. Labels, the "non_interesse" stage and the typology
+ * management's request; "En attente du numéro de téléphone" on 31 Oct and
+ * "Opportunité" on 5 Nov 2026, "HOPE" on 6 Nov 2026. Labels, the "non_interesse" stage and the typology
  * labels follow the process document PROC-GRC-V01 (« Processus opérationnel
  * de gestion des leads », Oct 2026). TYPOLOGIES is the nature of the
  * request. Both replace the free-text era: values are codes, labels are
@@ -31,9 +32,15 @@ const STAGES = Object.freeze([
   { key: "nouveau_lead", label: "Nouveau lead", ordinal: 1 },
   { key: "a_contacter", label: "À contacter", ordinal: 2 },
   { key: "contact_etabli", label: "Contact établi", ordinal: 3 },
+  // Added 31 Oct 2026: the agent asked for the prospect's number
+  { key: "attente_telephone", label: "En attente du numéro de téléphone", ordinal: 3.5 },
   // Shown as "En cours" (management's wording); the code keeps its full name
   { key: "qualification_en_cours", label: "En cours", ordinal: 4 },
   { key: "qualifie", label: "Qualifié", ordinal: 5 },
+  // Added 6 Nov 2026: a lead with real hope, just short of an opportunity
+  { key: "hope", label: "HOPE", ordinal: 5.25 },
+  // Added 5 Nov 2026: a qualified lead worth pursuing, before the offer
+  { key: "opportunite", label: "Opportunité", ordinal: 5.5 },
   { key: "offre_envoyee", label: "Offre envoyée / Devis envoyé", ordinal: 6 },
   { key: "en_reflexion", label: "En réflexion", ordinal: 7 },
   { key: "relance", label: "À rappeler / Relance", ordinal: 8 },
@@ -96,20 +103,29 @@ const QUALIFICATIONS = Object.freeze([
 ]);
 
 /**
- * Stage → [Étape key, Qualification key]. Sixteen distinct pairs, so a
+ * Stage → [Étape key, Qualification key]. Nineteen distinct pairs, so a
  * stored pair names exactly one stage (PAIR_TO_STAGE). The Étape follows
  * the funnel step the stage sits at; the Qualification tells the lead's
  * status there, and its group is what the warehouse counts: only "Départ"
  * is won (group Gagné), the three closing stages are lost (group Perdu).
  * A pair no stage owns (one written by the scripts' lead import, or by a
  * hand edit) reads as the stage of its Étape alone, see stageOfPair.
+ *
+ * The three stages main added after the port took pairs no stage owned, all
+ * in the group "En cours" (decision D12, set A, chosen by the owner on
+ * 17 Nov 2026): "En attente du numéro de téléphone" keeps the Étape
+ * "Nouveau lead" (the only free in-progress pair before "Contact établi"),
+ * HOPE sits on "Contact établi", Opportunité on "Offre présentée".
  */
 const STAGE_TO_PAIR = Object.freeze({
   nouveau_lead: ["nouveau_lead", "nouveau_lead"],
   a_contacter: ["nouveau_lead", "en_attente_reponse"],
   contact_etabli: ["contact_etabli", "nouveau_lead"],
+  attente_telephone: ["nouveau_lead", "en_cours"],
   qualification_en_cours: ["contact_etabli", "en_cours"],
   qualifie: ["contact_etabli", "en_attente_reponse"],
+  hope: ["contact_etabli", "en_reflexion"],
+  opportunite: ["offre_presentee", "en_cours"],
   offre_envoyee: ["offre_presentee", "en_attente_reponse"],
   en_reflexion: ["offre_presentee", "en_reflexion"],
   relance: ["devis_envoye", "en_attente_reponse"],

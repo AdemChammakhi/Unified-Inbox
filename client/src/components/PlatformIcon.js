@@ -77,6 +77,17 @@ const WhatsAppIcon = ({ size }) => (
   </svg>
 );
 
+// Incoming phone call ("Appel entrant" leads)
+const PhoneIcon = ({ size }) => (
+  <svg width={size} height={size} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="16" cy="16" r="16" fill="#E8833A" />
+    <path
+      d="M12.2 8.5c.5-.5 1.3-.5 1.7.1l1.6 2.3c.4.5.3 1.2-.1 1.6l-1 1c.7 1.6 2 2.9 3.6 3.6l1-1c.4-.4 1.1-.5 1.6-.1l2.3 1.6c.6.4.6 1.2.1 1.7l-1.2 1.2c-.8.8-2 1.1-3.1.7-4.2-1.4-7.5-4.7-8.9-8.9-.4-1.1-.1-2.3.7-3.1l1.2-1.2z"
+      fill="white"
+    />
+  </svg>
+);
+
 // Gmail icon (envelope style)
 const GmailIcon = ({ size }) => (
   <svg
@@ -104,6 +115,8 @@ const PlatformIcon = ({ platform, size = 18 }) => {
       return <WhatsAppIcon size={size} />;
     case "email":
       return <GmailIcon size={size} />;
+    case "telephone":
+      return <PhoneIcon size={size} />;
     default:
       return null;
   }
