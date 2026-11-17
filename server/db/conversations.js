@@ -3,21 +3,32 @@
  *
  * Keys (CLAUDE.md §6: a conversation has no single stable id):
  *  - participant_external_id is the CUSTOMER id (IGSID, PSID, WhatsApp number,
- *    email address), the only id both inbox list shapes share;
+ *    email address, "appel-<digits>" for a prospect who phoned), the only id
+ *    both inbox list shapes share;
  *  - external_id is the platform's own conversation id: Meta's thread id
  *    (t_…) once it is known, the customer id until then. It is unique per
  *    platform, so a thread id resolves to its customer without any mapping
  *    table; linkThreads() records it when a Graph list reveals it.
  * Every lookup accepts either key (findByKeys / resolve).
  *
- * The dossier lives on the row (constants/pipeline.js): the funnel step
- * ("Étape") in classification_id, the status ("Qualification") in
- * qualification_id with each change appended to
- * conversation_qualification_history, the typologie in motif_id and the RDV
- * in appointment_*. Every (Étape, Qualification) pair a row takes is also
- * registered in classification_qualification_matrix, as the scripts' own
- * lead import does (decision E27). The lock is locked_by_user_id, mirrored
- * in assigned_to_user_id for the warehouse.
+ * Platforms: the API's names, with one alias — "telephone", the leads
+ * recorded from an incoming call, is stored as the scripts' "call"
+ * (CK_conv_platform); every function takes and returns the API name.
+ *
+ * The dossier lives on the row and on the customer's contact
+ * (constants/pipeline.js, decision D10):
+ *  - the pipeline stage as its (Étape, Qualification) pair in
+ *    classification_id + qualification_id, each Qualification change
+ *    appended to conversation_qualification_history, and every pair in use
+ *    registered in classification_qualification_matrix (E27);
+ *  - the typologie in motif_id, the RDV date in appointment_*;
+ *  - the fields the scripts have no column for — invoice reference, PAX,
+ *    priority flag, comment, where the RDV takes place and who receives the
+ *    customer — as one JSON value, the "dossier" custom field of the
+ *    customer's contact (contact_custom_fields, like the frein);
+ *  - the phone number an agent records in contacts.phone.
+ * The lock is locked_by_user_id, mirrored in assigned_to_user_id for the
+ * warehouse. A phone lead's calls are dbo.call_log rows on its conversation.
  *
  * Deleting a conversation removes its messages and history and resets its
  * dossier, but keeps the row with deleted_date set (the warehouse flags it,
@@ -28,16 +39,17 @@
 "use strict";
 
 const { db, tx, at, lockKey, jsonList } = require("./sql");
-const { refs, stageOf, qualificationOf, typologyOf } = require("./reference");
+const { refs, stageOf, pairOf, typologyOf } = require("./reference");
 const { channelIdOf } = require("./channels");
 const contacts = require("./contacts");
-const {
-  isStage,
-  isQualification,
-  isTypology,
-  DEFAULT_STAGE,
-  DEFAULT_QUALIFICATION,
-} = require("../constants/pipeline");
+const { isStage, isTypology, DEFAULT_STAGE } = require("../constants/pipeline");
+
+const CALL_PLATFORM = contacts.CALL_PLATFORM; // "telephone"
+const DOSSIER_FIELD = "dossier";
+
+/** API platform → stored platform, and back. */
+const dbPlatform = (platform) => (platform === CALL_PLATFORM ? "call" : platform);
+const apiPlatform = (platform) => (platform === "call" ? CALL_PLATFORM : platform);
 
 const COLUMNS = `
   c.conversation_id, c.platform, c.external_id, c.participant_external_id, c.participant_name,
@@ -58,7 +70,7 @@ function toConversation(row) {
   if (!row) return null;
   return {
     id: row.conversation_id,
-    platform: row.platform,
+    platform: apiPlatform(row.platform),
     externalId: row.external_id,
     customerId: row.participant_external_id || null,
     /** The key every map and list uses: the customer, else the thread. */
@@ -68,8 +80,7 @@ function toConversation(row) {
     contactId: row.contact_id,
     channelId: row.channel_id,
     campaignId: row.campaign_id,
-    stage: stageOf(row.classification_id),
-    qualification: qualificationOf(row.qualification_id),
+    stage: stageOf(row.classification_id, row.qualification_id),
     typologie: typologyOf(row.motif_id),
     qualificationId: row.qualification_id,
     motifId: row.motif_id,
@@ -120,7 +131,7 @@ async function findByKeys(platform, keys, { includeDeleted = false, runner = db 
          AND (@includeDeleted = 1 OR c.deleted_date IS NULL)
        ORDER BY CASE WHEN c.participant_external_id IN (SELECT value FROM OPENJSON(@keys)) THEN 0 ELSE 1 END,
                 c.conversation_id`,
-      { platform, keys: jsonList(list), includeDeleted: includeDeleted ? 1 : 0 },
+      { platform: dbPlatform(platform), keys: jsonList(list), includeDeleted: includeDeleted ? 1 : 0 },
     )
   ).rows;
   return rows.map(toConversation);
@@ -153,8 +164,8 @@ async function mergeInto(t, intoId, fromId) {
      UPDATE dbo.call_log SET conversation_id = @intoId WHERE conversation_id = @fromId;
      DELETE dbo.conversation_agent_unread WHERE conversation_id = @fromId;
      UPDATE i SET
-       qualification_id = CASE WHEN i.qualification_id = @defQual THEN f.qualification_id ELSE i.qualification_id END,
-       classification_id = CASE WHEN i.classification_id = @defCls THEN f.classification_id ELSE i.classification_id END,
+       qualification_id = CASE WHEN i.qualification_id = @defQual AND i.classification_id = @defCls THEN f.qualification_id ELSE i.qualification_id END,
+       classification_id = CASE WHEN i.qualification_id = @defQual AND i.classification_id = @defCls THEN f.classification_id ELSE i.classification_id END,
        motif_id = CASE WHEN i.motif_id = @defMotif THEN f.motif_id ELSE i.motif_id END,
        appointment_date = COALESCE(i.appointment_date, f.appointment_date),
        appointment_time = CASE WHEN i.appointment_date IS NULL THEN f.appointment_time ELSE i.appointment_time END,
@@ -188,10 +199,11 @@ async function mergeInto(t, intoId, fromId) {
  * @returns {Promise<object>} the conversation (toConversation shape)
  */
 async function ensureForCustomer({ platform, customerId, name, username, avatar, threadId, firstSeenAt }) {
+  const stored = dbPlatform(platform);
   const customer = contacts.fit(customerId, 255);
   if (!customer) throw new Error("ensureForCustomer needs a customer id");
   const thread = threadId && threadId !== customer ? contacts.fit(threadId, 255) : null;
-  const channelId = await channelIdOf(platform);
+  const channelId = await channelIdOf(stored);
   const d = refs().defaults;
   const realName = !contacts.isPlaceholderName(name, customer)
     ? contacts.fit(name, 255)
@@ -202,13 +214,13 @@ async function ensureForCustomer({ platform, customerId, name, username, avatar,
   const now = new Date();
 
   const conversationId = await tx(async (t) => {
-    await lockKey(t, `conv:${platform}:${customer}`);
+    await lockKey(t, `conv:${stored}:${customer}`);
     let row = await t.one(
       `SELECT TOP 1 c.conversation_id, c.external_id, c.participant_external_id, c.contact_id
        FROM dbo.conversations c
        WHERE c.platform = @platform AND (c.participant_external_id = @customer OR c.external_id = @customer)
        ORDER BY CASE WHEN c.participant_external_id = @customer THEN 0 ELSE 1 END, c.conversation_id`,
-      { platform, customer },
+      { platform: stored, customer },
     );
     // A row created from the thread id alone, before the customer was known
     let threadRow = null;
@@ -216,7 +228,7 @@ async function ensureForCustomer({ platform, customerId, name, username, avatar,
       threadRow = await t.one(
         `SELECT c.conversation_id, c.participant_external_id FROM dbo.conversations c
          WHERE c.platform = @platform AND c.external_id = @thread`,
-        { platform, thread },
+        { platform: stored, thread },
       );
       if (threadRow && row && threadRow.conversation_id !== row.conversation_id && !threadRow.participant_external_id) {
         await mergeInto(t, row.conversation_id, threadRow.conversation_id);
@@ -226,8 +238,8 @@ async function ensureForCustomer({ platform, customerId, name, username, avatar,
       }
     }
 
-    const { contactId } = contacts.IDENTITY_PLATFORMS.has(platform)
-      ? await contacts.ensureIdentity(t, { platform, externalId: customer, name, username, avatar, seenAt: now })
+    const { contactId } = contacts.IDENTITY_PLATFORMS.has(stored)
+      ? await contacts.ensureIdentity(t, { platform: stored, externalId: customer, name, username, avatar, seenAt: now })
       : { contactId: null };
 
     if (row) {
@@ -256,11 +268,11 @@ async function ensureForCustomer({ platform, customerId, name, username, avatar,
        VALUES (@platform, @externalId, @channelId, @contactId, @name, @avatar, @customer, N'open',
                @cls, @qual, @motif, 0, 0, @created_date, @created_time, @created_date, @created_time)`,
       {
-        platform,
+        platform: stored,
         externalId: thread && !threadRow ? thread : customer,
         channelId,
         contactId,
-        name: realName || (platform === "email" ? customer : "Unknown"),
+        name: realName || (stored === "email" ? customer : "Unknown"),
         avatar: avatarUrl,
         customer,
         cls: d.classificationId,
@@ -288,6 +300,7 @@ async function ensureForCustomer({ platform, customerId, name, username, avatar,
  * adopts it once the customer shows up with the same thread id.
  */
 async function ensureForThread({ platform, threadId }) {
+  const stored = dbPlatform(platform);
   const thread = contacts.fit(threadId, 255);
   const found = await resolve(platform, [thread], { includeDeleted: true });
   if (found) {
@@ -300,13 +313,13 @@ async function ensureForThread({ platform, threadId }) {
     }
     return found;
   }
-  const channelId = await channelIdOf(platform);
+  const channelId = await channelIdOf(stored);
   const d = refs().defaults;
   const id = await tx(async (t) => {
-    await lockKey(t, `conv:${platform}:${thread}`);
+    await lockKey(t, `conv:${stored}:${thread}`);
     const again = await t.scalar(
       `SELECT conversation_id FROM dbo.conversations WHERE platform = @platform AND external_id = @thread`,
-      { platform, thread },
+      { platform: stored, thread },
     );
     if (again) return again;
     const newId = await t.scalar(
@@ -316,7 +329,7 @@ async function ensureForThread({ platform, threadId }) {
        OUTPUT INSERTED.conversation_id
        VALUES (@platform, @thread, @channelId, N'Unknown', N'open', @cls, @qual, @motif, 0, 0,
                @now_date, @now_time, @now_date, @now_time)`,
-      { platform, thread, channelId, cls: d.classificationId, qual: d.qualificationId, motif: d.motifId, ...at("now", new Date()) },
+      { platform: stored, thread, channelId, cls: d.classificationId, qual: d.qualificationId, motif: d.motifId, ...at("now", new Date()) },
     );
     await t.query(
       `INSERT dbo.conversation_qualification_history (conversation_id, qualification_id, changed_by_user_id, changed_date, changed_time)
@@ -327,6 +340,127 @@ async function ensureForThread({ platform, threadId }) {
     return newId;
   });
   return byId(id);
+}
+
+// ─── Incoming calls ──────────────────────────────────────────────────────────
+
+/**
+ * The lead of a prospect who phoned the agency ("Appel entrant"): found or
+ * created on the "telephone" platform under customer id "appel-<digits>",
+ * with its contact (the one whose number this is, else a new one) and one
+ * dbo.call_log row per call. A second call from the same number lands on
+ * the same lead. A new lead starts at "Contact établi": the agent has just
+ * spoken to the customer.
+ *
+ * @param {object} p
+ * @param {string} p.digits   the number as dialled, digits only (country code included)
+ * @param {string} p.name
+ * @param {string} p.phone    the number as shown ("+216 98 123 456")
+ * @param {string} [p.email]
+ * @param {string|number} [p.userId]  the agent recording the call
+ * @returns {Promise<{conversation: object, created: boolean, callCount: number}>}
+ */
+async function ensureForCall({ digits, name, phone, email, userId }) {
+  const customer = `appel-${String(digits).replace(/\D/g, "")}`;
+  const channelId = await channelIdOf("call");
+  const now = new Date();
+  const result = await tx(async (t) => {
+    await lockKey(t, `conv:call:${customer}`);
+    const contactId = await contacts.ensureByPhone(t, { phone: `+${String(digits).replace(/\D/g, "")}`, name, email, seenAt: now });
+    let row = await t.one(
+      `SELECT TOP 1 conversation_id FROM dbo.conversations
+       WHERE platform = N'call' AND participant_external_id = @customer ORDER BY conversation_id`,
+      { customer },
+    );
+    let created = false;
+    if (row) {
+      await t.query(
+        `UPDATE dbo.conversations SET participant_name = @name, contact_id = COALESCE(contact_id, @contactId),
+           updated_date = @now_date, updated_time = @now_time, deleted_date = NULL, deleted_time = NULL
+         WHERE conversation_id = @id`,
+        { id: row.conversation_id, name: contacts.fit(name, 255) || "Unknown", contactId, ...at("now", now) },
+      );
+    } else {
+      const pair = pairOf("contact_etabli");
+      const d = refs().defaults;
+      const id = await t.scalar(
+        `INSERT dbo.conversations (platform, external_id, channel_id, contact_id, participant_name, participant_external_id,
+                                   status, classification_id, qualification_id, motif_id, classified_by_user_id,
+                                   classified_date, classified_time, unread_count, message_count,
+                                   created_date, created_time, updated_date, updated_time)
+         OUTPUT INSERTED.conversation_id
+         VALUES (N'call', @customer, @channelId, @contactId, @name, @customer, N'open', @cls, @qual, @motif, @userId,
+                 @now_date, @now_time, 0, 0, @now_date, @now_time, @now_date, @now_time)`,
+        {
+          customer, channelId, contactId, name: contacts.fit(name, 255) || "Unknown",
+          cls: pair.classificationId, qual: pair.qualificationId, motif: d.motifId,
+          userId: userId ? Number(userId) : null, ...at("now", now),
+        },
+      );
+      await t.query(
+        `INSERT dbo.conversation_qualification_history (conversation_id, qualification_id, changed_by_user_id, changed_date, changed_time)
+         VALUES (@id, @qual, @userId, @now_date, @now_time);
+         UPDATE dbo.contacts SET total_conversations = total_conversations + 1 WHERE contact_id = @contactId;`,
+        { id, qual: pair.qualificationId, userId: userId ? Number(userId) : null, contactId, ...at("now", now) },
+      );
+      await registerPair(t, pair.classificationId, pair.qualificationId);
+      row = { conversation_id: id };
+      created = true;
+    }
+    // The call itself: an answered inbound call, recorded by the CRM
+    await t.query(
+      `INSERT dbo.call_log (channel_id, conversation_id, source_number, ring_group, destination_number, src_channel_ref,
+                            dst_channel_ref, cost_center, call_status, duration_seconds, direction, is_answered_flag,
+                            call_date, call_time, source_channel)
+       VALUES (@channelId, @id, @source, NULL, N'agence', @ref, NULL, NULL, N'ANSWERED', 0, N'inbound', 1,
+               @now_date, @now_time, N'crm')`,
+      {
+        channelId, id: row.conversation_id, source: contacts.fit(phone, 30) || String(digits).slice(0, 30),
+        // UX_call_log_natural is (call_date, call_time, src_channel_ref): two calls
+        // recorded within the same second need distinct references
+        ref: `CRM/${row.conversation_id}-${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        ...at("now", now),
+      },
+    );
+    const callCount = await t.scalar(`SELECT COUNT(*) FROM dbo.call_log WHERE conversation_id = @id`, { id: row.conversation_id });
+    return { id: row.conversation_id, created, callCount: Number(callCount) || 1 };
+  });
+  return { conversation: await byId(result.id), created: result.created, callCount: result.callCount };
+}
+
+/**
+ * The calls of phone leads: Map conversation id → { count, firstAt, lastAt }.
+ */
+async function callStats(conversationIds) {
+  const ids = (conversationIds || []).filter(Boolean);
+  const out = new Map();
+  if (ids.length === 0) return out;
+  const rows = (
+    await db.query(
+      `SELECT conversation_id, n = COUNT(*),
+              first_at = MIN(dbo.fn_DateTimeCombine(call_date, call_time)),
+              last_at = MAX(dbo.fn_DateTimeCombine(call_date, call_time))
+       FROM dbo.call_log WHERE conversation_id IN (SELECT CONVERT(int, value) FROM OPENJSON(@ids))
+       GROUP BY conversation_id`,
+      { ids: JSON.stringify(ids) },
+    )
+  ).rows;
+  for (const r of rows) out.set(r.conversation_id, { count: Number(r.n), firstAt: r.first_at, lastAt: r.last_at });
+  return out;
+}
+
+/** Every phone lead (platform "telephone"), newest activity first. */
+async function callLeads(limit = 5000) {
+  const rows = (
+    await db.query(
+      `SELECT TOP (@limit) ${COLUMNS}, contact_phone = ct.phone, contact_email = ct.email
+       FROM dbo.conversations c LEFT JOIN dbo.contacts ct ON ct.contact_id = c.contact_id
+       WHERE c.platform = N'call' AND c.deleted_date IS NULL
+       ORDER BY c.updated_date DESC, c.updated_time DESC, c.conversation_id DESC`,
+      { limit },
+    )
+  ).rows;
+  return rows.map((r) => ({ ...toConversation(r), contactPhone: r.contact_phone, contactEmail: r.contact_email }));
 }
 
 /**
@@ -357,7 +491,7 @@ async function linkThreads(platform, pairs) {
      JOIN OPENJSON(@pairs) WITH (t nvarchar(255) '$.t', c nvarchar(255) '$.c') p ON c.external_id = p.t
      WHERE c.platform = @platform AND c.participant_external_id IS NULL
        AND NOT EXISTS (SELECT 1 FROM dbo.conversations x WHERE x.platform = @platform AND x.participant_external_id = p.c);`,
-    { platform, pairs: json },
+    { platform: dbPlatform(platform), pairs: json },
   );
 }
 
@@ -384,7 +518,7 @@ async function updateProfile(platform, customerId, { name, avatar }) {
      FROM dbo.contacts ct
      JOIN dbo.contact_platform_identities i ON i.contact_id = ct.contact_id
      WHERE i.platform = @platform AND i.external_id = @customer;`,
-    { platform, customer: String(customerId), realName, avatar: avatarUrl },
+    { platform: dbPlatform(platform), customer: String(customerId), realName, avatar: avatarUrl },
   );
 }
 
@@ -402,7 +536,7 @@ async function placeholderCustomers(platform, limit = 10) {
               OR (c.participant_name LIKE N'User %' AND LEN(c.participant_name) <= 9)
               OR c.participant_name NOT LIKE N'%[^0-9]%')
        ORDER BY c.updated_date DESC, c.updated_time DESC`,
-      { platform, limit },
+      { platform: dbPlatform(platform), limit },
     )
   ).rows;
   return rows.map((r) => r.participant_external_id);
@@ -434,7 +568,7 @@ async function recentWithLastMessage(platform, limit = 100) {
        LEFT JOIN dbo.users lu ON lu.user_id = lm.sender_user_id
        WHERE c.platform = @platform AND c.deleted_date IS NULL
        ORDER BY lm.sent_date DESC, lm.sent_time DESC, c.conversation_id DESC`,
-      { platform, limit },
+      { platform: dbPlatform(platform), limit },
     )
   ).rows;
   return rows.map((row) => ({
@@ -464,12 +598,12 @@ async function lockedConversations(platform = null) {
        LEFT JOIN dbo.users u ON u.user_id = c.locked_by_user_id
        WHERE c.locked_by_user_id IS NOT NULL AND c.deleted_date IS NULL
          AND (@platform IS NULL OR c.platform = @platform)`,
-      { platform },
+      { platform: platform ? dbPlatform(platform) : null },
     )
   ).rows;
   return rows.map((r) => ({
     conversationId: r.conversation_id,
-    platform: r.platform,
+    platform: apiPlatform(r.platform),
     externalId: r.external_id,
     customerId: r.participant_external_id,
     agentId: String(r.locked_by_user_id),
@@ -498,6 +632,24 @@ async function lock(conversationId, userId, { expiresInMs = null } = {}) {
   return Number(n) === 1;
 }
 
+/**
+ * Give a conversation to a user whoever holds it (an admin's reassignment),
+ * or release it with userId null. One row per customer carries every key
+ * the inbox may send, so the lock follows the customer whatever the list shape.
+ */
+async function assign(conversationId, userId) {
+  const now = new Date();
+  await db.query(
+    `UPDATE dbo.conversations
+       SET locked_by_user_id = @userId, assigned_to_user_id = @userId,
+           locked_date = CASE WHEN @userId IS NULL THEN NULL ELSE @now_date END,
+           locked_time = CASE WHEN @userId IS NULL THEN NULL ELSE @now_time END,
+           lock_expires_date = NULL, lock_expires_time = NULL
+     WHERE conversation_id = @id`,
+    { id: conversationId, userId: userId ? Number(userId) : null, ...at("now", now) },
+  );
+}
+
 /** Push the (unenforced, decision E6) expiry of a held lock. */
 async function refreshLockExpiry(conversationId, expiresInMs) {
   await db.query(
@@ -516,43 +668,107 @@ async function unlockByKey(key, platform = null) {
      WHERE (external_id = @key OR participant_external_id = @key)
        AND (@platform IS NULL OR platform = @platform) AND locked_by_user_id IS NOT NULL;
      SELECT @@ROWCOUNT;`,
-    { key, platform },
+    { key, platform: platform ? dbPlatform(platform) : null },
   );
 }
 
 // ─── Dossier ─────────────────────────────────────────────────────────────────
 
+/** The fields of the "dossier" custom field, with their empty values. */
+const EMPTY_EXTRAS = Object.freeze({
+  invoiceRef: "",
+  pax: null,
+  isPriority: false,
+  comment: "",
+  commentBy: null,
+  commentAt: null,
+  appointmentPlace: "",
+  appointmentAgencyId: "",
+  appointmentAgencyName: "",
+  appointmentAgent: "",
+});
+
+function parseExtras(value) {
+  if (typeof value !== "string" || !value) return { ...EMPTY_EXTRAS };
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? { ...EMPTY_EXTRAS, ...parsed } : { ...EMPTY_EXTRAS };
+  } catch {
+    return { ...EMPTY_EXTRAS };
+  }
+}
+
+/** Map contact_id → extras, for the given contacts. */
+async function extrasFor(contactIds, runner = db) {
+  const ids = [...new Set((contactIds || []).filter(Boolean).map(String))];
+  const out = new Map();
+  if (ids.length === 0) return out;
+  const rows = (
+    await runner.query(
+      `SELECT f.contact_id, f.field_value FROM dbo.contact_custom_fields f
+       WHERE f.field_key = @key AND f.contact_id IN (SELECT CONVERT(uniqueidentifier, value) FROM OPENJSON(@ids))`,
+      { key: DOSSIER_FIELD, ids: JSON.stringify(ids) },
+    )
+  ).rows;
+  for (const r of rows) out.set(String(r.contact_id).toLowerCase(), parseExtras(r.field_value));
+  return out;
+}
+
 /**
- * Conversations whose dossier was touched (stage, qualification, typologie
- * or RDV set, or edited at least once), optionally for one platform.
+ * Conversations whose dossier was touched (stage, typologie or RDV set,
+ * edited at least once, or carrying extras on their contact), optionally
+ * for one platform, each with its extras and its contact's phone.
  */
 async function dossiers(platform = null) {
   const d = refs().defaults;
   const rows = (
     await db.query(
-      `SELECT ${COLUMNS} FROM dbo.conversations c
+      `SELECT ${COLUMNS}, contact_phone = ct.phone, extras_json = f.field_value
+       FROM dbo.conversations c
+       LEFT JOIN dbo.contacts ct ON ct.contact_id = c.contact_id
+       LEFT JOIN dbo.contact_custom_fields f ON f.contact_id = c.contact_id AND f.field_key = @key
        WHERE c.deleted_date IS NULL AND (@platform IS NULL OR c.platform = @platform)
          AND (c.classification_id <> @defCls OR c.qualification_id <> @defQual OR c.motif_id <> @defMotif
-              OR c.appointment_date IS NOT NULL OR c.classified_date IS NOT NULL)`,
-      { platform, defCls: d.classificationId, defQual: d.qualificationId, defMotif: d.motifId },
+              OR c.appointment_date IS NOT NULL OR c.classified_date IS NOT NULL OR f.field_value IS NOT NULL)`,
+      {
+        platform: platform ? dbPlatform(platform) : null, key: DOSSIER_FIELD,
+        defCls: d.classificationId, defQual: d.qualificationId, defMotif: d.motifId,
+      },
     )
   ).rows;
-  return rows.map(toConversation);
+  return rows.map((r) => ({ ...toConversation(r), extras: parseExtras(r.extras_json), contactPhone: r.contact_phone }));
+}
+
+/** One conversation with its extras and contact phone (for a response). */
+async function withExtras(conversationId) {
+  const r = await db.one(
+    `SELECT ${COLUMNS}, contact_phone = ct.phone, extras_json = f.field_value
+     FROM dbo.conversations c
+     LEFT JOIN dbo.contacts ct ON ct.contact_id = c.contact_id
+     LEFT JOIN dbo.contact_custom_fields f ON f.contact_id = c.contact_id AND f.field_key = @key
+     WHERE c.conversation_id = @id`,
+    { id: conversationId, key: DOSSIER_FIELD },
+  );
+  return r ? { ...toConversation(r), extras: parseExtras(r.extras_json), contactPhone: r.contact_phone } : null;
 }
 
 /**
  * Change the dossier of one conversation. Only the given fields change:
- *   stage (funnel step code), qualification (status code),
- *   typologie ("" = not known yet), appointmentAt (Date|null)
- * A qualification change is appended to conversation_qualification_history;
- * every edit records who made it and when (classified_by / classified_date).
+ *   stage (pipeline code), typologie ("" = not known yet), appointmentAt
+ *   (Date|null), phone (the contact's number, "" to clear) and the extras
+ *   (invoiceRef, pax, isPriority, comment, appointmentPlace,
+ *   appointmentAgencyId, appointmentAgencyName, appointmentAgent).
+ * A stage change writes its (Étape, Qualification) pair and appends a
+ * history row when the Qualification moves; every edit records who made it
+ * and when (classified_by / classified_date). Extras need the customer's
+ * contact: a thread-only conversation keeps none.
+ * @throws {Error} with status 409 when the phone number belongs to another contact
  */
-async function setDossier(conversationId, { stage, qualification, typologie, appointmentAt }, userId) {
-  const r = refs();
+async function setDossier(conversationId, { stage, typologie, appointmentAt, phone, extras }, userId) {
   const now = new Date();
   await tx(async (t) => {
     const current = await t.one(
-      `SELECT qualification_id, classification_id FROM dbo.conversations WITH (UPDLOCK) WHERE conversation_id = @id`,
+      `SELECT qualification_id, classification_id, contact_id FROM dbo.conversations WITH (UPDLOCK) WHERE conversation_id = @id`,
       { id: conversationId },
     );
     if (!current) throw new Error("Conversation not found");
@@ -564,19 +780,17 @@ async function setDossier(conversationId, { stage, qualification, typologie, app
       "updated_time = @now_time",
     ];
     const params = { id: conversationId, userId: userId ? Number(userId) : null, ...at("now", now) };
-    if (stage !== undefined && isStage(stage)) {
-      sets.push("classification_id = @cls");
-      params.cls = r.stageToClassification[stage];
-    }
     let newQualification = null;
-    if (qualification !== undefined && isQualification(qualification)) {
-      newQualification = r.qualificationToId[qualification];
-      sets.push("qualification_id = @qual");
-      params.qual = newQualification;
+    if (stage !== undefined && isStage(stage)) {
+      const pair = pairOf(stage);
+      sets.push("classification_id = @cls", "qualification_id = @qual");
+      params.cls = pair.classificationId;
+      params.qual = pair.qualificationId;
+      newQualification = pair.qualificationId;
     }
     if (typologie !== undefined && (typologie === "" || isTypology(typologie))) {
       sets.push("motif_id = @motif");
-      params.motif = r.typologyToMotif[typologie];
+      params.motif = refs().typologyToMotif[typologie];
     }
     if (appointmentAt !== undefined) {
       sets.push("appointment_date = @rdv_date", "appointment_time = @rdv_time");
@@ -590,20 +804,48 @@ async function setDossier(conversationId, { stage, qualification, typologie, app
         { id: conversationId, qual: newQualification, userId: params.userId, ...at("now", now) },
       );
     }
-    if (params.cls !== undefined || newQualification !== null) {
-      await registerPair(t, params.cls ?? current.classification_id, newQualification ?? current.qualification_id);
+    if (params.cls !== undefined) await registerPair(t, params.cls, params.qual);
+
+    if (current.contact_id && phone !== undefined) {
+      const number = contacts.fit(phone, 30);
+      const taken = number
+        ? await t.scalar(`SELECT 1 FROM dbo.contacts WHERE phone = @phone AND contact_id <> @contactId`, { phone: number, contactId: current.contact_id })
+        : null;
+      if (taken) {
+        const err = new Error("Ce numéro est déjà celui d'un autre prospect.");
+        err.status = 409;
+        throw err;
+      }
+      await t.query(`UPDATE dbo.contacts SET phone = @phone WHERE contact_id = @contactId`, { phone: number, contactId: current.contact_id });
+    }
+    if (current.contact_id && extras && Object.keys(extras).length > 0) {
+      const stored = parseExtras(await contacts.readCustomField(t, current.contact_id, DOSSIER_FIELD));
+      const next = { ...stored, ...extras };
+      await contacts.writeCustomField(t, current.contact_id, DOSSIER_FIELD, JSON.stringify(next));
     }
   });
-  return byId(conversationId);
+  return withExtras(conversationId);
 }
 
-/** The client-facing dossier of a conversation. */
-const publicDossier = (conv) => ({
-  stage: conv?.stage || DEFAULT_STAGE,
-  qualification: conv?.qualification || DEFAULT_QUALIFICATION,
-  typologie: conv?.typologie || "",
-  appointmentAt: conv?.appointmentAt || null,
-});
+/** The client-facing dossier of a conversation (main's shape, CLAUDE.md §6). */
+const publicDossier = (conv) => {
+  const x = conv?.extras || EMPTY_EXTRAS;
+  return {
+    stage: conv?.stage || DEFAULT_STAGE,
+    typologie: conv?.typologie || "",
+    invoiceRef: x.invoiceRef || "",
+    phone: conv?.platform === "whatsapp" ? "" : conv?.contactPhone || "",
+    pax: Number.isInteger(x.pax) ? x.pax : null,
+    isPriority: x.isPriority === true,
+    appointmentAt: conv?.appointmentAt || null,
+    appointmentPlace: conv?.appointmentAt ? x.appointmentPlace || "" : "",
+    appointmentAgencyId: conv?.appointmentAt ? x.appointmentAgencyId || "" : "",
+    appointmentAgencyName: conv?.appointmentAt ? x.appointmentAgencyName || "" : "",
+    appointmentAgent: conv?.appointmentAt ? x.appointmentAgent || "" : "",
+    comment: x.comment || "",
+    commentAt: x.commentAt || null,
+  };
+};
 
 // ─── Delete ──────────────────────────────────────────────────────────────────
 
@@ -616,7 +858,7 @@ async function softDelete(conversationId) {
   const d = refs().defaults;
   return tx(async (t) => {
     const before = await t.one(
-      `SELECT locked_by_user_id, classification_id, qualification_id, motif_id, appointment_date, classified_date
+      `SELECT locked_by_user_id, classification_id, qualification_id, motif_id, appointment_date, classified_date, contact_id
        FROM dbo.conversations WITH (UPDLOCK) WHERE conversation_id = @id`,
       { id: conversationId },
     );
@@ -636,8 +878,10 @@ async function softDelete(conversationId) {
          lock_expires_date = NULL, lock_expires_time = NULL,
          message_count = 0, unread_count = 0,
          deleted_date = @now_date, deleted_time = @now_time, updated_date = @now_date, updated_time = @now_time
-       WHERE conversation_id = @id;`,
-      { id: conversationId, qual: d.qualificationId, cls: d.classificationId, motif: d.motifId, ...at("now", new Date()) },
+       WHERE conversation_id = @id;
+       IF @contactId IS NOT NULL
+         DELETE dbo.contact_custom_fields WHERE contact_id = @contactId AND field_key = @key;`,
+      { id: conversationId, qual: d.qualificationId, cls: d.classificationId, motif: d.motifId, contactId: before.contact_id, key: DOSSIER_FIELD, ...at("now", new Date()) },
     );
     const touched =
       before.classification_id !== d.classificationId ||
@@ -654,6 +898,11 @@ async function softDelete(conversationId) {
 }
 
 module.exports = {
+  CALL_PLATFORM,
+  DOSSIER_FIELD,
+  EMPTY_EXTRAS,
+  dbPlatform,
+  apiPlatform,
   isThreadId,
   toConversation,
   findByKeys,
@@ -661,15 +910,22 @@ module.exports = {
   byId,
   ensureForCustomer,
   ensureForThread,
+  ensureForCall,
+  callStats,
+  callLeads,
   linkThreads,
   updateProfile,
   placeholderCustomers,
   recentWithLastMessage,
   lockedConversations,
   lock,
+  assign,
   refreshLockExpiry,
   unlockByKey,
   dossiers,
+  withExtras,
+  extrasFor,
+  parseExtras,
   setDossier,
   publicDossier,
   softDelete,

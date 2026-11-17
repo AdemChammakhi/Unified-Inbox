@@ -15,7 +15,9 @@
  * share. Either id finds the customer's conversation (the thread id is
  * recorded on it once known); `keyToCustomer` in the response lets the
  * client look a row up by its conversation key when its participant id was
- * missing.
+ * missing. Phone leads ("telephone", customer id "appel-<digits>") resolve
+ * the same way: their conversation is stored under the "call" platform
+ * (db/conversations.js maps the name).
  */
 
 "use strict";
@@ -36,7 +38,8 @@ const {
 } = require("../utils/leadFrein");
 const { THRESHOLDS, computeMaturity } = require("../utils/leadMaturity");
 
-const PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email"]);
+// "telephone": incoming-call leads, so their frein can be recorded from Leads
+const PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email", "telephone"]);
 const MAX_ITEMS = 200;
 const MAX_ID_LENGTH = 512;
 
@@ -189,10 +192,13 @@ async function computeInsights(platform, items) {
     return { insights, keyToCustomer: keyMap, thresholds: THRESHOLDS };
   }
 
-  const convIds = [...customers.values()].filter(Boolean).map((c) => c.id);
-  const [stats, freins] = await Promise.all([
+  const stored = [...customers.values()].filter(Boolean);
+  const convIds = stored.map((c) => c.id);
+  // The priority flag lives in the contact's "dossier" field: one query
+  const [stats, freins, extras] = await Promise.all([
     messageStats(convIds),
     getFreins(platform, [...customers.keys()]),
+    conversations.extrasFor(stored.map((c) => c.contactId)),
   ]);
 
   const now = new Date();
@@ -203,22 +209,27 @@ async function computeInsights(platform, items) {
     const lastIncomingAt = st.last_in || null;
     const lastOutgoingAt = st.last_out || null;
     const frein = freins.get(customer) || null;
+    const dossier =
+      conv && conv.contactId ? extras.get(String(conv.contactId).toLowerCase()) : null;
+    const maturity = computeMaturity({
+      messagesIn,
+      messagesOut,
+      lastIncomingAt,
+      lastOutgoingAt,
+      stage: conv ? conv.stage : null,
+      isPriority: dossier ? dossier.isPriority === true : false,
+      appointmentAt: conv ? conv.appointmentAt : null,
+      frein,
+      now,
+    });
     insights[customer] = {
       messagesIn,
       messagesOut,
       lastIncomingAt,
       lastOutgoingAt,
-      maturity: computeMaturity({
-        messagesIn,
-        messagesOut,
-        lastIncomingAt,
-        lastOutgoingAt,
-        stage: conv ? conv.stage : null,
-        qualification: conv ? conv.qualification : null,
-        appointmentAt: conv ? conv.appointmentAt : null,
-        frein,
-        now,
-      }),
+      maturity,
+      // The prospect wrote last and nobody has answered since
+      awaitingReply: maturity.awaitingReply,
       frein: publicFrein(frein),
       needsQualification: messagesOut >= 1 && !frein,
     };

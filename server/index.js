@@ -164,6 +164,10 @@ app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
 app.use("/api/exports", exportLimiter, require("./routes/exports"));
 app.use("/api/leads", apiLimiter, require("./routes/leads"));
 app.use("/api/lead-insights", apiLimiter, require("./routes/leadInsights"));
+// Read-only libraries served from server/data (no table in the SQL Server
+// schema, decisions D6 and D11)
+app.use("/api/partners", apiLimiter, require("./routes/partners"));
+app.use("/api/message-templates", apiLimiter, require("./routes/messageTemplates"));
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =

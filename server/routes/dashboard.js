@@ -33,11 +33,11 @@ router.get("/manager", protect, authorize("manager"), (req, res) => {
   });
 });
 
-// GET /api/dashboard/marketing - Agents only (the role was "marketing" before
-// the SQL Server schema, whose CHECK allows admin, manager and agent)
-router.get("/marketing", protect, authorize("agent"), (req, res) => {
+// GET /api/dashboard/marketing - Marketing only (the API role of the agents;
+// the SQL Server scripts store it as "agent", see server/db/users.js)
+router.get("/marketing", protect, authorize("marketing"), (req, res) => {
   res.json({
-    role: "agent",
+    role: "marketing",
     message: "Welcome to the Marketing Dashboard",
     features: [
       "Campaign management",

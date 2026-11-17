@@ -14,7 +14,10 @@
  *
  * The contact is found through its platform identity (platform + customer
  * id), the customer id every list shape agrees on (see CLAUDE.md §6), and
- * created when missing.
+ * created when missing. A phone lead ("telephone", customer id
+ * "appel-<digits>") has no identity row: its contact is the one on its
+ * conversation (contacts.contactIdFor), so a number never recorded as a
+ * lead has no contact to carry a frein.
  */
 
 "use strict";
@@ -33,7 +36,7 @@ const FREINS = Object.freeze([
 const LABEL_BY_CODE = new Map(FREINS.map((f) => [f.code, f.label]));
 
 /** Platforms a frein can be recorded for (Contact identities we write). */
-const FREIN_PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email"]);
+const FREIN_PLATFORMS = new Set(["instagram", "facebook", "whatsapp", "email", "telephone"]);
 
 const NOTE_MAX = 200;
 const HISTORY_MAX = 20;
@@ -119,10 +122,12 @@ async function setFrein({ platform, customerId, code, note, userId }) {
 
   const { sql, contacts } = store();
   await sql.tx(async (t) => {
-    const { contactId } = await contacts.ensureIdentity(t, {
-      platform,
-      externalId,
-    });
+    // Through the platform identity (created when missing), or, for a phone
+    // lead, through its conversation — which may not exist yet
+    const contactId = await contacts.contactIdFor(t, platform, externalId);
+    if (!contactId) {
+      throw badRequest("Client introuvable pour cette conversation.");
+    }
     const history = parseJson(
       await contacts.readCustomField(t, contactId, HISTORY_FIELD),
     );

@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { db, at } = require("../db/sql");
 const { isPlaceholderName } = require("../db/contacts");
+const conversations = require("../db/conversations");
 const { protect, authorize } = require("../middleware/auth");
 
 // Counts of "clients" are distinct customers who wrote: one conversation per
@@ -168,7 +169,7 @@ router.get("/appointments", protect, async (req, res) => {
     const range = parseInt(req.query.range) || 30;
     const since = new Date(Date.now() - range * 24 * 60 * 60 * 1000);
     const now = new Date();
-    const params = { ...at("since", since), ...at("now", now) };
+    const params = { ...at("since", since), ...at("now", now), key: conversations.DOSSIER_FIELD };
     const rdv = "dbo.fn_DateTimeCombine(c.appointment_date, c.appointment_time)";
 
     // The RDV date is independent of the Étape and the Qualification: an appointment
@@ -188,9 +189,10 @@ router.get("/appointments", protect, async (req, res) => {
       db
         .query(
           `SELECT TOP (50) c.platform, c.external_id, c.participant_external_id, c.participant_name,
-                  appointment_at = ${rdv}, u.first_name, u.last_name
+                  appointment_at = ${rdv}, u.first_name, u.last_name, extras_json = f.field_value
            FROM dbo.conversations c
            LEFT JOIN dbo.users u ON u.user_id = c.classified_by_user_id
+           LEFT JOIN dbo.contact_custom_fields f ON f.contact_id = c.contact_id AND f.field_key = @key
            WHERE c.appointment_date IS NOT NULL AND c.deleted_date IS NULL
              AND ${rdv} >= dbo.fn_DateTimeCombine(@now_date, @now_time)
            ORDER BY c.appointment_date, c.appointment_time`,
@@ -206,18 +208,23 @@ router.get("/appointments", protect, async (req, res) => {
     const endOfWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     // The agenda is useless without a name: the customer's, from their
-    // conversation, else a readable fallback.
+    // conversation, else a readable fallback. Where the RDV takes place and
+    // who receives the customer come from the contact's "dossier" field.
     const upcoming = upcomingRows.map((d) => {
       const key = d.participant_external_id || d.external_id;
+      const x = conversations.parseExtras(d.extras_json);
       return {
         conversationId: key,
-        platform: d.platform,
+        platform: conversations.apiPlatform(d.platform),
         name: !isPlaceholderName(d.participant_name, key)
           ? d.participant_name
           : d.platform === "whatsapp"
             ? `+${key}`
             : `Client ${String(key).slice(-4)}`,
         appointmentAt: d.appointment_at,
+        place: x.appointmentPlace || "",
+        agency: x.appointmentAgencyName || "",
+        agent: x.appointmentAgent || "",
         bookedBy: d.first_name
           ? `${d.first_name || ""} ${d.last_name || ""}`.trim()
           : null,
@@ -241,6 +248,67 @@ router.get("/appointments", protect, async (req, res) => {
   } catch (err) {
     console.error("Appointments analytics error:", err.message);
     return res.status(500).json({ message: "Failed to load appointments" });
+  }
+});
+
+// GET /api/analytics/ad-attribution?range=30
+// Which ads conversations come from. The ad a customer tapped is recorded
+// once, on their conversation (dbo.campaigns + conversations.campaign_id,
+// decision E14); the per-message ad context MongoDB kept is not stored
+// (decision D3). So an ad counts the conversations attributed to it that
+// received a customer message in the range, and each counts as one
+// attributed message; totalMessages is every incoming message of those
+// conversations in the range.
+router.get("/ad-attribution", protect, async (req, res) => {
+  try {
+    const range = parseInt(req.query.range) || 30;
+    const since = new Date(Date.now() - range * 24 * 60 * 60 * 1000);
+
+    const rows = (
+      await db.query(
+        `WITH active AS (
+           SELECT c.campaign_id, c.conversation_id, c.platform,
+                  n = COUNT(*), last_at = MAX(dbo.fn_DateTimeCombine(m.created_date, m.created_time))
+           FROM dbo.conversations c
+           JOIN dbo.message m ON m.conversation_id = c.conversation_id
+           WHERE c.campaign_id IS NOT NULL AND c.deleted_date IS NULL
+             AND m.sender_type = N'contact' AND ${storedSince("since")}
+           GROUP BY c.campaign_id, c.conversation_id, c.platform
+         )
+         SELECT TOP (50) k.campaign_id, k.external_id, k.title, k.permalink,
+                conversations = COUNT(*), total_messages = SUM(a.n), last_at = MAX(a.last_at),
+                platforms = (SELECT STRING_AGG(p.platform, N',')
+                             FROM (SELECT DISTINCT x.platform FROM active x WHERE x.campaign_id = k.campaign_id) p)
+         FROM dbo.campaigns k
+         JOIN active a ON a.campaign_id = k.campaign_id
+         GROUP BY k.campaign_id, k.external_id, k.title, k.permalink
+         ORDER BY last_at DESC`,
+        at("since", since),
+      )
+    ).rows;
+
+    const ads = rows
+      .map((a) => ({
+        key: a.external_id,
+        title: a.title || "(untitled ad)",
+        kind: "ad",
+        photoUrl: null,
+        url: a.permalink || null,
+        platforms: String(a.platforms || "")
+          .split(",")
+          .filter(Boolean)
+          .map(conversations.apiPlatform),
+        conversations: Number(a.conversations) || 0,
+        attributedMessages: Number(a.conversations) || 0,
+        totalMessages: Number(a.total_messages) || 0,
+        lastAt: a.last_at,
+      }))
+      .sort((x, y) => y.conversations - x.conversations || y.totalMessages - x.totalMessages);
+
+    return res.json({ range, ads });
+  } catch (err) {
+    console.error("Ad attribution error:", err.message);
+    return res.status(500).json({ message: "Ad attribution failed" });
   }
 });
 

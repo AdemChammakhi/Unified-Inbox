@@ -5,7 +5,10 @@
  * a string, plus firstName, lastName, email, role, isActive, createdBy,
  * createdAt, updatedAt. Passwords are bcrypt hashes (cost 10) in password_hash.
  *
- * Roles are the scripts' CHECK values: admin, manager, agent (decision E5).
+ * Roles: the API and the client keep the app's historical names (admin,
+ * manager, marketing); the scripts' CK_users_role allows admin, manager and
+ * agent, so "marketing" is stored as "agent" and read back as "marketing"
+ * (decision E5). Nothing above this module sees the stored name.
  */
 
 "use strict";
@@ -13,7 +16,11 @@
 const bcrypt = require("bcryptjs");
 const { db, tx, at } = require("./sql");
 
-const ROLES = Object.freeze(["admin", "manager", "agent"]);
+const ROLES = Object.freeze(["admin", "manager", "marketing"]);
+
+/** API role → stored role, and back. */
+const toStoredRole = (role) => (role === "marketing" ? "agent" : role);
+const toApiRole = (role) => (role === "agent" ? "marketing" : role);
 
 const COLUMNS = `
   u.user_id, u.first_name, u.last_name, u.email, u.role, u.created_by_user_id, u.is_active,
@@ -34,7 +41,7 @@ function toUser(row) {
     firstName: row.first_name,
     lastName: row.last_name,
     email: row.email,
-    role: row.role,
+    role: toApiRole(row.role),
     isActive: row.is_active !== false,
     createdBy: row.created_by_user_id ? String(row.created_by_user_id) : null,
     createdAt: row.created_at,
@@ -113,7 +120,7 @@ async function create({ firstName, lastName, email, password, role, createdBy })
       lastName: String(lastName).trim(),
       email: cleanEmail(email),
       hash,
-      role,
+      role: toStoredRole(role),
       createdBy: userIdOf(createdBy),
       ...at("now", now),
     },
@@ -140,7 +147,7 @@ async function update(id, fields) {
   }
   if (fields.role !== undefined) {
     sets.push("role = @role");
-    params.role = fields.role;
+    params.role = toStoredRole(fields.role);
   }
   if (fields.isActive !== undefined) {
     sets.push("is_active = @isActive");
@@ -193,6 +200,21 @@ async function remove(id) {
   });
 }
 
+/** The active accounts, as { _id, name, role }, for pickers. */
+async function activeAgents() {
+  const rows = (
+    await db.query(
+      `SELECT u.user_id, u.first_name, u.last_name, u.role FROM dbo.users u
+       WHERE u.is_active = 1 ORDER BY u.first_name, u.last_name`,
+    )
+  ).rows;
+  return rows.map((r) => ({
+    _id: String(r.user_id),
+    name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+    role: toApiRole(r.role),
+  }));
+}
+
 /** Map user id (string) → "First Last", for the given ids. */
 async function namesByIds(ids) {
   const wanted = [...new Set((ids || []).map(userIdOf).filter(Boolean))];
@@ -214,6 +236,9 @@ const comparePassword = (candidate, hash) =>
 
 module.exports = {
   ROLES,
+  toStoredRole,
+  toApiRole,
+  activeAgents,
   userIdOf,
   fullName,
   findById,

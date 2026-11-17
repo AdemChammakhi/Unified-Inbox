@@ -10,6 +10,11 @@
  *
  * Names: a placeholder ("User 1234", "Unknown", a raw id) never replaces a
  * real name, and one failed profile lookup never wipes a stored avatar.
+ *
+ * Leads recorded from an incoming phone call (API platform "telephone",
+ * stored as "call") have no identity row — CK_cpi_platform does not allow
+ * the platform — so their contact is reached through their conversation
+ * (conversations.contact_id); see contactIdFor / customFieldFor.
  */
 
 "use strict";
@@ -17,6 +22,9 @@
 const { db, at, lockKey, jsonList, isDuplicateKey } = require("./sql");
 
 const IDENTITY_PLATFORMS = new Set(["facebook", "instagram", "whatsapp", "email", "tiktok"]);
+
+/** The API's "telephone" platform is stored as the scripts' "call". */
+const CALL_PLATFORM = "telephone";
 
 /** Names the webhooks use when the real one is unknown. */
 function isPlaceholderName(name, externalId) {
@@ -199,22 +207,91 @@ async function avatarMap(platform, externalIds) {
 
 // ─── Custom fields ───────────────────────────────────────────────────────────
 
-/** Values of one custom field for many identities: Map customerId -> string. */
+/**
+ * Values of one custom field for many customers of a platform: Map
+ * customerId -> string. Through the identity for the platforms that have
+ * one, through the conversation for phone leads.
+ */
 async function customFieldFor(platform, externalIds, fieldKey) {
   const ids = [...new Set((externalIds || []).filter(Boolean).map(String))];
   const out = new Map();
   if (ids.length === 0) return out;
   const rows = (
-    await db.query(
-      `SELECT i.external_id, f.field_value
-       FROM dbo.contact_platform_identities i
-       JOIN dbo.contact_custom_fields f ON f.contact_id = i.contact_id AND f.field_key = @fieldKey
-       WHERE i.platform = @platform AND i.external_id IN (SELECT value FROM OPENJSON(@ids))`,
-      { platform, fieldKey, ids: jsonList(ids) },
-    )
+    platform === CALL_PLATFORM
+      ? await db.query(
+          `SELECT external_id = c.participant_external_id, f.field_value
+           FROM dbo.conversations c
+           JOIN dbo.contact_custom_fields f ON f.contact_id = c.contact_id AND f.field_key = @fieldKey
+           WHERE c.platform = N'call' AND c.participant_external_id IN (SELECT value FROM OPENJSON(@ids))`,
+          { fieldKey, ids: jsonList(ids) },
+        )
+      : await db.query(
+          `SELECT i.external_id, f.field_value
+           FROM dbo.contact_platform_identities i
+           JOIN dbo.contact_custom_fields f ON f.contact_id = i.contact_id AND f.field_key = @fieldKey
+           WHERE i.platform = @platform AND i.external_id IN (SELECT value FROM OPENJSON(@ids))`,
+          { platform, fieldKey, ids: jsonList(ids) },
+        )
   ).rows;
   for (const r of rows) out.set(r.external_id, r.field_value);
   return out;
+}
+
+/**
+ * The contact behind one customer of a platform, inside transaction `t`:
+ * found or created through its identity, or, for a phone lead, read from
+ * its conversation (null when that lead has none).
+ * @returns {Promise<string|null>} contact_id
+ */
+async function contactIdFor(t, platform, customerId) {
+  if (platform === CALL_PLATFORM) {
+    return t.scalar(
+      `SELECT TOP 1 contact_id FROM dbo.conversations
+       WHERE platform = N'call' AND participant_external_id = @customer ORDER BY conversation_id`,
+      { customer: fit(customerId, 255) },
+    );
+  }
+  const { contactId } = await ensureIdentity(t, { platform, externalId: customerId });
+  return contactId;
+}
+
+/**
+ * The contact of a prospect who phoned: the one whose number this is, else
+ * a new one carrying the name, number and email. Inside transaction `t`.
+ * @returns {Promise<string>} contact_id
+ */
+async function ensureByPhone(t, { phone, name, email, seenAt }) {
+  const number = fit(phone, 30);
+  if (!number) throw new Error("A phone contact needs a number");
+  await lockKey(t, `phone:${number}`);
+  const now = seenAt instanceof Date ? seenAt : new Date();
+  const mail = emailOf("email", email || "") || null;
+  const found = await t.one(`SELECT contact_id, email FROM dbo.contacts WHERE phone = @phone`, { phone: number });
+  if (found) {
+    await t.query(
+      `UPDATE dbo.contacts SET
+         display_name = CASE WHEN @name IS NOT NULL AND (display_name = N'Unknown' OR display_name NOT LIKE N'%[^0-9+ ]%') THEN @name ELSE display_name END,
+         email = CASE WHEN email IS NULL AND @mail IS NOT NULL
+                       AND NOT EXISTS (SELECT 1 FROM dbo.contacts x WHERE x.email = @mail) THEN @mail ELSE email END,
+         last_contact_date = @now_date, last_contact_time = @now_time, updated_date = @now_date, updated_time = @now_time
+       WHERE contact_id = @id`,
+      { id: found.contact_id, name: fit(name, 255), mail, ...at("now", now) },
+    );
+    return found.contact_id;
+  }
+  const mailFree = mail
+    ? !(await t.scalar(`SELECT 1 FROM dbo.contacts WHERE email = @mail`, { mail }))
+    : false;
+  return t.scalar(
+    `DECLARE @id uniqueidentifier = NEWID();
+     INSERT dbo.contacts (contact_id, display_name, email, phone, total_conversations, total_messages,
+                          is_blocked, is_spam, is_vip, first_contact_date, first_contact_time,
+                          last_contact_date, last_contact_time, created_date, created_time, updated_date, updated_time)
+     VALUES (@id, @display, @mail, @phone, 0, 0, 0, 0, 0, @now_date, @now_time, @now_date, @now_time,
+             @now_date, @now_time, @now_date, @now_time);
+     SELECT @id;`,
+    { display: fit(name, 255) || number, mail: mailFree ? mail : null, phone: number, ...at("now", now) },
+  );
 }
 
 /** Read a custom field inside a transaction. */
@@ -237,10 +314,13 @@ async function writeCustomField(t, contactId, fieldKey, value) {
 
 module.exports = {
   IDENTITY_PLATFORMS,
+  CALL_PLATFORM,
   isPlaceholderName,
   fit,
   url500,
   ensureIdentity,
+  ensureByPhone,
+  contactIdFor,
   avatarMap,
   customFieldFor,
   readCustomField,
