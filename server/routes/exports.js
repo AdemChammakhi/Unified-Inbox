@@ -309,7 +309,8 @@ async function buildMessageRows({ platform, since }) {
         for (const [id, frein] of got) freins.set(`${plat}:${id}`, frein);
       } catch (err) {
         console.warn(
-          `[Export] frein lookup skipped for ${plat} (non-fatal):`,
+          "[Export] frein lookup skipped for %s (non-fatal):",
+          plat,
           err.message,
         );
       }

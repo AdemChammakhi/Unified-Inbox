@@ -120,14 +120,14 @@ function recordGraphListInBackground(platform, links, syncs) {
   setImmediate(async () => {
     if (links.length > 0) {
       await conversations.linkThreads(platform, links).catch((err) =>
-        console.error(`[${platform}] thread id link failed (non-fatal):`, err.message),
+        console.error("[%s] thread id link failed (non-fatal):", platform, err.message),
       );
     }
     for (const args of syncs) {
       try {
         await syncGraphMessages(args);
       } catch (err) {
-        console.error(`[${platform}] message sync error (non-fatal):`, err.message);
+        console.error("[%s] message sync error (non-fatal):", platform, err.message);
       }
     }
   });

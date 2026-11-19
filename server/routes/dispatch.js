@@ -77,7 +77,7 @@ function fail(res, error, fallback, tag) {
   if (error && error.status && error.status < 500) {
     return res.status(error.status).json({ message: error.message });
   }
-  console.error(`Dispatch ${tag} error:`, error && error.message);
+  console.error("Dispatch %s error:", tag, error && error.message);
   return res.status(500).json({ message: fallback });
 }
 

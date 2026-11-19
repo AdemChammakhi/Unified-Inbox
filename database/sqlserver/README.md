@@ -132,7 +132,7 @@ them in place.
    # 1. a dry run: everything is written, reported, then rolled back
    docker compose -f docker-compose.prod.yml run --rm --no-deps \
      -v "$PWD/database:/app/database:ro" backend \
-     node database/sqlserver/migrate-from-mongodb.js --mongo-uri 'mongodb://<user>:<password>@mongodb:27017/<db>'
+     node database/sqlserver/migrate-from-mongodb.js --mongo-uri "$MONGODB_URI"   # the address the current backend uses
    # 2. the real copy, into an empty UnifiedBox1: the same with --commit at the end
    ```
    MongoDB is only read. Run the dry run against a copy first. The report

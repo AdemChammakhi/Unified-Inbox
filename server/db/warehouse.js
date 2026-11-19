@@ -163,7 +163,7 @@ function runWarehouseEtl() {
     ).rows;
     const ms = Date.now() - started;
     if (failure) {
-      console.error(`[Warehouse] ETL failed after ${ms} ms:`, failure.message);
+      console.error("[Warehouse] ETL failed after %d ms:", ms, failure.message);
       throw failure;
     }
     console.log(`[Warehouse] ETL done in ${ms} ms: ${steps.length} steps, ${days} calendar days added`);

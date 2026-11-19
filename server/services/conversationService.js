@@ -71,7 +71,7 @@ async function storeCustomerMessage(p) {
   });
   if (p.context) {
     campaigns.recordReferral(conversation, p.platform, p.context).catch((err) => {
-      console.error(`[Campaign] ${p.platform} referral not recorded (non-fatal):`, err.message);
+      console.error("[Campaign] %s referral not recorded (non-fatal):", p.platform, err.message);
     });
   }
   return { conversation, ...res };
