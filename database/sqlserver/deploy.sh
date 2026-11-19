@@ -5,6 +5,7 @@
 # data folder. A database that already exists is left as it is.
 #
 # Then (idempotent, rows and principals only, never schema):
+#  - the fixes to the scripts' stored procedures (schema-fixes.sql, D16);
 #  - the warehouse's unknown members and statuses (warehouse-rows.sql);
 #  - read access to UnifiedBoxDW for powerbi_reader (db_datareader);
 #  - with UNIFIEDBOX_APP_PASSWORD set, the backend's login unifiedbox_app
@@ -44,6 +45,12 @@ for pair in "UnifiedBox1:dbunifedbox.sql" "UnifiedBoxDW:dwunifiedbox.sql"; do
   rm -f "/tmp/${file}"
   echo "${db} created from schema/${file}."
 done
+
+# The fixes to the scripts' stored procedures (decision D16): procedures only,
+# idempotent, applied on top of the unaltered scripts — also on databases that
+# exist already.
+sqlcmd -i "${dir}/schema-fixes.sql"
+echo "Procedure fixes applied (schema-fixes.sql)."
 
 sqlcmd -i "${dir}/warehouse-rows.sql"
 echo "Warehouse unknown members and statuses ensured."
