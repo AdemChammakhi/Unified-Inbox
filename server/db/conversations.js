@@ -104,10 +104,16 @@ const cleanKeys = (keys) =>
  * Record an (Étape, Qualification) pair in classification_qualification_matrix
  * when it is new: the table lists the pairs the data holds, filled by the
  * scripts' lead import for its rows and by the app for its own.
+ *
+ * UPDLOCK + HOLDLOCK keeps the check and the insert atomic: two
+ * conversations created at the same moment (webhooks of two customers) used
+ * to both find the pair missing, and the second insert hit
+ * PK_class_qual_matrix, failing that webhook and losing its message. Now the
+ * second transaction waits for the first, then finds the row.
  */
 async function registerPair(t, classificationId, qualificationId) {
   await t.query(
-    `IF NOT EXISTS (SELECT 1 FROM dbo.classification_qualification_matrix
+    `IF NOT EXISTS (SELECT 1 FROM dbo.classification_qualification_matrix WITH (UPDLOCK, HOLDLOCK)
                     WHERE classification_id = @cls AND qualification_id = @qual)
        INSERT dbo.classification_qualification_matrix (classification_id, qualification_id) VALUES (@cls, @qual);`,
     { cls: classificationId, qual: qualificationId },

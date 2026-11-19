@@ -302,10 +302,14 @@ async function readCustomField(t, contactId, fieldKey) {
   );
 }
 
-/** Insert or replace a custom field inside a transaction. */
+/**
+ * Insert or replace a custom field inside a transaction. SERIALIZABLE on the
+ * UPDATE holds the key range when the row is missing, so two writers of the
+ * same field cannot both insert it (the same race registerPair had).
+ */
 async function writeCustomField(t, contactId, fieldKey, value) {
   await t.query(
-    `UPDATE dbo.contact_custom_fields SET field_value = @value WHERE contact_id = @contactId AND field_key = @fieldKey;
+    `UPDATE dbo.contact_custom_fields WITH (UPDLOCK, SERIALIZABLE) SET field_value = @value WHERE contact_id = @contactId AND field_key = @fieldKey;
      IF @@ROWCOUNT = 0
        INSERT dbo.contact_custom_fields (contact_id, field_key, field_value) VALUES (@contactId, @fieldKey, @value);`,
     { contactId, fieldKey, value },
