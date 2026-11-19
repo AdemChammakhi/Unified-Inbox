@@ -39,6 +39,8 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DB_DIR="$(dirname "${SCRIPT_DIR}")"
 APP_DIR="${APP_DIR:-$(dirname "${DB_DIR}")}"
+# Files copied from Windows arrive readable by root only; the backend image does not run as root.
+chmod -R a+rX "${DB_DIR}" 2> /dev/null || true
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 BACKEND_SERVICE="${BACKEND_SERVICE:-backend}"
 FRONTEND_SERVICE="${FRONTEND_SERVICE:-frontend}"

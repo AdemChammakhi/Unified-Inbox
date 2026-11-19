@@ -271,6 +271,27 @@ async function main() {
     }
   }
 
+  // A Graph thread whose only stored messages are the page's replies has no
+  // customer message naming it; the customer those replies were sent to owns
+  // it. Without this its dossier, lock and recipient-less replies would form a
+  // second conversation on the same key and be dropped.
+  for (const p of [...persons.values()]) {
+    if (!p.thread) continue;
+    const k = `${p.platform}:${p.thread}`;
+    if (!convToPerson.has(k)) convToPerson.set(k, p.person);
+  }
+  for (const [key, p] of [...persons]) {
+    if (!isThreadId(p.platform, p.person)) continue;
+    const owner = convToPerson.get(key);
+    if (!owner || owner === p.person) continue;
+    const o = personFor(p.platform, owner);
+    o.messages += p.messages;
+    if (p.first && (!o.first || p.first < o.first)) o.first = p.first;
+    if (p.last && (!o.last || p.last > o.last)) o.last = p.last;
+    persons.delete(key);
+    count("thread-only conversations joined to their customer");
+  }
+
   // Dossiers and locks keyed by a thread id belong to its customer
   const personOfKey = (platform, key) => {
     const k = norm(platform, key);
@@ -927,7 +948,10 @@ async function main() {
       }
       const person = personOf(m, platform);
       const convId = person ? conversationId.get(personKey(platform, person)) : null;
-      if (!convId) continue;
+      if (!convId) {
+        count("messages skipped: no conversation");
+        continue;
+      }
       const ext = fit(m.externalId, 255);
       if (ext) {
         const k = `${convId}:${ext}`;
@@ -997,7 +1021,7 @@ async function main() {
                       locks = (SELECT COUNT(*) FROM dbo.conversations WHERE locked_by_user_id IS NOT NULL),
                       campaigns = (SELECT COUNT(*) FROM dbo.campaigns)`)
     )[0];
-    console.log("\nMongoDB read:", JSON.stringify({ users: mUsers.length, channels: mChannels.length, contacts: mContacts.length, classifications: mClassifications.length, locks: mLocks.length, incomingCalls: mCalls.length, dispatches: mDispatches.length, partners: mPartners.length }));
+    console.log("\nMongoDB read:", JSON.stringify({ messages: await mdb.collection("messages").countDocuments(), users: mUsers.length, channels: mChannels.length, contacts: mContacts.length, classifications: mClassifications.length, locks: mLocks.length, incomingCalls: mCalls.length, dispatches: mDispatches.length, partners: mPartners.length }));
     console.log("Report:");
     for (const [k, v] of Object.entries(report).sort()) console.log(`  ${k}: ${v}`);
     console.log("SQL Server now holds:", JSON.stringify(check));
