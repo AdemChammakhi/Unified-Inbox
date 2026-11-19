@@ -340,3 +340,29 @@ These do not block code work, but they block production cutover.
      with its conversation (E12), shifts the numbers and leaves stale durations.
    - Minor: the fact loaders build date keys with `FORMAT()` row by row, slow
      on large tables.
+
+---
+
+## Proposed answers to the open items (not decided)
+
+*Proposed by Claude on 19 Nov 2026 at the owner's request. Nothing here is a
+decision until the owner confirms it; a confirmed answer becomes a D entry
+above and its open item is struck through.*
+
+| Item | Proposal | Why |
+|---|---|---|
+| 1. VPS memory | Check `free -h`. With 4 GB or more in total, run SQL Server Express beside the app and cap it at about 1.5 GB (`mssql-conf set memory.memorylimitmb 1536`); with less, upgrade the plan before the cutover. Nightly `BACKUP DATABASE` of both databases to the data volume, copied off the server | The app and nginx need room too. Express is limited to about 1.4 GB of buffer pool and **10 GB per database**: enough today, `message` is the table to watch |
+| 2. Cutover | A maintenance window at a quiet hour (e.g. Sunday night, Tunis time), no dual-write: stop the backend, `mongodump`, `migrate-from-mongodb.js --commit`, start the new images. Keep the MongoDB container stopped, not deleted, for about two weeks as the rollback | Dual-write costs much more code for little gain. Meta retries undelivered webhooks and the Graph history sync fills gaps, so a window under an hour loses nothing |
+| 3. Production data for the dry run | `mongodump` on the VPS, restored into a local container on the owner's machine; dry run there; the copy deleted afterwards. Never sent to a third-party service | It is customers' personal data: it stays under the owner's control |
+| 4. KPI definitions | Closed by D14 | |
+| 5. Deletes | Confirm E12 as it stands: a deleted conversation loses its messages and history but keeps its row with `deleted_date` (the warehouse's `deleted_flag`); users are suspended by default, hard delete for mistakes only | It is how the app behaves today, and the warehouse keeps counting deleted leads |
+| 6. Power BI | The `powerbi_reader` password to the report author only. Port 1433 is never opened to the internet: Power BI Desktop reaches it through an SSH tunnel; if the Power BI Service must refresh on a schedule, the on-premises data gateway on an office PC | The warehouse holds the whole customer base |
+| 7. Project notes | Update `CLAUDE.md` and `docs/migration/decisions.md` in the same change as the cutover, not before | Until then they correctly describe production, which runs MongoDB |
+| 8. Script defects (5 Oct) | Fix in the scripts before the cutover: `usp_load_fact_call` writes NULL instead of -1 for a call without a lead; `is_classified_flag` tests something real (e.g. `classified_date IS NOT NULL`); the import's blank defaults become labels the CHECKs allow ("Nouveau lead" for both fields); `usp_load_fact_call` is removed from the UnifiedBox1 script | The first one keeps every call out of the warehouse and ends `usp_run_etl` FAILED; the next two make the classified and import figures wrong |
+| 9. Script defects (17 Nov) | Before the cutover: `usp_load_fact_call` takes the agent from the source extension when the call is outbound. If the spreadsheet import (`stg.leads_import`) will be used: deduplicate staging rows by phone and email, map `telephone` → `call` and `messenger` → `facebook`, skip rows with an unreadable date instead of failing the run. Later: `usp_load_fact_qualification_duration` also updates `entered_at` and deletes rows whose history is gone (`WHEN NOT MATCHED BY SOURCE`); `FORMAT()` replaced by `CONVERT(int, CONVERT(char(8), d, 112))` | Calls per agent are wrong without the first. The import fixes matter only if the import is used, the app being the usual writer. The last two affect durations after deletes and speed on large tables |
+
+**Proposed order:** free disk space and test the port on SQL Server → fix the
+script defects (8, and the outbound-call one of 9) → dry run on a copy of
+production data (3) → RAM and backups on the VPS (1) → cutover in a window (2),
+with the project notes updated in the same change (7). Items 5 and 6 can be
+confirmed at any time.
