@@ -249,6 +249,50 @@ nothing, so every SELECT was refused. `deploy.sh` adds it to `db_datareader`
 on UnifiedBoxDW only: a role membership, not a schema change. Who receives
 its password stays open item 6.
 
+### D16. The stored procedures' defects are fixed, on top of the scripts
+*Decided by the project owner, 19 Nov 2026 ("fix the problems"). Narrows D5.*
+
+The defects of open items 8 and 9 are fixed in `schema-fixes.sql`, which
+`deploy.sh` applies after the two scripts. **Procedures only**: no table,
+column, constraint, index, view or function changes, and the two files in
+`schema/` stay the owner's, verbatim (D5 still holds for everything else).
+The file is generated from the scripts' own procedure text with these
+replacements:
+
+- `usp_load_fact_call` (warehouse): a call without a lead gets `lead_key`
+  NULL instead of -1; an outbound call's agent is read from the source
+  extension.
+- `usp_load_fact_lead`: `is_classified_flag` is 1 when `classified_date` is
+  set (an agent worked the dossier, E15), no longer a label test that the
+  CHECK made always true.
+- `usp_load_fact_qualification_duration`: also updates `lead_key` and
+  `entered_at`, and deletes rows whose history is gone.
+- The three loaders build date keys with `CONVERT(…, 112)`.
+- `usp_load_leads_from_staging` (UnifiedBox1): a blank Étape or Qualification
+  is "Nouveau lead"; `telephone` → `call`, `messenger` → `facebook`; rows
+  with an unknown platform or an unreadable creation date are skipped and
+  counted (`leads_ignores` in the result); one contact per phone; an email
+  stays on the first contact that carries it. Still as before: contacts
+  without a phone are matched on the display name.
+- `usp_load_fact_call` is dropped from UnifiedBox1.
+
+The owner's SSMS copies of the procedures do not carry these fixes: a later
+revision of the scripts should take them from `schema-fixes.sql`.
+
+### D17. Cutover at midnight, scripted, with backups
+*Decided by the project owner, 19 Nov 2026.*
+
+- The VPS has the memory (open item 1, confirmed by the owner).
+- The whole of the MongoDB data is migrated at midnight (Africa/Tunis) in a
+  maintenance window, by `cutover.sh`: a rehearsal on the real data first
+  (`prepare`), then the scheduled switch, which rolls back by itself on any
+  failure. SQL Server runs as a standalone container next to the compose
+  project, so the VPS compose file is not edited. MongoDB is left running as
+  the way back.
+- Backups: `backup.sh`, nightly at 03:30 server time, 14 days kept, with a
+  checksum verification; the cutover installs it. Copying them off the server
+  (`BACKUP_COPY_CMD`) is still to be set by the owner.
+
 ---
 
 ## Engineering decisions and assumptions
@@ -292,11 +336,12 @@ all. The owner may override any of them.
 
 These do not block code work, but they block production cutover.
 
-1. **VPS memory.** SQL Server needs at least 2 GB; confirm the VPS has it free
-   (`free -h`), and plan backups of the SQL Server volume (README.md, step 7).
-2. **Cutover strategy.** The migration script assumes a maintenance window
+1. ~~**VPS memory.** SQL Server needs at least 2 GB; confirm the VPS has it free
+   (`free -h`), and plan backups of the SQL Server volume (README.md, step 7).~~
+   Confirmed and scripted: D17. Left: an off-server copy of the backups.
+2. ~~**Cutover strategy.** The migration script assumes a maintenance window
    (old backend stopped, one transaction, then the new images). A dual-write
-   period is not built.
+   period is not built.~~ Decided: D17.
 3. **Access to production data** for the dry-run migration, and the rules for
    handling that personal data. The script is tested on synthetic data only.
 4. ~~**KPI definition changes.** Analytics counts still use ingestion time
@@ -309,7 +354,7 @@ These do not block code work, but they block production cutover.
 7. **Project notes.** `CLAUDE.md` §5–§11, §17, §18 and
    `docs/migration/decisions.md` in the main checkout still describe MongoDB;
    they are the owner's files to update.
-8. **Defects in the 5 Oct scripts** (D9), for the schema owner to fix:
+8. **Defects in the 5 Oct scripts** (D9) — **fixed by D16** (`schema-fixes.sql`):
    - `usp_load_fact_call` writes `lead_key = -1` for a call without a
      conversation, and `fact_lead` has no -1 row, so `FK_fact_call_lead`
      rejects it: no call loads and `usp_run_etl` ends FAILED on that last
@@ -324,7 +369,8 @@ These do not block code work, but they block production cutover.
      so one blank cell cancels the whole import.
    - The UnifiedBox1 script also creates `usp_load_fact_call`, which reads
      warehouse tables and cannot run there. Harmless to the app.
-9. **More defects in the 5 Oct scripts**, found on 17 Nov 2026 (not in item 8):
+9. **More defects in the 5 Oct scripts**, found on 17 Nov 2026 — **fixed by
+   D16**, except the name-only matching of contacts without a phone:
    - `usp_load_leads_from_staging` also cancels the whole import when two
      staging rows share a phone or an email (`UQ_contacts_phone` /
      `UQ_contacts_email`), when a creation date is not `dd/mm/yyyy`
