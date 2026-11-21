@@ -21,7 +21,9 @@ import { fillTemplate, copyText } from "../constants/templates";
  */
 const TemplatesPanel = ({ platform, customerName, onInsert, onClose }) => {
   const { user } = useAuth();
-  const canManage = user?.role === "admin" || user?.role === "manager";
+  // Hidden when the server serves the library read-only (SQL Server build)
+  const [readOnly, setReadOnly] = useState(false);
+  const canManage = (user?.role === "admin" || user?.role === "manager") && !readOnly;
 
   const [templates, setTemplates] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -47,6 +49,7 @@ const TemplatesPanel = ({ platform, customerName, onInsert, onClose }) => {
         params: { platform: platform || undefined },
       });
       setTemplates(res.data.templates || []);
+      setReadOnly(res.data.readOnly === true);
       setCategories(res.data.categories || []);
     } catch (err) {
       setError(err.response?.data?.message || "Impossible de charger les modèles.");

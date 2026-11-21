@@ -1,6 +1,7 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
-const User = require("../models/User");
+const users = require("../db/users");
+const { isDuplicateKey } = require("../db/sql");
 const { protect, authorize } = require("../middleware/auth");
 const { authLimiter } = require("../middleware/rateLimiter");
 
@@ -30,23 +31,27 @@ router.post("/create-user", protect, async (req, res) => {
     }
 
     // Validate role
-    if (!["admin", "manager", "marketing"].includes(role)) {
+    if (!users.ROLES.includes(role)) {
       return res.status(400).json({ message: "Invalid role selected" });
+    }
+    if (String(password).length < 6) {
+      return res
+        .status(400)
+        .json({ message: "Le mot de passe doit faire au moins 6 caractères." });
     }
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email: String(email) });
-    if (existingUser) {
+    if (await users.emailTaken(String(email))) {
       return res
         .status(400)
         .json({ message: "User already exists with this email" });
     }
 
     // Create user — remember who opened it so the creator can manage it later
-    const user = await User.create({
+    const user = await users.create({
       firstName,
       lastName,
-      email,
+      email: String(email),
       password,
       role,
       createdBy: req.user._id,
@@ -62,6 +67,11 @@ router.post("/create-user", protect, async (req, res) => {
       createdAt: user.createdAt,
     });
   } catch (error) {
+    if (isDuplicateKey(error)) {
+      return res
+        .status(400)
+        .json({ message: "User already exists with this email" });
+    }
     res.status(500).json({ message: error.message });
   }
 });
@@ -76,16 +86,13 @@ router.post("/create-user", protect, async (req, res) => {
 router.get("/users", protect, authorize("admin"), async (req, res) => {
   try {
     const scope = req.query.scope === "all" ? "all" : "mine";
-    const filter = scope === "mine" ? { createdBy: req.user._id } : {};
-    const users = await User.find(filter)
-      .select("-password")
-      .populate("createdBy", "firstName lastName email")
-      .sort({ createdAt: -1 })
-      .lean();
+    const list = await users.list(
+      scope === "mine" ? { createdBy: req.user._id } : {},
+    );
 
     return res.json({
       scope,
-      users: users.map((u) => ({
+      users: list.map((u) => ({
         _id: u._id,
         firstName: u.firstName,
         lastName: u.lastName,
@@ -95,13 +102,7 @@ router.get("/users", protect, authorize("admin"), async (req, res) => {
         createdAt: u.createdAt,
         updatedAt: u.updatedAt,
         isSelf: String(u._id) === String(req.user._id),
-        createdBy: u.createdBy
-          ? {
-              _id: u.createdBy._id,
-              name: `${u.createdBy.firstName || ""} ${u.createdBy.lastName || ""}`.trim(),
-              email: u.createdBy.email,
-            }
-          : null,
+        createdBy: u.creator,
       })),
     });
   } catch (error) {
@@ -113,15 +114,16 @@ router.get("/users", protect, authorize("admin"), async (req, res) => {
 // PUT /api/auth/users/:id — update name, email, role, active state, password
 router.put("/users/:id", protect, authorize("admin"), async (req, res) => {
   try {
-    const target = await User.findById(req.params.id);
+    const target = await users.findById(req.params.id);
     if (!target) {
       return res.status(404).json({ message: "Compte introuvable" });
     }
 
     const { firstName, lastName, email, role, isActive, password } = req.body;
+    const changes = {};
 
     if (role !== undefined) {
-      if (!["admin", "manager", "marketing"].includes(role)) {
+      if (!users.ROLES.includes(role)) {
         return res.status(400).json({ message: "Rôle invalide" });
       }
       // Don't let an admin demote themselves and lock everyone out of
@@ -131,7 +133,7 @@ router.put("/users/:id", protect, authorize("admin"), async (req, res) => {
           message: "Vous ne pouvez pas changer votre propre rôle.",
         });
       }
-      target.role = role;
+      changes.role = role;
     }
 
     if (isActive !== undefined) {
@@ -140,46 +142,47 @@ router.put("/users/:id", protect, authorize("admin"), async (req, res) => {
           .status(400)
           .json({ message: "Vous ne pouvez pas désactiver votre propre compte." });
       }
-      target.isActive = Boolean(isActive);
+      changes.isActive = Boolean(isActive);
     }
 
     if (email !== undefined && email !== target.email) {
-      const clash = await User.findOne({
-        email: String(email).toLowerCase(),
-        _id: { $ne: target._id },
-      });
-      if (clash) {
+      if (await users.emailTaken(String(email), target._id)) {
         return res
           .status(400)
           .json({ message: "Cette adresse email est déjà utilisée." });
       }
-      target.email = email;
+      changes.email = String(email);
     }
 
-    if (firstName !== undefined) target.firstName = firstName;
-    if (lastName !== undefined) target.lastName = lastName;
-    // Assigning triggers the pre-save hash — never store it in the clear
+    if (firstName !== undefined) changes.firstName = firstName;
+    if (lastName !== undefined) changes.lastName = lastName;
+    // Hashed by the repository — never stored in the clear
     if (password) {
       if (String(password).length < 6) {
         return res
           .status(400)
           .json({ message: "Le mot de passe doit faire au moins 6 caractères." });
       }
-      target.password = password;
+      changes.password = password;
     }
 
-    await target.save();
+    const saved = await users.update(target._id, changes);
     return res.json({
       user: {
-        _id: target._id,
-        firstName: target.firstName,
-        lastName: target.lastName,
-        email: target.email,
-        role: target.role,
-        isActive: target.isActive,
+        _id: saved._id,
+        firstName: saved.firstName,
+        lastName: saved.lastName,
+        email: saved.email,
+        role: saved.role,
+        isActive: saved.isActive,
       },
     });
   } catch (error) {
+    if (isDuplicateKey(error)) {
+      return res
+        .status(400)
+        .json({ message: "Cette adresse email est déjà utilisée." });
+    }
     console.error("[Users] update failed:", error.message);
     return res
       .status(500)
@@ -195,20 +198,16 @@ router.delete("/users/:id", protect, authorize("admin"), async (req, res) => {
         .status(400)
         .json({ message: "Vous ne pouvez pas supprimer votre propre compte." });
     }
-    const target = await User.findById(req.params.id);
+    const target = await users.findById(req.params.id);
     if (!target) {
       return res.status(404).json({ message: "Compte introuvable" });
     }
-    // Release anything they were holding so no conversation stays locked to
-    // an account that no longer exists.
-    const ConversationLock = require("../models/ConversationLock");
-    const released = await ConversationLock.deleteMany({
-      lockedBy: target._id,
-    });
-    await target.deleteOne();
+    // Releases anything they were holding so no conversation stays locked to
+    // an account that no longer exists, and clears every other reference.
+    const { releasedLocks } = await users.remove(target._id);
     return res.json({
       success: true,
-      releasedLocks: released.deletedCount || 0,
+      releasedLocks,
     });
   } catch (error) {
     console.error("[Users] delete failed:", error.message);
@@ -221,16 +220,18 @@ router.post("/login", authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email: String(email) });
-    if (!user) {
+    const found =
+      typeof email === "string" ? await users.findForLogin(email) : null;
+    if (!found) {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    const isMatch = await user.comparePassword(password);
+    const isMatch = await users.comparePassword(password, found.passwordHash);
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
+    const user = found.user;
     // A suspended account must not be able to sign in — otherwise disabling
     // someone would be cosmetic.
     if (user.isActive === false) {

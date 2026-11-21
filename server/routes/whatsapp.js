@@ -3,14 +3,14 @@ const router = express.Router();
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
 const { protect } = require("../middleware/auth");
-const {
-  updateConversationAfterMessage,
-} = require("../services/conversationService");
-const Message = require("../models/Message");
-const ConversationLock = require("../models/ConversationLock");
 const { noteDispatchReply } = require("../utils/dispatching");
+const { storeCrmSend } = require("../services/conversationService");
+const conversations = require("../db/conversations");
+const messages = require("../db/messages");
 const { sanitizeId } = require("../utils/sanitize");
-const { messageTypeFor } = require("../utils/metaPayload");
+
+/** Locks taken by a WhatsApp send carry this (unenforced) expiry. */
+const LOCK_EXPIRY_MS = 10 * 60 * 1000;
 
 // Body: { recipientId, message?, conversationId, attachment? }
 // attachment = { url, name, mimeType, mediaType } from POST /api/uploads.
@@ -35,19 +35,18 @@ router.post("/send", protect, async (req, res) => {
 
     // --- Conversation Lock Check ---
     const lockConvId = sanitizeId(conversationId) || sanitizeId(recipientId);
-    if (!lockConvId) {
+    const customerId = sanitizeId(recipientId) || lockConvId;
+    if (!lockConvId || !customerId) {
       return res.status(400).json({ message: "Invalid conversationId or recipientId" });
     }
     console.log("[WA:Send] Step 1 - Lock check for:", lockConvId);
-    const existingLock = await ConversationLock.findOne({
-      conversationId: lockConvId,
-      platform: "whatsapp",
-    });
+    const existing = await conversations.resolve("whatsapp", [lockConvId, customerId]);
+    const existingLock = existing?.lockedBy ? existing : null;
     console.log("[WA:Send] Step 1 - Lock result:", existingLock ? "locked" : "unlocked");
 
     if (
       existingLock &&
-      existingLock.lockedBy.toString() !== req.user._id.toString() &&
+      existingLock.lockedBy !== String(req.user._id) &&
       req.user.role !== "admin"
     ) {
       return res.status(403).json({
@@ -69,28 +68,11 @@ router.post("/send", protect, async (req, res) => {
         ]
       : [];
 
-    // --- Save the outgoing message to DB ---
-    console.log("[WA:Send] Step 2 - Saving message to DB");
-    const newMessage = await Message.create({
-      platform: "whatsapp",
-      senderId: "agent",
-      senderName: `${req.user.firstName} ${req.user.lastName}`,
-      recipientId: recipientId,
-      conversationId: lockConvId,
-      direction: "outgoing",
-      messageType: messageTypeFor(storedAttachments),
-      attachments: storedAttachments,
-      content: message || "",
-      sentBy: req.user._id,
-      status: "sent",
-    });
-    console.log("[WA:Send] Step 2 - Message saved:", newMessage._id);
-
     // --- Send to WhatsApp API ---
     const apiUrl =
       (process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v24.0").trim();
     const fullUrl = `${apiUrl}/${phoneNumberId}/messages`;
-    console.log("[WA:Send] Step 3 - Calling WhatsApp API to:", recipientId);
+    console.log("[WA:Send] Step 2 - Calling WhatsApp API to:", recipientId);
 
     // Build payloads: media (link-based) carries the text as caption where
     // supported; audio has no caption, so text goes as a separate message.
@@ -142,24 +124,40 @@ router.post("/send", protect, async (req, res) => {
           },
         });
       }
-      console.log("[WA:Send] Step 3 - API success:", sendRes.data);
+      console.log("[WA:Send] Step 2 - API success:", sendRes.data);
     } catch (apiErr) {
       console.error(
-        "[WA:Send] Step 3 - API FAILED:",
+        "[WA:Send] Step 2 - API FAILED:",
         JSON.stringify(apiErr.response?.data || apiErr.message, null, 2),
       );
-      // Fail the message in DB if it didn't send
-      await Message.findByIdAndUpdate(newMessage._id, { status: "failed" });
+      // Nothing is stored for a refused send: the schema keeps no delivery
+      // status (decision D3), and the agent sees the error right away.
       return res.status(500).json({
         message: "Failed to send message via WhatsApp API",
         error: apiErr.response?.data || apiErr.message,
       });
     }
 
-    // --- Update the Conversation snippet ---
-    console.log("[WA:Send] Step 4 - Updating conversation snippet");
-    await updateConversationAfterMessage(lockConvId, newMessage);
-    console.log("[WA:Send] Step 4 - Done");
+    // --- Save the outgoing message, now that WhatsApp accepted it ---
+    // The message is delivered already: a database error must not fail the
+    // request (the agent would send it twice).
+    const wamid = sendRes?.data?.messages?.[0]?.id || null;
+    console.log("[WA:Send] Step 3 - Saving message to DB");
+    let saved = null;
+    try {
+      saved = await storeCrmSend({
+        platform: "whatsapp",
+        customerId,
+        externalId: wamid,
+        content: message || "",
+        attachments: storedAttachments,
+        userId: req.user._id,
+      });
+      console.log("[WA:Send] Step 3 - Message saved:", saved.messageId);
+    } catch (dbErr) {
+      console.error("[WA:Send] Step 3 - DB save error (non-fatal):", dbErr.message);
+    }
+    const sentAt = new Date();
 
     // --- Emit Socket event ---
     const io = req.app.get("io");
@@ -169,12 +167,12 @@ router.post("/send", protect, async (req, res) => {
         conversationId: lockConvId,
         recipientId: recipientId,
         message: {
-          id: newMessage._id.toString(),
-          text: newMessage.content,
-          from: newMessage.senderName || "You",
-          fromId: newMessage.senderId,
-          time: newMessage.timestamp || newMessage.createdAt,
-          direction: newMessage.direction,
+          id: wamid || String(saved?.messageId || sentAt.getTime()),
+          text: message || "",
+          from: `${req.user.firstName} ${req.user.lastName}`,
+          fromId: "agent",
+          time: sentAt.toISOString(),
+          direction: "outgoing",
           attachments: storedAttachments,
         },
       });
@@ -184,15 +182,12 @@ router.post("/send", protect, async (req, res) => {
     noteDispatchReply("whatsapp", [lockConvId, recipientId], req.user._id);
 
     // --- Auto-lock functionality ---
-    if (!existingLock) {
-      try {
-        await ConversationLock.create({
-          conversationId: lockConvId,
-          platform: "whatsapp",
-          lockedBy: req.user._id,
-          lockedAt: new Date(),
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
-        });
+    const lockTarget = saved?.conversation?.id || existing?.id || null;
+    if (!existingLock && lockTarget) {
+      const locked = await conversations.lock(lockTarget, req.user._id, {
+        expiresInMs: LOCK_EXPIRY_MS,
+      });
+      if (locked) {
         if (io) {
           io.emit("conversationLocked", {
             conversationId: lockConvId,
@@ -200,21 +195,16 @@ router.post("/send", protect, async (req, res) => {
             lockedBy: req.user,
           });
         }
-      } catch (lockErr) {
-        if (lockErr.code === 11000) {
-          console.log("[WhatsApp:Lock] Lock race detected (non-fatal)");
-        } else {
-          throw lockErr;
-        }
+      } else {
+        console.log("[WhatsApp:Lock] Lock race detected (non-fatal)");
       }
-    } else {
-      existingLock.expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      await existingLock.save();
+    } else if (existingLock) {
+      await conversations.refreshLockExpiry(existingLock.id, LOCK_EXPIRY_MS);
     }
 
     return res.status(200).json({
       success: true,
-      messageId: newMessage._id,
+      messageId: wamid || saved?.messageId || null,
       whatsappRes: sendRes.data,
     });
   } catch (err) {
@@ -224,68 +214,34 @@ router.post("/send", protect, async (req, res) => {
 });
 
 // GET /api/whatsapp/conversations - Fetch WhatsApp conversations from database
-// Supports ?slim=1: returns the conversation list without embedded messages —
-// the frontend lazy-loads them from /messages-paged on selection anyway.
+// Supports ?slim=1 (the only mode the inbox uses): every conversation comes
+// without embedded messages — the frontend lazy-loads them from
+// /messages-paged on selection.
 router.get("/conversations", protect, async (req, res) => {
   try {
-    const slim = req.query.slim === "1" || req.query.slim === "true";
-    const dbMessages = await Message.find({ platform: "whatsapp" })
-      .sort({ timestamp: -1 })
-      .limit(500)
-      .lean();
+    const rows = await conversations.recentWithLastMessage("whatsapp", 200);
 
-    const convMap = {};
-    for (const m of dbMessages) {
-      if (!convMap[m.conversationId]) {
-        convMap[m.conversationId] = {
-          id: m.conversationId,
-          participants: [
-            {
-              id: m.direction === "incoming" ? m.senderId : m.recipientId,
-              name: m.direction === "incoming" ? m.senderName : "Page/Agent",
-            },
-          ],
-          lastMessage: null,
-          messages: [],
-        };
-      }
-      const conv = convMap[m.conversationId];
-      // Rows come newest-first, so the entry is often created from the
-      // agent's reply — name the thread after the customer as soon as one
-      // of their messages shows up, never after whoever spoke last.
-      if (
-        m.direction === "incoming" &&
-        m.senderName &&
-        conv.participants[0].name === "Page/Agent"
-      ) {
-        conv.participants[0].name = m.senderName;
-        conv.participants[0].id = m.senderId;
-      }
-      const msg = {
-        id: m.externalId || m._id.toString(),
-        text: m.content || "",
-        from: m.senderName || "Unknown",
-        fromId: m.senderId,
-        time: m.timestamp || m.createdAt,
-        direction: m.direction,
+    const list = rows.map((c) => {
+      const last = c.lastMessage;
+      const incoming = last.senderType === "contact";
+      return {
+        id: c.externalId,
+        participants: [
+          {
+            id: c.customerId || c.externalId,
+            name: c.name && c.name !== "Unknown" ? c.name : c.customerId || c.externalId,
+          },
+        ],
+        lastMessage: {
+          text: last.text || "",
+          from: incoming ? c.name || "Unknown" : last.senderUserName || "Page/Agent",
+          time: last.time,
+        },
+        messages: [],
       };
-      if (!slim) conv.messages.unshift(msg);
-      if (
-        !conv.lastMessage ||
-        new Date(msg.time) > new Date(conv.lastMessage.time)
-      ) {
-        conv.lastMessage = { text: msg.text, from: msg.from, time: msg.time };
-      }
-    }
-
-    // Sort conversations by latest message time
-    const conversations = Object.values(convMap).sort((a, b) => {
-      const timeA = a.lastMessage?.time ? new Date(a.lastMessage.time).getTime() : 0;
-      const timeB = b.lastMessage?.time ? new Date(b.lastMessage.time).getTime() : 0;
-      return timeB - timeA;
     });
 
-    return res.json({ conversations });
+    return res.json({ conversations: list });
   } catch (error) {
     console.error("Failed to fetch WhatsApp conversations:", error);
     return res.status(500).json({ message: "Failed to fetch WhatsApp conversations", error: error.message });
@@ -356,11 +312,11 @@ router.get("/media/:mediaId", async (req, res) => {
 });
 
 // GET /api/whatsapp/messages-paged
-// Returns paginated messages for a specific WhatsApp conversation from MongoDB.
+// Returns paginated messages for a specific WhatsApp conversation.
 // Cursor-based: pass `before` (ISO timestamp) to load messages older than that point.
 router.get("/messages-paged", protect, async (req, res) => {
   try {
-    const { conversationId, limit = 30, before } = req.query;
+    const { conversationId, participantId, limit = 30, before } = req.query;
     if (!conversationId) {
       return res.status(400).json({ message: "conversationId is required" });
     }
@@ -370,30 +326,14 @@ router.get("/messages-paged", protect, async (req, res) => {
     if (!safeConvId) {
       return res.status(400).json({ message: "Invalid conversationId" });
     }
+    const keys = [safeConvId, sanitizeId(participantId)].filter(Boolean);
+    const found = await conversations.findByKeys("whatsapp", keys);
+    const { messages: rows, hasMore } = await messages.page(
+      found.map((c) => c.id),
+      { before, limit: pageLimit },
+    );
 
-    const query = { platform: "whatsapp", conversationId: safeConvId };
-    if (before) query.timestamp = { $lt: new Date(before) };
-
-    const messages = await Message.find(query)
-      .sort({ timestamp: -1 })
-      .limit(pageLimit)
-      .lean();
-
-    return res.json({
-      messages: messages.reverse().map((m) => ({
-        id: m.externalId || m._id.toString(),
-        text: m.content || "",
-        from: m.senderName || "Unknown",
-        fromId: m.senderId,
-        time: m.timestamp || m.createdAt,
-        direction: m.direction,
-        messageType: m.messageType,
-        attachmentUrl: m.attachmentUrl || null,
-        attachments: m.attachments || [],
-        context: m.context || null,
-      })),
-      hasMore: messages.length === pageLimit,
-    });
+    return res.json({ messages: rows, hasMore });
   } catch (err) {
     console.error("WA messages-paged error:", err.message);
     return res.status(500).json({ message: err.message });

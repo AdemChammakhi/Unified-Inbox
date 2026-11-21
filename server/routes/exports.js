@@ -4,19 +4,20 @@
  * The team tracks prospects in a color-coded spreadsheet: source, name,
  * phone, first contact, process stage, commercial in charge, comments
  * (ticket N°7995). This endpoint assembles that exact table from what the
- * inbox already knows — messages and who sent each reply, classifications,
- * RDV dates, agent locks, ad attribution — and serves it as styled Excel or
- * French-locale CSV. Sends the platform refused (status "failed") are ignored.
+ * inbox already knows — each customer's conversation (dossier, lock, the ad
+ * that brought them), its messages and who sent each reply, and the leads
+ * recorded from incoming calls — and serves it as styled Excel or
+ * French-locale CSV.
  *
- * Two columns are derived, never stored: "Maturité" (Chaud / Tiède / Froid,
- * from utils/leadMaturity) and "Motif / frein" (the obstacle the agent
- * recorded, read from Contact.customFields through utils/leadFrein).
+ * Two columns are derived, never stored: "Maturité" (Chaud / Tiède / Froid /
+ * Gagné / Perdu, from utils/leadMaturity) and "Motif / frein" (the obstacle
+ * the agent recorded, read from the contact's custom fields through
+ * utils/leadFrein).
  *
- * One row per PROSPECT (the person), not per conversation document: webhook
- * rows are keyed by the sender's numeric ID while Graph-synced rows use the
- * t_… thread id, so grouping happens on the person (incoming senderId /
- * outgoing recipientId) and classification/lock lookups accept ANY of the
- * person's conversation keys.
+ * One row per PROSPECT (the person): there is one conversation per customer
+ * and platform (server/db/conversations.js), whichever key — thread id or
+ * customer id — its messages arrived under. Phone leads have no messages:
+ * their row is built from the conversation and its dbo.call_log rows.
  *
  * Admin + manager only — this is the whole prospect base in one file.
  */
@@ -26,16 +27,16 @@
 const express = require("express");
 const router = express.Router();
 const ExcelJS = require("exceljs");
-const Message = require("../models/Message");
-const Classification = require("../models/Classification");
-const ConversationLock = require("../models/ConversationLock");
-const IncomingCall = require("../models/IncomingCall");
-const Dispatch = require("../models/Dispatch");
-const User = require("../models/User");
+const { db, at } = require("../db/sql");
+const { stageOf, typologyOf } = require("../db/reference");
+const conversations = require("../db/conversations");
+const { isPlaceholderName } = require("../db/contacts");
+const users = require("../db/users");
 const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
 const { computeMaturity } = require("../utils/leadMaturity");
 const { freinLabel, getFreins } = require("../utils/leadFrein");
+const dispatches = require("../db/dispatches");
 
 const PLATFORM_LABELS = {
   instagram: "Instagram",
@@ -48,11 +49,7 @@ const PLATFORM_LABELS = {
 };
 
 // Pipeline stages and typologies: labels from the shared constants
-const {
-  STAGE_LABEL,
-  DEFAULT_STAGE,
-  TYPOLOGY_LABEL,
-} = require("../constants/pipeline");
+const { STAGE_LABEL, TYPOLOGY_LABEL } = require("../constants/pipeline");
 
 // Same colors the app uses (client/src/constants/pipeline.js), as ARGB fills.
 // "Nouveau lead" keeps the plain cell.
@@ -91,41 +88,23 @@ const UNASSIGNED = "Non attribué";
 const NOT_DISPATCHED = "Non dispatché";
 
 /**
- * The open dispatches of these customers, keyed "<platform>:<customerId>".
+ * The open dispatches, keyed "<platform>:<customerId>" (db/dispatches.js).
  * Non-fatal: a sheet without the dispatch columns filled beats no sheet.
- * @param {Array<[string, string[]]>} byPlatform  [platform, customerIds]
  */
-async function loadDispatches(byPlatform) {
+async function loadDispatches() {
   const map = new Map();
-  await Promise.all(
-    byPlatform.map(async ([platform, ids]) => {
-      if (!ids.length) return;
-      try {
-        const rows = await Dispatch.find({
-          status: "open",
-          platform,
-          customerId: { $in: ids },
-        })
-          .select("platform customerId agent dispatchedBy dispatchedAt note firstReplyAt")
-          .populate("agent", "firstName lastName")
-          .populate("dispatchedBy", "firstName lastName")
-          .lean();
-        for (const d of rows) map.set(`${platform}:${d.customerId}`, d);
-      } catch (err) {
-        console.warn(
-          `[Export] dispatch lookup skipped for ${platform} (non-fatal):`,
-          err.message,
-        );
-      }
-    }),
-  );
+  try {
+    for (const d of await dispatches.list({ status: "open", limit: 5000 })) {
+      map.set(`${d.platform}:${d.customerId}`, d);
+    }
+  } catch (err) {
+    console.warn("[Export] dispatch lookup skipped (non-fatal):", err.message);
+  }
   return map;
 }
 
-/** The two dispatch columns of a row, from its open dispatch (or none). */
+/** The dispatch columns of a row, from its open dispatch (or none). */
 function dispatchFields(d) {
-  const name = (u) =>
-    u && typeof u === "object" ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "";
   if (!d) {
     return {
       dispatchId: null,
@@ -138,10 +117,10 @@ function dispatchFields(d) {
     };
   }
   return {
-    dispatchId: String(d._id),
-    dispatchedTo: name(d.agent) || "Agent supprimé",
-    dispatchedToId: d.agent ? String(d.agent._id || d.agent) : null,
-    dispatchedBy: name(d.dispatchedBy) || "—",
+    dispatchId: d.id,
+    dispatchedTo: d.agentName || "Agent supprimé",
+    dispatchedToId: d.agentId || null,
+    dispatchedBy: d.dispatchedByName || "—",
     dispatchedAt: d.dispatchedAt || null,
     dispatchNote: d.note || "",
     dispatchReplied: Boolean(d.firstReplyAt),
@@ -163,9 +142,6 @@ function ownIds() {
   );
 }
 
-/** Sender names the Graph sync used for the Page's own messages. */
-const OWN_SENDER_NAMES = ["Page", "You"];
-
 const fmtDate = (d) => {
   if (!d) return "";
   // toLocaleString does NOT throw on an unparseable value — it returns the
@@ -186,44 +162,15 @@ const fmtDate = (d) => {
   }
 };
 
-// Webhooks name unknown senders `User ${senderId.slice(-4)}` — the last four
-// characters are not necessarily digits ("User 12ab"), so match on length.
-const isPlaceholderName = (name) =>
-  !name || name === "Unknown" || /^User .{1,4}$/.test(name) || /^\d{6,}$/.test(name);
-
-/**
- * Graph thread ids (t_…) are conversations, never people. Email has no
- * threads, and an address may legitimately start with "t_" (same rule as
- * routes/leadInsights.js, so both views treat such a prospect alike).
- */
-const looksLikeThreadId = (platform, id) =>
-  platform !== "email" && typeof id === "string" && /^t_/.test(id);
-
-/** A send the platform refused. It was never delivered, so it is not a reply. */
-const isFailedOutgoing = (m) => m.direction !== "incoming" && m.status === "failed";
-
-/** A stored User reference, as the 24-hex string a User query can cast. */
-const userIdOf = (value) => {
-  if (!value) return null;
-  const id = String(value);
-  return /^[a-f0-9]{24}$/i.test(id) ? id : null;
-};
-
-/**
- * True when the row carries media. The scan projects this as `hasMedia`
- * (see buildProspectRows); the array/URL checks cover a full document.
- */
-const hasAttachment = (m) =>
-  m.hasMedia === true ||
-  (Array.isArray(m.attachments) && m.attachments.length > 0) ||
-  Boolean(m.attachmentUrl);
-
 /** Cut to `max` UTF-16 units without leaving half of a surrogate pair. */
 const cutText = (s, max) => {
   if (s.length <= max) return s;
   const last = s.charCodeAt(max - 1);
   return s.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
 };
+
+/** One line in a cell: the comment may carry line breaks. */
+const oneLine = (s) => String(s || "").replace(/\s+/g, " ").trim();
 
 /** A readable fallback label when we never learned the prospect's name. */
 function fallbackName(platform, personId) {
@@ -235,637 +182,177 @@ function fallbackName(platform, personId) {
 }
 
 /**
- * Build the prospect rows for a platform filter + date range.
+ * The dossier fields the SQL Server scripts have no column for, read from
+ * the contact's "dossier" custom field (db/conversations.js): PAX, invoice
+ * reference, priority flag and comment, in the shape every row carries.
+ */
+function dossierFields(extras) {
+  return {
+    pax: Number.isInteger(extras?.pax) ? extras.pax : null,
+    invoiceRef: extras?.invoiceRef || "",
+    isPriority: extras?.isPriority === true,
+    comment: oneLine(extras?.comment),
+  };
+}
+
+/**
+ * Build the prospect rows found in the messages, for a platform filter +
+ * date range.
+ *
+ * The database does the work: one row per conversation active in the
+ * range, with the period's counts and first/last message, the full-history
+ * figures the maturity rules read, the current lock holder, the newest CRM
+ * reply's author, the newest message, the campaign, the contact's phone,
+ * email and dossier extras. Only a 200-character preview of that message
+ * leaves the database, so a full-history sheet stays within the backend
+ * container's 512 MB / half a core (CLAUDE.md §11, §14).
+ *
  * @returns {Promise<Array<object>>} sorted by last contact, newest first
  */
 async function buildMessageRows({ platform, since }) {
-  const matchPlatform = platform
-    ? { platform }
-    : { platform: { $in: ["instagram", "facebook", "whatsapp", "email"] } };
+  const platforms = platform
+    ? [platform]
+    : ["instagram", "facebook", "whatsapp", "email"];
 
-  // NEWEST first, then capped: if the range holds more messages than the cap,
-  // we must keep the RECENT ones. Sorting ascending here would hand back the
-  // oldest slice and silently drop every current prospect from the sheet —
-  // the opposite of what the team needs. When the cap is hit, a count of the
-  // whole period done in the database (mergePeriodSummaries, below) restores
-  // the prospects, "premier contact" and counts the cap left out.
-  const MESSAGE_CAP = 20000;
-  // Only a short preview of the text is ever shown ("Dernier message" is cut
-  // to 160 characters) and only WHETHER media exists — never the media. Both
-  // are trimmed inside the database: loading every body in full made a
-  // full-history build pull the whole collection's text into a 512 MB /
-  // half-a-core container, where it ran for minutes and the browser gave up
-  // (Nginx 499). The type guards keep a malformed legacy row from failing
-  // the whole build.
-  const PREVIEW_CHARS = 200;
-  const isString = (field) => ({ $eq: [{ $type: field }, "string"] });
-  const hasMediaExpr = {
-    $or: [
+  const found = (
+    await db.query(
+      `WITH period AS (
+         SELECT m.conversation_id,
+                first_at = MIN(dbo.fn_DateTimeCombine(m.sent_date, m.sent_time)),
+                last_at = MAX(dbo.fn_DateTimeCombine(m.sent_date, m.sent_time)),
+                msgs_in = SUM(CASE WHEN m.sender_type = N'contact' THEN 1 ELSE 0 END),
+                msgs_out = SUM(CASE WHEN m.sender_type <> N'contact' THEN 1 ELSE 0 END)
+         FROM dbo.message m
+         JOIN dbo.conversations c ON c.conversation_id = m.conversation_id
+         WHERE c.platform IN (SELECT value FROM OPENJSON(@platforms)) AND c.deleted_date IS NULL
+           AND (@s_date IS NULL OR m.sent_date > @s_date OR (m.sent_date = @s_date AND m.sent_time >= @s_time))
+         GROUP BY m.conversation_id
+       ),
+       history AS (
+         SELECT m.conversation_id,
+                all_in = SUM(CASE WHEN m.sender_type = N'contact' THEN 1 ELSE 0 END),
+                all_out = SUM(CASE WHEN m.sender_type <> N'contact' THEN 1 ELSE 0 END),
+                all_last_in = MAX(CASE WHEN m.sender_type = N'contact' THEN dbo.fn_DateTimeCombine(m.sent_date, m.sent_time) END),
+                all_last_out = MAX(CASE WHEN m.sender_type <> N'contact' THEN dbo.fn_DateTimeCombine(m.sent_date, m.sent_time) END)
+         FROM dbo.message m
+         WHERE m.conversation_id IN (SELECT conversation_id FROM period)
+         GROUP BY m.conversation_id
+       )
+       SELECT c.conversation_id, c.platform, c.external_id, c.participant_external_id, c.participant_name,
+              c.contact_id, c.classification_id, c.qualification_id, c.motif_id,
+              appointment_at = dbo.fn_DateTimeCombine(c.appointment_date, c.appointment_time),
+              p.first_at, p.last_at, p.msgs_in, p.msgs_out,
+              h.all_in, h.all_out, h.all_last_in, h.all_last_out,
+              lock_user_id = lu.user_id,
+              lock_name = LTRIM(RTRIM(CONCAT(lu.first_name, N' ', lu.last_name))),
+              replier_user_id = ru.user_id,
+              replier_name = LTRIM(RTRIM(CONCAT(ru.first_name, N' ', ru.last_name))),
+              last_text = lm.preview, last_sender_type = lm.sender_type, last_has_media = lm.has_media,
+              campaign_title = k.title, contact_phone = ct.phone, contact_email = ct.email,
+              extras_json = f.field_value
+       FROM period p
+       JOIN dbo.conversations c ON c.conversation_id = p.conversation_id
+       JOIN history h ON h.conversation_id = p.conversation_id
+       LEFT JOIN dbo.users lu ON lu.user_id = c.locked_by_user_id
+       OUTER APPLY (
+         SELECT TOP 1 m.sender_user_id FROM dbo.message m
+         WHERE m.conversation_id = c.conversation_id AND m.sender_type <> N'contact' AND m.sender_user_id IS NOT NULL
+         ORDER BY m.sent_date DESC, m.sent_time DESC, m.message_id DESC
+       ) rr
+       LEFT JOIN dbo.users ru ON ru.user_id = rr.sender_user_id
+       OUTER APPLY (
+         SELECT TOP 1 preview = LEFT(m.content, 200), m.sender_type,
+                has_media = CASE WHEN m.attachment_url IS NULL THEN 0 ELSE 1 END
+         FROM dbo.message m
+         WHERE m.conversation_id = c.conversation_id
+           AND (@s_date IS NULL OR m.sent_date > @s_date OR (m.sent_date = @s_date AND m.sent_time >= @s_time))
+           AND (NULLIF(LTRIM(RTRIM(m.content)), N'') IS NOT NULL OR m.attachment_url IS NOT NULL)
+         ORDER BY m.sent_date DESC, m.sent_time DESC, m.message_id DESC
+       ) lm
+       LEFT JOIN dbo.campaigns k ON k.campaign_id = c.campaign_id
+       LEFT JOIN dbo.contacts ct ON ct.contact_id = c.contact_id
+       LEFT JOIN dbo.contact_custom_fields f ON f.contact_id = c.contact_id AND f.field_key = @dossier`,
       {
-        $and: [
-          { $isArray: "$attachments" },
-          { $gt: [{ $size: "$attachments" }, 0] },
-        ],
+        platforms: JSON.stringify(platforms),
+        dossier: conversations.DOSSIER_FIELD,
+        ...at("s", since || null),
       },
-      {
-        $and: [isString("$attachmentUrl"), { $ne: ["$attachmentUrl", ""] }],
-      },
-    ],
-  };
-  const messages = await Message.aggregate([
-    {
-      $match: {
-        ...matchPlatform,
-        ...(since ? { timestamp: { $gte: since } } : {}),
-      },
-    },
-    { $sort: { timestamp: -1 } },
-    { $limit: MESSAGE_CAP },
-    {
-      $project: {
-        platform: 1,
-        conversationId: 1,
-        senderId: 1,
-        recipientId: 1,
-        senderName: 1,
-        direction: 1,
-        status: 1,
-        sentBy: 1,
-        timestamp: 1,
-        createdAt: 1,
-        "context.title": 1,
-        content: {
-          $cond: [
-            isString("$content"),
-            { $substrCP: ["$content", 0, PREVIEW_CHARS] },
-            "",
-          ],
-        },
-        hasMedia: hasMediaExpr,
-      },
-    },
-  ]).option({ maxTimeMS: 120000 });
-  const hitCap = messages.length === MESSAGE_CAP;
+    )
+  ).rows;
 
   const own = ownIds();
-  const ownList = [...own];
-  const whenOf = { $ifNull: ["$timestamp", "$createdAt"] };
-  // Same test as isFromProspect below, in aggregation form
-  const isIncoming = {
-    $and: [
-      { $eq: ["$direction", "incoming"] },
-      { $not: [{ $in: ["$senderId", { $literal: ownList }] }] },
-      { $not: [{ $in: ["$senderName", { $literal: OWN_SENDER_NAMES }] }] },
-    ],
-  };
-
-  // An "incoming" row sent by us is a Graph-sync mislabel (instagram.js heals
-  // these lazily): it is our reply, and it is counted as one here exactly as
-  // the inbox thread view and /api/lead-insights count it, so "Messages
-  // reçus / envoyés" agree with the inbox.
-  const isFromProspect = (m) =>
-    m.direction === "incoming" &&
-    !own.has(m.senderId) &&
-    !OWN_SENDER_NAMES.includes(m.senderName);
-
-  // Pass 1 — learn which PERSON each conversation key belongs to, from
-  // inbound messages (whose senderId is always the real customer).
-  // This is what lets us repair outbound rows: when the inbox had no
-  // resolvable participant (Instagram under Standard Access returns an
-  // empty participant list), the client sends the THREAD id as recipientId,
-  // so the reply is stored against `t_…` instead of the customer. Without
-  // this map that reply becomes a second, phantom prospect row.
-  const convToPerson = new Map(); // "<platform>:<convId>" -> personId
-  for (const m of messages) {
-    if (!isFromProspect(m)) continue;
-    if (!m.senderId || looksLikeThreadId(m.platform, m.senderId)) continue;
-    if (m.conversationId) {
-      convToPerson.set(`${m.platform}:${m.conversationId}`, m.senderId);
-    }
-    convToPerson.set(`${m.platform}:${m.senderId}`, m.senderId);
-  }
-
-  const personOf = (m) => {
-    if (isFromProspect(m)) return m.senderId;
-    // Outbound: recipientId may be a thread id — remap it to the person
-    return (
-      convToPerson.get(`${m.platform}:${m.recipientId}`) ||
-      convToPerson.get(`${m.platform}:${m.conversationId}`) ||
-      m.recipientId
-    );
-  };
-
-  const prospects = new Map(); // "<platform>:<personId>" -> row accumulator
-  const prospectFor = (platform, personId) => {
-    const key = `${platform}:${personId}`;
-    let p = prospects.get(key);
-    if (!p) {
-      p = {
-        platform,
-        personId,
-        name: "",
-        nameAt: null, // keep the most RECENT non-placeholder name
-        firstContact: null,
-        lastContact: null,
-        messagesIn: 0,
-        messagesOut: 0,
-        lastIncomingAt: null, // newest message FROM the prospect (maturity)
-        lastOutgoingAt: null, // newest delivered reply TO the prospect
-        // Full-history counterparts for maturity, filled by the widening pass
-        // below; null means "not known", and the period figures stand in.
-        allIn: null,
-        allOut: null,
-        allLastIncomingAt: null,
-        allLastOutgoingAt: null,
-        lastMessage: "",
-        lastMessageAt: null,
-        replierId: null, // sentBy of the newest CRM reply
-        replierAt: null,
-        adTitle: "",
-        adTitleAt: null,
-        convIds: new Set([personId]),
-      };
-      prospects.set(key, p);
-    }
-    return p;
-  };
-
-  for (const m of messages) {
-    // A refused send was never delivered: it must not count as a reply, move
-    // "Dernier contact", fill "Dernier message" or name an agent. Skipped
-    // before the group is even created, so a failed attempt alone does not
-    // make a prospect row.
-    if (isFailedOutgoing(m)) continue;
-
-    const personId = personOf(m);
+  const prospects = [];
+  for (const r of found) {
+    const personId = r.participant_external_id || r.external_id;
     if (!personId || own.has(personId)) continue;
-
-    const p = prospectFor(m.platform, personId);
-
-    const when = m.timestamp || m.createdAt;
-    if (!p.firstContact || when < p.firstContact) p.firstContact = when;
-    if (!p.lastContact || when > p.lastContact) p.lastContact = when;
-    if (m.conversationId) p.convIds.add(m.conversationId);
-
-    // These "latest wins" fields compare timestamps explicitly rather than
-    // relying on scan order — the query sorts newest-first, and a plain
-    // last-assignment-wins would record the OLDEST value.
-    const incoming = isFromProspect(m);
-
-    // "Dernier message": the newest row from EITHER side that has something
-    // to show. A media-only row reads as "[pièce jointe]"; a row with neither
-    // text nor media (a bare reaction, an unsupported type) is passed over.
-    const text = typeof m.content === "string" ? m.content.trim() : "";
-    const body = text || (hasAttachment(m) ? "[pièce jointe]" : "");
-    if (body && (!p.lastMessageAt || when > p.lastMessageAt)) {
-      p.lastMessage = `${incoming ? "Prospect" : "Commercial"} : ${body}`;
-      p.lastMessageAt = when;
-    }
-
-    if (incoming) {
-      p.messagesIn++;
-      if (when && (!p.lastIncomingAt || when > p.lastIncomingAt)) {
-        p.lastIncomingAt = when;
-      }
-      if (!isPlaceholderName(m.senderName) && (!p.nameAt || when > p.nameAt)) {
-        p.name = m.senderName;
-        p.nameAt = when;
-      }
-      // Attribution: keep the EARLIEST ad — the one that opened the thread
-      if (m.context?.title && (!p.adTitleAt || when < p.adTitleAt)) {
-        p.adTitle = m.context.title;
-        p.adTitleAt = when;
-      }
-    } else {
-      p.messagesOut++;
-      if (when && (!p.lastOutgoingAt || when > p.lastOutgoingAt)) {
-        p.lastOutgoingAt = when;
-      }
-      // The agent who actually answered. Only CRM sends carry sentBy; replies
-      // stored from Meta's echoes (Business Suite, the apps) have none, so the
-      // newest reply that DOES name a user wins. Strict ">" keeps the first
-      // row seen on a tie, which is the newest under this query's sort.
-      const replierId = userIdOf(m.sentBy);
-      if (replierId && (!p.replierAt || when > p.replierAt)) {
-        p.replierId = replierId;
-        p.replierAt = when;
-      }
-    }
+    // A thread whose customer was never identified and who never wrote:
+    // better absent than a phantom prospect
+    if (!r.participant_external_id && !r.msgs_in) continue;
+    prospects.push({ ...r, personId });
   }
+  if (prospects.length === 0) return [];
 
-  // The cap was hit: the scan above holds only the newest MESSAGE_CAP
-  // messages, so older prospects are missing and "Premier contact" and the
-  // counts are short for long threads. Re-count the WHOLE period inside the
-  // database instead. It hands back one small summary per person, not the
-  // messages, so it stays light in the 512 MB container however long the
-  // period. Only if it fails does the sheet stay marked as partial.
-  let truncated = false;
-  if (hitCap) {
-    try {
-      await mergePeriodSummaries();
-    } catch (err) {
-      truncated = true;
-      console.warn(
-        `[Export] hit the ${MESSAGE_CAP}-message cap and the full-period count failed — "premier contact" and message counts are partial for old threads:`,
-        err.message,
-      );
-    }
-  }
-
-  async function mergePeriodSummaries() {
-    const nameStr = { $cond: [isString("$senderName"), "$senderName", ""] };
-    // Same test as isPlaceholderName, inverted
-    const isRealName = {
-      $and: [
-        { $ne: [nameStr, ""] },
-        { $ne: [nameStr, "Unknown"] },
-        { $not: [{ $regexMatch: { input: nameStr, regex: "^User .{1,4}$" } }] },
-        { $not: [{ $regexMatch: { input: nameStr, regex: "^[0-9]{6,}$" } }] },
-      ],
-    };
-    const docs = await Message.aggregate([
-      {
-        $match: {
-          ...matchPlatform,
-          ...(since ? { timestamp: { $gte: since } } : {}),
-          // A refused send is skipped, as in the scan (isFailedOutgoing)
-          $nor: [{ direction: { $ne: "incoming" }, status: "failed" }],
-        },
-      },
-      {
-        $project: {
-          platform: 1,
-          conversationId: 1,
-          at: whenOf,
-          incoming: isIncoming,
-          person: { $cond: [isIncoming, "$senderId", "$recipientId"] },
-          name: { $cond: [{ $and: [isIncoming, isRealName] }, nameStr, null] },
-          body: {
-            $trim: {
-              input: {
-                $substrCP: [
-                  { $cond: [isString("$content"), "$content", ""] },
-                  0,
-                  PREVIEW_CHARS,
-                ],
-              },
-            },
-          },
-          media: hasMediaExpr,
-          ad: {
-            $cond: [
-              {
-                $and: [
-                  isIncoming,
-                  isString("$context.title"),
-                  { $ne: ["$context.title", ""] },
-                ],
-              },
-              "$context.title",
-              null,
-            ],
-          },
-        },
-      },
-      {
-        $group: {
-          _id: { platform: "$platform", person: "$person" },
-          firstAt: { $min: "$at" },
-          lastAt: { $max: "$at" },
-          in: { $sum: { $cond: ["$incoming", 1, 0] } },
-          out: { $sum: { $cond: ["$incoming", 0, 1] } },
-          // $min / $max skip nulls, so non-matching rows do not count
-          lastInAt: { $max: { $cond: ["$incoming", "$at", null] } },
-          lastOutAt: { $max: { $cond: ["$incoming", null, "$at"] } },
-          // Documents compare field by field, so the newest (or, for the ad,
-          // the oldest) `at` wins
-          lastMsg: {
-            $max: {
-              $cond: [
-                { $or: [{ $ne: ["$body", ""] }, "$media"] },
-                { at: "$at", body: "$body", incoming: "$incoming" },
-                null,
-              ],
-            },
-          },
-          name: {
-            $max: {
-              $cond: [{ $ne: ["$name", null] }, { at: "$at", name: "$name" }, null],
-            },
-          },
-          ad: {
-            $min: {
-              $cond: [{ $ne: ["$ad", null] }, { at: "$at", title: "$ad" }, null],
-            },
-          },
-          // The conversations this person wrote in: what maps a reply stored
-          // against a thread id back to them (pass 1, over the whole period)
-          convs: {
-            $addToSet: { $cond: ["$incoming", "$conversationId", null] },
-          },
-        },
-      },
-    ])
-      .allowDiskUse(true)
-      .option({ maxTimeMS: 120000 });
-
-    // Thread -> person, as pass 1 does but from every message in the period
-    const threadToPerson = new Map(convToPerson);
-    for (const d of docs) {
-      const person = d._id.person;
-      if (!d.in || !person || looksLikeThreadId(d._id.platform, person)) continue;
-      for (const c of d.convs || []) {
-        if (c && !threadToPerson.has(`${d._id.platform}:${c}`)) {
-          threadToPerson.set(`${d._id.platform}:${c}`, person);
-        }
-      }
-    }
-
-    const earlier = (a, b) => (!a ? b || null : !b ? a : b < a ? b : a);
-    const later = (a, b) => (!a ? b || null : !b ? a : b > a ? b : a);
-    const newer = (a, b) => (!a?.at ? b || null : !b?.at ? a : b.at > a.at ? b : a);
-    const older = (a, b) => (!a?.at ? b || null : !b?.at ? a : b.at < a.at ? b : a);
-
-    // The summaries split a person's messages by the key they were stored
-    // under, so the ones that resolve to the same person add up
-    const totals = new Map();
-    for (const d of docs) {
-      const platform = d._id.platform;
-      const raw = d._id.person;
-      if (!raw) continue;
-      const personId = threadToPerson.get(`${platform}:${raw}`) || raw;
-      if (own.has(personId)) continue;
-      const key = `${platform}:${personId}`;
-      const t = totals.get(key);
-      if (!t) {
-        totals.set(key, { ...d, platform, personId });
-        continue;
-      }
-      t.firstAt = earlier(t.firstAt, d.firstAt);
-      t.lastAt = later(t.lastAt, d.lastAt);
-      t.in += d.in || 0;
-      t.out += d.out || 0;
-      t.lastInAt = later(t.lastInAt, d.lastInAt);
-      t.lastOutAt = later(t.lastOutAt, d.lastOutAt);
-      t.lastMsg = newer(t.lastMsg, d.lastMsg);
-      t.name = newer(t.name, d.name);
-      t.ad = older(t.ad, d.ad);
-    }
-
-    for (const t of totals.values()) {
-      const p = prospectFor(t.platform, t.personId);
-      p.firstContact = earlier(p.firstContact, t.firstAt);
-      p.lastContact = later(p.lastContact, t.lastAt);
-      // Never below what the scan counted
-      p.messagesIn = Math.max(p.messagesIn, t.in || 0);
-      p.messagesOut = Math.max(p.messagesOut, t.out || 0);
-      p.lastIncomingAt = later(p.lastIncomingAt, t.lastInAt);
-      p.lastOutgoingAt = later(p.lastOutgoingAt, t.lastOutAt);
-      const msg = t.lastMsg;
-      if (msg?.at && (!p.lastMessageAt || msg.at > p.lastMessageAt)) {
-        p.lastMessage = `${msg.incoming ? "Prospect" : "Commercial"} : ${msg.body || "[pièce jointe]"}`;
-        p.lastMessageAt = msg.at;
-      }
-      if (t.name?.at && (!p.nameAt || t.name.at > p.nameAt)) {
-        p.name = t.name.name;
-        p.nameAt = t.name.at;
-      }
-      if (t.ad?.at && (!p.adTitleAt || t.ad.at < p.adTitleAt)) {
-        p.adTitle = t.ad.title;
-        p.adTitleAt = t.ad.at;
-      }
-    }
-  }
-
-  // Drop outbound-only groups still keyed by a thread id: those are the
-  // unrepairable half of the case above (a reply with no inbound message in
-  // range to link it to a person). Better absent than a phantom prospect.
-  for (const [key, p] of prospects) {
-    if (p.messagesIn === 0 && looksLikeThreadId(p.platform, p.personId)) {
-      prospects.delete(key);
-    }
-  }
-
-  if (prospects.size === 0) return [];
-
-  // The UI stores a classification under whichever key the conversation was
-  // listed as — the thread id for Graph-listed threads, the sender id for
-  // DB-merged ones. A person's keys seen INSIDE the window are not
-  // necessarily all of them, so widen the search with an unbounded lookup of
-  // every conversation key these people have ever used. Without this, a
-  // ranged export shows "Non classifié" for a prospect the inbox shows as
-  // Cible, purely because the classified thread's messages fell out of range.
-  //
-  // The same pass collects each person's FULL-history activity for the
-  // maturity rules. Maturity describes the lead, not the chosen period, and
-  // the inbox computes it over all history — a 7-day sheet must not call a
-  // lead "Froid, informations insuffisantes" that the inbox shows as "Tiède".
-  // The "Messages reçus/envoyés" columns stay period-bounded.
-  //
-  // It also finds each person's newest delivered CRM reply over ALL history,
-  // so "Commercial en charge" still names the last agent who answered when
-  // that reply is older than the chosen period (and no lock names anyone).
-  const personIds = [...prospects.values()].map((p) => p.personId);
-  const isDeliveredReply = {
-    $and: [{ $not: [isIncoming] }, { $ne: ["$status", "failed"] }],
-  };
-  const isCrmReply = {
-    $and: [isDeliveredReply, { $eq: [{ $type: "$sentBy" }, "objectId"] }],
-  };
-  try {
-    const keyDocs = await Message.aggregate([
-      {
-        $match: {
-          ...matchPlatform,
-          $or: [
-            { senderId: { $in: personIds } },
-            { recipientId: { $in: personIds } },
-          ],
-        },
-      },
-      {
-        $group: {
-          _id: {
-            platform: "$platform",
-            person: { $cond: [isIncoming, "$senderId", "$recipientId"] },
-          },
-          convIds: { $addToSet: "$conversationId" },
-          // $max skips nulls, so non-matching rows do not move the dates
-          allIn: { $sum: { $cond: [isIncoming, 1, 0] } },
-          allOut: { $sum: { $cond: [isDeliveredReply, 1, 0] } },
-          allLastIncomingAt: { $max: { $cond: [isIncoming, whenOf, null] } },
-          allLastOutgoingAt: {
-            $max: { $cond: [isDeliveredReply, whenOf, null] },
-          },
-          // Documents compare field by field, so the newest `at` wins
-          // (works on every MongoDB version, unlike $top)
-          lastReply: {
-            $max: {
-              $cond: [isCrmReply, { at: whenOf, by: "$sentBy" }, null],
-            },
-          },
-        },
-      },
-    ]).option({ maxTimeMS: 15000 });
-    const later = (a, b) => {
-      if (!a) return b || null;
-      if (!b) return a;
-      return new Date(b) > new Date(a) ? b : a;
-    };
-    for (const d of keyDocs) {
-      const p = prospects.get(`${d._id.platform}:${d._id.person}`);
-      if (!p) continue;
-      for (const id of d.convIds || []) if (id) p.convIds.add(id);
-      // Merged, never replaced: in-range replies stored under a thread id
-      // were attributed above but are not matched by this person query.
-      p.allIn = Math.max(p.allIn ?? p.messagesIn, d.allIn || 0);
-      p.allOut = Math.max(p.allOut ?? p.messagesOut, d.allOut || 0);
-      p.allLastIncomingAt = later(
-        p.allLastIncomingAt ?? p.lastIncomingAt,
-        d.allLastIncomingAt,
-      );
-      p.allLastOutgoingAt = later(
-        p.allLastOutgoingAt ?? p.lastOutgoingAt,
-        d.allLastOutgoingAt,
-      );
-      // Newest CRM reply across all history; the period's own replier is
-      // kept on a tie or when this one is older (replies stored under a
-      // thread id are not matched by this person query).
-      const replyBy = userIdOf(d.lastReply?.by);
-      const replyAt = d.lastReply?.at ? new Date(d.lastReply.at) : null;
-      if (
-        replyBy &&
-        replyAt &&
-        !Number.isNaN(replyAt.getTime()) &&
-        (!p.replierAt || replyAt > new Date(p.replierAt))
-      ) {
-        p.replierId = replyBy;
-        p.replierAt = replyAt;
-      }
-    }
-  } catch (err) {
-    console.warn(
-      "[Export] conversation-key widening skipped (non-fatal):",
-      err.message,
-    );
-  }
-
-  // Classification + lock, matched against ANY of the person's keys
-  const allConvIds = [
-    ...new Set([...prospects.values()].flatMap((p) => [...p.convIds])),
-  ];
-  // Every replier in the sheet, resolved in ONE query rather than per row
-  const replierIds = [
-    ...new Set(
-      [...prospects.values()].map((p) => p.replierId).filter(Boolean),
-    ),
-  ];
   // The recorded frein, keyed by the customer id: ONE lookup per platform
   // present in the sheet. Non-fatal — a sheet without the "Motif / frein"
   // column filled beats no sheet at all.
   const personsByPlatform = new Map(); // platform -> [personId]
-  for (const p of prospects.values()) {
-    if (looksLikeThreadId(p.platform, p.personId)) continue;
+  for (const p of prospects) {
+    if (!p.participant_external_id) continue;
     if (!personsByPlatform.has(p.platform)) personsByPlatform.set(p.platform, []);
     personsByPlatform.get(p.platform).push(String(p.personId));
   }
-  const loadFreins = async () => {
-    const byPerson = new Map(); // "<platform>:<personId>" -> frein
-    await Promise.all(
-      [...personsByPlatform].map(async ([plat, ids]) => {
-        try {
-          const found = await getFreins(plat, ids);
-          for (const [id, frein] of found) byPerson.set(`${plat}:${id}`, frein);
-        } catch (err) {
-          console.warn(
-            `[Export] frein lookup skipped for ${plat} (non-fatal):`,
-            err.message,
-          );
-        }
-      }),
-    );
-    return byPerson;
-  };
-
-  const [classifications, locks, repliers, freins, dispatches] = await Promise.all([
-    Classification.find({ conversationId: { $in: allConvIds } })
-      .select(
-        "conversationId platform stage typologie invoiceRef phone pax isPriority appointmentAt comment updatedAt",
-      )
-      .lean(),
-    ConversationLock.find({ conversationId: { $in: allConvIds } })
-      .populate("lockedBy", "firstName lastName")
-      .lean(),
-    replierIds.length > 0
-      ? User.find({ _id: { $in: replierIds } })
-          .select("firstName lastName")
-          .lean()
-      : [],
-    loadFreins(),
-    loadDispatches([...personsByPlatform]),
-  ]);
-  const classByConv = new Map(
-    classifications.map((c) => [`${c.platform}:${c.conversationId}`, c]),
-  );
-  const lockByConv = new Map(
-    locks.map((l) => [`${l.platform}:${l.conversationId}`, l]),
-  );
-  const fullName = (u) =>
-    u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "";
-  const replierName = new Map(repliers.map((u) => [String(u._id), fullName(u)]));
-
-  /** Newest wins: a person may carry a stale doc under an abandoned key. */
-  const newestOf = (map, p, stamp) => {
-    let best = null;
-    for (const id of p.convIds) {
-      const hit = map.get(`${p.platform}:${id}`);
-      if (!hit) continue;
-      if (!best || new Date(hit[stamp] || 0) > new Date(best[stamp] || 0)) {
-        best = hit;
+  const freins = new Map(); // "<platform>:<personId>" -> frein
+  await Promise.all(
+    [...personsByPlatform].map(async ([plat, ids]) => {
+      try {
+        const got = await getFreins(plat, ids);
+        for (const [id, frein] of got) freins.set(`${plat}:${id}`, frein);
+      } catch (err) {
+        console.warn(
+          "[Export] frein lookup skipped for %s (non-fatal):",
+          plat,
+          err.message,
+        );
       }
-    }
-    return best;
-  };
+    }),
+  );
+
+  const openDispatches = await loadDispatches();
 
   // One clock for the whole sheet, so every row is judged at the same instant
   const now = new Date();
 
-  const rows = [...prospects.values()].map((p) => {
-    const cls = newestOf(classByConv, p, "updatedAt");
-    const lock = newestOf(lockByConv, p, "lockedAt");
-    const classification = cls?.stage || DEFAULT_STAGE;
-    const typologie = cls?.typologie || "";
-    const invoiceRef = cls?.invoiceRef || "";
-    // One line in a cell: the comment may carry line breaks
-    const comment = String(cls?.comment || "").replace(/\s+/g, " ").trim();
-    const isPriority = cls?.isPriority === true;
+  const rows = prospects.map((p) => {
+    const classification = stageOf(p.classification_id, p.qualification_id);
+    const typologie = typologyOf(p.motif_id);
+    const { pax, invoiceRef, isPriority, comment } = dossierFields(
+      conversations.parseExtras(p.extras_json),
+    );
     // The RDV date is independent of the stage
-    const rdvAt = cls?.appointmentAt || null;
-    // "Commercial en charge": the agent CURRENTLY holding the lead — the
-    // newest lock across the person's keys. A lock whose user was deleted
-    // populates to null and does not count. Without a lock, whoever sent the
-    // newest delivered CRM reply stands in; with neither, nobody is named.
-    // The same person as an id, so the Leads API can hand an agent his own
-    // rows without comparing names (two users may share one).
-    const holder = fullName(lock?.lockedBy) ? lock.lockedBy : null;
+    const rdvAt = p.appointment_at || null;
+    // "Commercial en charge": the agent CURRENTLY holding the lead (the
+    // lock). A lock whose user was deleted names nobody and does not count.
+    // Without a lock, whoever sent the newest delivered CRM reply stands in;
+    // replies from Business Suite or the apps have no sender and never name
+    // anyone. The same person as an id, so the Leads API can hand an agent
+    // his own rows without comparing names (two users may share one).
+    const holder = p.lock_user_id !== null && p.lock_user_id !== undefined && p.lock_name
+      ? p.lock_user_id
+      : null;
     const replier =
-      !holder && p.replierId && replierName.get(p.replierId) ? p.replierId : null;
-    const agent = holder
-      ? fullName(holder)
-      : replier
-        ? replierName.get(replier)
-        : UNASSIGNED;
-    const agentId = holder ? String(holder._id) : replier ? String(replier) : null;
+      holder === null && p.replier_user_id !== null && p.replier_user_id !== undefined && p.replier_name
+        ? p.replier_user_id
+        : null;
+    const agent = holder !== null ? p.lock_name : replier !== null ? p.replier_name : UNASSIGNED;
+    const agentId = holder !== null ? String(holder) : replier !== null ? String(replier) : null;
 
     const frein = freins.get(`${p.platform}:${p.personId}`) || null;
-    const dispatch = dispatches.get(`${p.platform}:${p.personId}`) || null;
-    // Full-history activity when the widening pass supplied it, else the
-    // period's own figures
+    // Maturity describes the lead, not the chosen period: full history
     const maturity = computeMaturity({
-      messagesIn: p.allIn ?? p.messagesIn,
-      messagesOut: p.allOut ?? p.messagesOut,
-      lastIncomingAt: p.allLastIncomingAt ?? p.lastIncomingAt,
-      lastOutgoingAt: p.allLastOutgoingAt ?? p.lastOutgoingAt,
+      messagesIn: p.all_in,
+      messagesOut: p.all_out,
+      lastIncomingAt: p.all_last_in,
+      lastOutgoingAt: p.all_last_out,
       stage: classification,
       isPriority,
       appointmentAt: rdvAt,
@@ -873,23 +360,35 @@ async function buildMessageRows({ platform, since }) {
       now,
     });
 
+    // "Dernier message": the newest message of the period from EITHER side
+    // that has something to show; a media-only one reads "[pièce jointe]"
+    const text = typeof p.last_text === "string" ? p.last_text.trim() : "";
+    const body = text || (p.last_has_media ? "[pièce jointe]" : "");
+    const lastMessage = body
+      ? `${p.last_sender_type === "contact" ? "Prospect" : "Commercial"} : ${body}`
+      : "";
+
+    const name = isPlaceholderName(p.participant_name, p.personId)
+      ? fallbackName(p.platform, p.personId)
+      : p.participant_name;
+
     return {
       platform: p.platform,
-      source: p.adTitle
-        ? `${PLATFORM_LABELS[p.platform] || p.platform} — Pub: ${p.adTitle}`
+      source: p.campaign_title
+        ? `${PLATFORM_LABELS[p.platform] || p.platform} — Pub: ${p.campaign_title}`
         : PLATFORM_LABELS[p.platform] || p.platform,
-      name: p.name || fallbackName(p.platform, p.personId),
+      name,
       // WhatsApp leads are their number; the others carry the number the
-      // agent recorded on the dossier, when there is one
-      phone: p.platform === "whatsapp" ? `+${p.personId}` : cls?.phone || "",
-      email: p.platform === "email" ? p.personId : "",
-      firstContact: p.firstContact,
-      lastContact: p.lastContact,
+      // agent recorded on the contact, when there is one
+      phone: p.platform === "whatsapp" ? `+${p.personId}` : p.contact_phone || "",
+      email: p.platform === "email" ? p.personId : p.contact_email || "",
+      firstContact: p.first_at,
+      lastContact: p.last_at,
       classification,
       classificationLabel: STAGE_LABEL[classification] || classification,
       typologie,
       typologieLabel: TYPOLOGY_LABEL[typologie] || "",
-      pax: Number.isInteger(cls?.pax) ? cls.pax : null,
+      pax,
       invoiceRef,
       isPriority,
       maturity: maturity.label,
@@ -907,17 +406,16 @@ async function buildMessageRows({ platform, since }) {
       rdvAt,
       agent,
       agentId,
-      ...dispatchFields(dispatch),
-      messagesIn: p.messagesIn,
-      messagesOut: p.messagesOut,
-      lastMessage: cutText(p.lastMessage || "", 160),
+      ...dispatchFields(openDispatches.get(`${p.platform}:${p.personId}`) || null),
+      messagesIn: p.msgs_in,
+      messagesOut: p.msgs_out,
+      lastMessage: cutText(lastMessage, 160),
     };
   });
 
   rows.sort((a, b) => new Date(b.lastContact) - new Date(a.lastContact));
-  // Surfaced to the caller so the file itself can say so — a silently
-  // truncated "Premier contact" is indistinguishable from a real one.
-  rows.truncated = truncated;
+  // Nothing is capped any more; kept so callers and files read it as before
+  rows.truncated = false;
   return rows;
 }
 
@@ -927,91 +425,108 @@ const ddmmTunis = new Intl.DateTimeFormat("fr-FR", {
   month: "2-digit",
 });
 
+/** "dd/mm" in Africa/Tunis, "" for a missing or unparseable date. */
+const fmtDayMonth = (d) => {
+  if (!d) return "";
+  const date = new Date(d);
+  return Number.isNaN(date.getTime()) ? "" : ddmmTunis.format(date);
+};
+
+/** "+216 98 123 456" for a Tunisian number, "+<digits>" otherwise. */
+function phoneDisplay(digits) {
+  const m = /^216(\d{2})(\d{3})(\d{3})$/.exec(digits);
+  return m ? `+216 ${m[1]} ${m[2]} ${m[3]}` : `+${digits}`;
+}
+
 /**
- * Leads recorded from an incoming phone call (models/IncomingCall.js). They
- * have no messages, so they are not found by the message scan: their row is
- * built from the call record and the same dossier / lock / frein records the
- * other channels use, keyed by customerId on the "telephone" platform.
+ * Leads recorded from an incoming phone call (platform "telephone", stored
+ * as "call" with the customer id "appel-<digits>", db/conversations.js).
+ * They have no messages, so they are not found by the message scan: their
+ * row is built from the conversation (dossier, lock, the agent who recorded
+ * it), its dbo.call_log rows and the same frein records the other channels
+ * use.
  *
  * Maturity: the call is the prospect's contact and it was answered, so the
  * last call stands for both the last incoming and the last outgoing message
  * — Chaud right after the call, cooling with time like any lead.
  */
 async function buildCallRows({ since }) {
-  const calls = await IncomingCall.find({})
-    .sort({ lastCallAt: -1 })
-    .limit(5000)
-    .lean();
-  if (calls.length === 0) return [];
-  const ids = calls.map((c) => c.customerId);
-  const creatorIds = [...new Set(calls.map((c) => c.createdBy).filter(Boolean).map(String))];
-  const [classes, locks, creators, freins, dispatches] = await Promise.all([
-    Classification.find({ platform: "telephone", conversationId: { $in: ids } })
-      .select("conversationId stage typologie invoiceRef pax isPriority appointmentAt comment updatedAt")
-      .lean(),
-    ConversationLock.find({ platform: "telephone", conversationId: { $in: ids } })
-      .populate("lockedBy", "firstName lastName")
-      .lean(),
-    creatorIds.length ? User.find({ _id: { $in: creatorIds } }).select("firstName lastName").lean() : [],
-    getFreins("telephone", ids).catch(() => new Map()),
-    loadDispatches([["telephone", ids]]),
+  const leads = await conversations.callLeads();
+  if (leads.length === 0) return [];
+
+  const [stats, extrasByContact, names, freins, openDispatches] = await Promise.all([
+    conversations.callStats(leads.map((l) => l.id)),
+    conversations.extrasFor(leads.map((l) => l.contactId)),
+    users.namesByIds(leads.flatMap((l) => [l.lockedBy, l.classifiedBy])),
+    getFreins(
+      "telephone",
+      leads.map((l) => l.customerId).filter(Boolean),
+    ).catch(() => new Map()),
+    loadDispatches(),
   ]);
-  const clsOf = new Map(classes.map((c) => [c.conversationId, c]));
-  const lockOf = new Map(locks.map((l) => [l.conversationId, l]));
-  const creatorOf = new Map(creators.map((u) => [String(u._id), u]));
-  const name = (u) => (u ? `${u.firstName || ""} ${u.lastName || ""}`.trim() : "");
   const now = new Date();
 
   const rows = [];
-  for (const call of calls) {
-    const cls = clsOf.get(call.customerId) || null;
+  for (const lead of leads) {
+    const calls = stats.get(lead.id) || null;
+    const lastCallAt = calls?.lastAt || lead.updatedAt || lead.createdAt || null;
+    const firstCallAt = calls?.firstAt || lead.createdAt || lastCallAt;
+    const callCount = calls?.count || 1;
     const lastContact = new Date(
       Math.max(
-        new Date(call.lastCallAt || 0).getTime(),
-        new Date(cls?.updatedAt || 0).getTime(),
+        new Date(lastCallAt || 0).getTime(),
+        new Date(lead.updatedAt || 0).getTime(),
       ),
     );
     if (since && lastContact < since) continue;
 
-    const stage = cls?.stage || DEFAULT_STAGE;
-    const typologie = cls?.typologie || "";
-    const isPriority = cls?.isPriority === true;
-    const rdvAt = cls?.appointmentAt || null;
-    const frein = freins.get(call.customerId) || null;
+    const stage = lead.stage;
+    const typologie = lead.typologie || "";
+    const { pax, invoiceRef, isPriority, comment } = dossierFields(
+      lead.contactId ? extrasByContact.get(String(lead.contactId).toLowerCase()) : null,
+    );
+    const rdvAt = lead.appointmentAt || null;
+    const customerId = lead.customerId || lead.key;
+    const frein = freins.get(customerId) || null;
     // In charge: the lock holder (set when the call was recorded, or by an
     // admin's reassignment); once released, the agent who recorded it.
-    const lock = lockOf.get(call.customerId);
-    const holder = name(lock?.lockedBy) ? lock.lockedBy : null;
-    const creator = call.createdBy ? creatorOf.get(String(call.createdBy)) : null;
+    const holder = lead.lockedBy && names.get(lead.lockedBy) ? lead.lockedBy : null;
+    const creator =
+      lead.classifiedBy && names.get(lead.classifiedBy) ? lead.classifiedBy : null;
     const owner = holder || creator || null;
+
+    // The number as stored on the contact ("+21698123456"), else the digits
+    // the customer id carries, shown the way the Leads page records it
+    const digits = String(lead.contactPhone || customerId || "").replace(/\D/g, "");
+    const phone = digits ? phoneDisplay(digits) : "";
 
     const maturity = computeMaturity({
       messagesIn: 1,
       messagesOut: 1,
-      lastIncomingAt: call.lastCallAt,
-      lastOutgoingAt: call.lastCallAt,
+      lastIncomingAt: lastCallAt,
+      lastOutgoingAt: lastCallAt,
       stage,
       isPriority,
       appointmentAt: rdvAt,
       frein,
       now,
     });
-    const repeat = call.callCount > 1 ? ` (${call.callCount} appels)` : "";
+    const repeat = callCount > 1 ? ` (${callCount} appels)` : "";
 
     rows.push({
       platform: "telephone",
       source: "Appel entrant",
-      name: call.name,
-      phone: call.phone,
-      email: call.email || "",
-      firstContact: call.firstCallAt,
+      name: lead.name || "",
+      phone,
+      email: lead.contactEmail || "",
+      firstContact: firstCallAt,
       lastContact,
       classification: stage,
       classificationLabel: STAGE_LABEL[stage] || stage,
       typologie,
       typologieLabel: TYPOLOGY_LABEL[typologie] || "",
-      pax: Number.isInteger(cls?.pax) ? cls.pax : null,
-      invoiceRef: cls?.invoiceRef || "",
+      pax,
+      invoiceRef,
       isPriority,
       maturity: maturity.label,
       maturityLevel: maturity.level,
@@ -1020,15 +535,15 @@ async function buildCallRows({ since }) {
       frein: freinLabel(frein),
       freinCode: frein?.code || "",
       freinNote: frein?.note || "",
-      customerId: call.customerId,
-      comment: String(cls?.comment || "").replace(/\s+/g, " ").trim(),
+      customerId,
+      comment,
       rdvAt,
-      agent: owner ? name(owner) : UNASSIGNED,
-      agentId: owner ? String(owner._id) : null,
-      ...dispatchFields(dispatches.get(`telephone:${call.customerId}`) || null),
+      agent: owner ? names.get(owner) : UNASSIGNED,
+      agentId: owner ? String(owner) : null,
+      ...dispatchFields(openDispatches.get(`telephone:${customerId}`) || null),
       messagesIn: 0,
       messagesOut: 0,
-      lastMessage: `Appel entrant du ${ddmmTunis.format(new Date(call.lastCallAt))}${repeat}`,
+      lastMessage: `Appel entrant du ${fmtDayMonth(lastCallAt)}${repeat}`,
     });
   }
   return rows;

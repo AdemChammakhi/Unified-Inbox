@@ -1,12 +1,21 @@
 /**
- * messageTemplates.js — canned replies for the inbox.
+ * messageTemplates.js — canned replies for the inbox, served as a READ-ONLY
+ * library.
  *
- *   GET    /api/message-templates          any role      active templates (filters: platform, q;
- *                                                        includeInactive=1 for admin/manager)
- *   POST   /api/message-templates          admin/manager create
- *   PUT    /api/message-templates/:id      admin/manager update
- *   DELETE /api/message-templates/:id      admin/manager deactivate (hard delete with ?hard=1)
- *   POST   /api/message-templates/:id/use  any role      count one use (insert or copy)
+ * The SQL Server schema (database/sqlserver/schema/dbunifedbox.sql) has no
+ * table for message templates and is never extended (decisions D5, D6 and
+ * D11: rows only, never schema). The library is therefore MEDTOURS' official
+ * quick-reply document, server/data/messageTemplates.seed.json, loaded once
+ * with the module. The HTTP API keeps main's paths, filters and response
+ * shapes so the inbox panel and the Modèles page work unchanged; the writes
+ * answer 405, and `readOnly: true` on the list tells the page to hide its
+ * editors. Usage is not counted: there is no table to count it in.
+ *
+ *   GET    /api/message-templates          any role  the library (filters: platform, q)
+ *   POST   /api/message-templates/:id/use  any role  acknowledged, nothing stored
+ *   POST   /api/message-templates          405
+ *   PUT    /api/message-templates/:id      405
+ *   DELETE /api/message-templates/:id      405
  *
  * Responses carry `categories`, the distinct category labels of the returned
  * rows, so the client can draw filter chips without a second call.
@@ -15,15 +24,12 @@
 "use strict";
 
 const express = require("express");
-const mongoose = require("mongoose");
-const MessageTemplate = require("../models/MessageTemplate");
 const { protect, authorize } = require("../middleware/auth");
 
 const router = express.Router();
-const write = [protect, authorize("admin", "manager")];
 
-const PLATFORMS = new Set(MessageTemplate.PLATFORMS);
-const MAX = { title: 120, category: 60, body: 4096 };
+const READ_ONLY_MESSAGE =
+  "Les modèles sont une bibliothèque en lecture seule (fichier server/data/messageTemplates.seed.json).";
 
 const oneLine = (v, max) =>
   typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
@@ -32,133 +38,81 @@ const oneLine = (v, max) =>
 const multiLine = (v, max) =>
   typeof v === "string" ? v.replace(/\r\n?/g, "\n").trim().slice(0, max) : "";
 
-const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const validId = (id) => mongoose.Types.ObjectId.isValid(id);
-const isManager = (req) => req.user && ["admin", "manager"].includes(req.user.role);
-
-function sanitize(body) {
-  const out = {};
-  if (body.title !== undefined) out.title = oneLine(body.title, MAX.title);
-  if (body.category !== undefined) out.category = oneLine(body.category, MAX.category);
-  if (body.body !== undefined) out.body = multiLine(body.body, MAX.body);
-  if (body.platforms !== undefined) {
-    const list = Array.isArray(body.platforms) ? body.platforms : [];
-    out.platforms = [...new Set(list.filter((p) => PLATFORMS.has(p)))];
+/** The library, in main's template shape; the seed key stands in for the id. */
+function loadLibrary() {
+  let rows;
+  try {
+    rows = require("../data/messageTemplates.seed.json");
+  } catch (err) {
+    console.error("[templates] seed file unreadable:", err.message);
+    return [];
   }
-  if (body.sortOrder !== undefined) {
-    const n = Number(body.sortOrder);
-    out.sortOrder = Number.isFinite(n) ? Math.max(-9999, Math.min(9999, Math.round(n))) : 0;
-  }
-  if (body.isActive !== undefined) {
-    out.isActive = body.isActive === true || body.isActive === "true";
-  }
-  return out;
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .filter((r) => r && typeof r.seedKey === "string" && r.seedKey && r.title && r.body)
+    .map((r) => ({
+      _id: r.seedKey,
+      title: oneLine(r.title, 120),
+      body: multiLine(r.body, 4096),
+      category: oneLine(r.category, 60),
+      // Empty: a library template applies to every platform
+      platforms: [],
+      sortOrder: Number.isFinite(Number(r.sortOrder)) ? Number(r.sortOrder) : 0,
+      isActive: true,
+      usageCount: 0,
+      seedKey: r.seedKey,
+    }));
 }
+
+// Main sorted on MongoDB's default (binary) string order
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const TEMPLATES = Object.freeze(
+  loadLibrary().sort(
+    (a, b) => a.sortOrder - b.sortOrder || cmp(a.category, b.category) || cmp(a.title, b.title),
+  ),
+);
+const BY_ID = new Map(TEMPLATES.map((t) => [t._id, t]));
 
 // In the order the templates come (sortOrder first), so the official
 // library's categories read ACC, TEL, QUAL, OFF… as in the document
 const categoriesOf = (rows) => [...new Set(rows.map((t) => t.category).filter(Boolean))];
 
+const readOnly = (req, res) => res.status(405).json({ message: READ_ONLY_MESSAGE });
+const write = [protect, authorize("admin", "manager")];
+
 // ── List ────────────────────────────────────────────────────────────────────
-router.get("/", protect, async (req, res) => {
+router.get("/", protect, (req, res) => {
   try {
-    const filter = {};
-    if (!(req.query.includeInactive === "1" && isManager(req))) filter.isActive = true;
-    const platform = oneLine(req.query.platform, 20);
-    if (PLATFORMS.has(platform)) {
-      filter.$or = [{ platforms: { $size: 0 } }, { platforms: platform }];
-    }
-    const q = oneLine(req.query.q, 80);
+    // `platform`: every library template has an empty platform list, so it
+    // applies to all of them; `includeInactive`: nothing is ever inactive.
+    let templates = TEMPLATES;
+    const q = oneLine(req.query.q, 80).toLowerCase();
     if (q) {
-      const rx = new RegExp(escapeRegex(q), "i");
-      filter.$and = [{ $or: [{ title: rx }, { body: rx }, { category: rx }] }];
+      templates = templates.filter(
+        (t) =>
+          t.title.toLowerCase().includes(q) ||
+          t.body.toLowerCase().includes(q) ||
+          t.category.toLowerCase().includes(q),
+      );
     }
-    const templates = await MessageTemplate.find(filter)
-      .sort({ sortOrder: 1, category: 1, title: 1 })
-      .limit(500)
-      .lean();
-    res.json({ templates, categories: categoriesOf(templates) });
+    templates = templates.slice(0, 500);
+    res.json({ templates, categories: categoriesOf(templates), readOnly: true });
   } catch (err) {
     console.error("[templates] list failed:", err.message);
     res.status(500).json({ message: "Impossible de charger les modèles." });
   }
 });
 
-// ── Create ──────────────────────────────────────────────────────────────────
-router.post("/", ...write, async (req, res) => {
-  try {
-    const data = sanitize(req.body || {});
-    if (!data.title) return res.status(400).json({ message: "Le titre est obligatoire." });
-    if (!data.body) return res.status(400).json({ message: "Le message est obligatoire." });
-    const template = await MessageTemplate.create({
-      ...data,
-      createdBy: req.user._id,
-      updatedBy: req.user._id,
-    });
-    res.status(201).json({ template });
-  } catch (err) {
-    console.error("[templates] create failed:", err.message);
-    res.status(500).json({ message: "Impossible d'enregistrer le modèle." });
-  }
-});
-
-// ── Update ──────────────────────────────────────────────────────────────────
-router.put("/:id", ...write, async (req, res) => {
-  try {
-    if (!validId(req.params.id)) return res.status(404).json({ message: "Modèle introuvable." });
-    const data = sanitize(req.body || {});
-    if (data.title === "") return res.status(400).json({ message: "Le titre est obligatoire." });
-    if (data.body === "") return res.status(400).json({ message: "Le message est obligatoire." });
-    const template = await MessageTemplate.findByIdAndUpdate(
-      req.params.id,
-      { $set: { ...data, updatedBy: req.user._id } },
-      { new: true, runValidators: true },
-    ).lean();
-    if (!template) return res.status(404).json({ message: "Modèle introuvable." });
-    res.json({ template });
-  } catch (err) {
-    console.error("[templates] update failed:", err.message);
-    res.status(500).json({ message: "Impossible d'enregistrer le modèle." });
-  }
-});
-
-// ── Deactivate / delete ─────────────────────────────────────────────────────
-router.delete("/:id", ...write, async (req, res) => {
-  try {
-    if (!validId(req.params.id)) return res.status(404).json({ message: "Modèle introuvable." });
-    if (req.query.hard === "1") {
-      // A template from the official library would be re-inserted at the
-      // next restart (db/seedMessageTemplates.js): keep it, deactivated.
-      const seeded = await MessageTemplate.exists({ _id: req.params.id, seedKey: { $exists: true } });
-      if (!seeded) {
-        const gone = await MessageTemplate.findByIdAndDelete(req.params.id).lean();
-        if (!gone) return res.status(404).json({ message: "Modèle introuvable." });
-        return res.json({ success: true, deleted: true });
-      }
-    }
-    const template = await MessageTemplate.findByIdAndUpdate(
-      req.params.id,
-      { $set: { isActive: false, updatedBy: req.user._id } },
-      { new: true },
-    ).lean();
-    if (!template) return res.status(404).json({ message: "Modèle introuvable." });
-    // kept: a hard delete was asked for a library template
-    res.json({ success: true, template, kept: req.query.hard === "1" });
-  } catch (err) {
-    console.error("[templates] delete failed:", err.message);
-    res.status(500).json({ message: "Impossible de supprimer le modèle." });
-  }
-});
+// ── Writes: refused, the library is a file ──────────────────────────────────
+router.post("/", ...write, readOnly);
+router.put("/:id", ...write, readOnly);
+router.delete("/:id", ...write, readOnly);
 
 // ── Usage counter ───────────────────────────────────────────────────────────
-router.post("/:id/use", protect, async (req, res) => {
-  try {
-    if (!validId(req.params.id)) return res.status(404).json({ message: "Modèle introuvable." });
-    await MessageTemplate.updateOne({ _id: req.params.id }, { $inc: { usageCount: 1 } });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ message: "Erreur serveur." });
-  }
+// Acknowledged for the client's sake; no counter exists (decision D11).
+router.post("/:id/use", protect, (req, res) => {
+  if (!BY_ID.has(req.params.id)) return res.status(404).json({ message: "Modèle introuvable." });
+  res.json({ success: true });
 });
 
 module.exports = router;

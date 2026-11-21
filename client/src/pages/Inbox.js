@@ -1978,7 +1978,7 @@ const Inbox = () => {
                         ...styles.rdvCancel,
                         ...(dossierOpen ? styles.dossierBtnOn : {}),
                       }}
-                      title="Dossier client : typologie, facture, priorité, pièces jointes"
+                      title="Dossier client : typologie, PAX, facture, priorité, RDV"
                       onClick={() => setDossierOpen((v) => !v)}
                     >
                       📁 Dossier
@@ -2083,7 +2083,7 @@ const Inbox = () => {
                   </div>
                 )}
 
-                {/* Dossier client: typologie, facture, priorité, RDV, pièces jointes */}
+                {/* Dossier client: typologie, PAX, facture, priorité, RDV */}
                 {dossierOpen && (
                   <DossierPanel
                     key={`${activeTab}:${selectedConv.id}`}

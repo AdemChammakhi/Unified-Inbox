@@ -1,8 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const Message = require("../models/Message");
-const Classification = require("../models/Classification");
-const ConversationLock = require("../models/ConversationLock");
+const conversations = require("../db/conversations");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 
@@ -25,37 +23,24 @@ router.delete("/", protect, async (req, res) => {
         .json({ message: "Only admins and managers can delete conversations" });
     }
 
-    // Delete all messages for this conversation
-    // Messages may be keyed by conversationId OR senderId (webhook stores senderId as conversationId)
-    const msgResult = await Message.deleteMany({
-      platform,
-      $or: [{ conversationId }, { senderId: conversationId }],
-    });
-
-    // Delete classification
-    const clsResult = await Classification.deleteMany({
-      platform,
-      conversationId,
-    });
-
-    // Delete conversation lock
-    const lockResult = await ConversationLock.deleteMany({
-      platform,
-      conversationId,
-    });
+    // The key may be the thread id or the customer id; both lead to the
+    // customer's conversation. Its messages and qualification history are deleted,
+    // its dossier and lock reset; the row itself stays, marked deleted (the
+    // warehouse flags it), and reopens if the customer writes again.
+    const found = await conversations.findByKeys(platform, [conversationId]);
+    const deleted = { messages: 0, classifications: 0, locks: 0 };
+    for (const conv of found) {
+      const r = await conversations.softDelete(conv.id);
+      deleted.messages += r.messages;
+      deleted.classifications += r.classifications;
+      deleted.locks += r.locks;
+    }
 
     console.log(
-      `Deleted conversation ${conversationId} (${platform}): ${msgResult.deletedCount} messages, ${clsResult.deletedCount} classifications, ${lockResult.deletedCount} locks`,
+      `Deleted conversation ${conversationId} (${platform}): ${deleted.messages} messages, ${deleted.classifications} classifications, ${deleted.locks} locks`,
     );
 
-    return res.json({
-      success: true,
-      deleted: {
-        messages: msgResult.deletedCount,
-        classifications: clsResult.deletedCount,
-        locks: lockResult.deletedCount,
-      },
-    });
+    return res.json({ success: true, deleted });
   } catch (error) {
     console.error("Delete conversation error:", error.message);
     return res.status(500).json({

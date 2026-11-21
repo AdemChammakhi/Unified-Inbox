@@ -19,9 +19,8 @@ const { protect, authorize } = require("../middleware/auth");
 const { sanitizePlatform } = require("../utils/sanitize");
 const rateLimit = require("express-rate-limit");
 const { buildProspectRows, sendSheet, rangeLabelOf } = require("./exports");
-const IncomingCall = require("../models/IncomingCall");
-const Classification = require("../models/Classification");
-const ConversationLock = require("../models/ConversationLock");
+const conversations = require("../db/conversations");
+const users = require("../db/users");
 const { isTypology, TYPOLOGY_KEYS } = require("../constants/pipeline");
 
 const CACHE_TTL_MS = 30 * 1000;
@@ -318,68 +317,50 @@ router.post("/incoming-call", protect, async (req, res) => {
 
     const customerId = `appel-${digits}`;
     const now = new Date();
-    const existing = await IncomingCall.findOne({ customerId }).lean();
-    const call = await IncomingCall.findOneAndUpdate(
-      { customerId },
-      existing
-        ? {
-            $set: { name, lastCallAt: now, ...(email ? { email } : {}) },
-            $inc: { callCount: 1 },
-          }
-        : {
-            $setOnInsert: {
-              customerId,
-              name,
-              phone: phoneDisplay(digits),
-              email,
-              firstCallAt: now,
-              lastCallAt: now,
-              callCount: 1,
-              createdBy: req.user._id,
-            },
-          },
-      { upsert: true, new: true },
-    ).lean();
+    const phone = phoneDisplay(digits);
 
-    // Dossier: a new lead starts at "Contact établi" — the agent has just
-    // spoken to the customer. On a repeat call only the fields given are set.
-    const set = { classifiedBy: req.user._id };
-    if (typologie) set.typologie = typologie;
-    if (pax !== null) set.pax = pax;
+    // The lead: its "telephone" conversation (customer id appel-<digits>),
+    // its contact and one call_log row per call (db/conversations.js). A new
+    // lead starts at "Contact établi" — the agent has just spoken to the
+    // customer — so no stage is set here. On a repeat call only the fields
+    // given are set.
+    const { conversation, created, callCount } = await conversations.ensureForCall({
+      digits,
+      name,
+      phone,
+      email,
+      userId: req.user._id,
+    });
+    const extras = {};
+    if (pax !== null) extras.pax = pax;
     if (comment) {
-      set.comment = comment;
-      set.commentBy = req.user._id;
-      set.commentAt = now;
+      extras.comment = comment;
+      extras.commentBy = String(req.user._id);
+      extras.commentAt = now;
     }
-    await Classification.updateOne(
-      { conversationId: customerId, platform: "telephone" },
-      { $set: set, $setOnInsert: { stage: "contact_etabli" } },
-      { upsert: true, runValidators: true },
+    await conversations.setDossier(
+      conversation.id,
+      { ...(typologie ? { typologie } : {}), extras },
+      req.user._id,
     );
 
     // In charge: the recording agent, unless someone already holds the lead
-    const held = await ConversationLock.findOne({ conversationId: customerId, platform: "telephone" })
-      .populate("lockedBy", "firstName lastName")
-      .lean();
-    if (!held) {
-      await ConversationLock.updateOne(
-        { conversationId: customerId, platform: "telephone" },
-        { $setOnInsert: { lockedBy: req.user._id, lockedAt: now } },
-        { upsert: true },
-      );
+    let heldBy = null;
+    if (conversation.lockedBy) {
+      const holder = await users.findById(conversation.lockedBy);
+      heldBy = holder ? users.fullName(holder) : null;
+    } else {
+      await conversations.lock(conversation.id, req.user._id);
     }
 
     clearLeadsCache();
-    return res.status(existing ? 200 : 201).json({
-      created: !existing,
+    return res.status(created ? 201 : 200).json({
+      created,
       customerId,
-      name: call.name,
-      phone: call.phone,
-      callCount: call.callCount,
-      heldBy:
-        held && held.lockedBy
-          ? `${held.lockedBy.firstName || ""} ${held.lockedBy.lastName || ""}`.trim()
-          : null,
+      name: conversation.name,
+      phone,
+      callCount,
+      heldBy,
     });
   } catch (err) {
     console.error("[Leads] incoming call failed:", err.message);

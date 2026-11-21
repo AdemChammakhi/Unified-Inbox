@@ -10,8 +10,9 @@ const connectDB = require("./config/db");
 // Load .env from project root (one level up from server/)
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
-// Connect to MongoDB
-connectDB();
+// Connect to SQL Server; the server listens once the reference rows are
+// loaded (see the bottom of this file)
+const dbReady = connectDB();
 
 const app = express();
 
@@ -28,7 +29,7 @@ const io = new Server(server, {
 app.set("io", io);
 
 const jwt = require("jsonwebtoken");
-const User = require("./models/User");
+const users = require("./db/users");
 
 // Authenticate Socket.IO connections. Like `protect`, the account must still
 // exist and be active — a disabled user's live feed stops at reconnect.
@@ -46,7 +47,7 @@ io.use(async (socket, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const account = await User.findById(decoded.id).select("isActive");
+    const account = await users.findById(decoded.id);
     if (!account || account.isActive === false) {
       console.warn("[Socket] Authentication failed: account missing or disabled");
       return next(new Error("Authentication error: Account disabled"));
@@ -146,9 +147,9 @@ app.use(
   }),
 );
 
-// Customer dossier documents (passport copies, invoices…) share the uploads
-// volume but must never be public: only the authenticated download route in
-// routes/dossierDocuments.js may read them. Mounted BEFORE the static handler.
+// Customer dossier documents (passport copies, invoices…) uploaded before the
+// feature was removed (decision D6) stay on the uploads volume and must never
+// be public. Mounted BEFORE the static handler.
 app.use("/uploads/dossiers", (req, res) => res.sendStatus(404));
 
 // Uploaded media for outbound messages — must be publicly reachable because
@@ -182,13 +183,10 @@ app.use("/api/analytics", apiLimiter, require("./routes/analytics"));
 app.use("/api/exports", exportLimiter, require("./routes/exports"));
 app.use("/api/leads", apiLimiter, require("./routes/leads"));
 app.use("/api/lead-insights", apiLimiter, require("./routes/leadInsights"));
+// Read-only libraries served from server/data (no table in the SQL Server
+// schema, decisions D6 and D11)
 app.use("/api/partners", apiLimiter, require("./routes/partners"));
 app.use("/api/message-templates", apiLimiter, require("./routes/messageTemplates"));
-app.use(
-  "/api/dossier-documents",
-  apiLimiter,
-  require("./routes/dossierDocuments"),
-);
 
 // Avoid serving a stale client build during local dev runs.
 const isLocalDevRun =
@@ -216,9 +214,11 @@ if (!isLocalDevRun && fs.existsSync(clientBuildPath)) {
 const { subscribePageToMessaging } = require("./services/metaSubscription");
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  subscribePageToMessaging();
+dbReady.then(() => {
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    subscribePageToMessaging();
+  });
 });
 
 module.exports = app;

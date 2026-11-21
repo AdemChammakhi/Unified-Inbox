@@ -4,14 +4,59 @@ const Imap = require("imap");
 const { simpleParser } = require("mailparser");
 const nodemailer = require("nodemailer");
 const router = express.Router();
-const Message = require("../models/Message");
-const ConversationLock = require("../models/ConversationLock");
-const { noteDispatchReply } = require("../utils/dispatching");
 const { protect } = require("../middleware/auth");
+const { noteDispatchReply } = require("../utils/dispatching");
 const { sanitizeId } = require("../utils/sanitize");
-const { bulkUpsert } = require("../utils/duplicateKey");
-const { messageTypeFor } = require("../utils/metaPayload");
+const { storeCrmSend } = require("../services/conversationService");
+const conversations = require("../db/conversations");
+const messages = require("../db/messages");
 const { UPLOAD_DIR } = require("./uploads");
+
+/** Locks taken by an email send carry this (unenforced) expiry. */
+const LOCK_EXPIRY_MS = 10 * 60 * 1000;
+
+/**
+ * Store the fetched mails of each sender (the inbox shows them live from
+ * IMAP; the database copy feeds the prospect sheet and the lead insights).
+ * Mails already stored are skipped; our own address is not a prospect.
+ * Runs in the background, one sender after the other.
+ */
+function storeFetchedEmails(conversationsBySender) {
+  const own = String(process.env.EMAIL_USER || "").toLowerCase();
+  setImmediate(async () => {
+    for (const conv of conversationsBySender) {
+      const sender = String(conv.id || "").trim();
+      if (!sender || sender.toLowerCase() === own || sender.length > 255) continue;
+      try {
+        const stored = await conversations.ensureForCustomer({
+          platform: "email",
+          customerId: sender,
+          name: conv.participants?.[0]?.name,
+          firstSeenAt: conv.messages[0]?.time ? new Date(conv.messages[0].time) : undefined,
+        });
+        const known = await messages.existingExternalIds(
+          stored.id,
+          conv.messages.map((m) => m.id),
+        );
+        const fresh = conv.messages.filter((m) => m.id && !known.has(String(m.id)));
+        if (fresh.length === 0) continue;
+        await messages.insertMessages(
+          stored,
+          fresh.map((m) => ({
+            externalId: m.id,
+            senderType:
+              m.fromId && m.fromId.toLowerCase() === own ? "agent" : "contact",
+            messageType: "text",
+            content: m.text || "",
+            sentAt: m.time,
+          })),
+        );
+      } catch (err) {
+        console.error("Email message sync error (non-fatal):", err.message);
+      }
+    }
+  });
+}
 
 // In-memory cache for email conversations
 let _emailCache = null;
@@ -214,9 +259,7 @@ router.get("/conversations", protect, async (req, res) => {
     });
 
     // Sort messages within each conversation and set lastMessage
-    // DB sync ops collected across all conversations, flushed as one bulkWrite
-    const syncOps = [];
-    const conversations = Object.values(convMap).map((conv) => {
+    const list = Object.values(convMap).map((conv) => {
       conv.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
       conv.lastMessage = conv.messages[conv.messages.length - 1]
         ? {
@@ -229,51 +272,22 @@ router.get("/conversations", protect, async (req, res) => {
           }
         : null;
 
-      // Sync messages to DB (batched below, non-blocking)
-      for (const m of conv.messages) {
-        syncOps.push({
-          updateOne: {
-            filter: { externalId: m.id },
-            update: {
-              $setOnInsert: {
-                platform: "email",
-                conversationId: conv.id,
-                senderId: m.fromId || "unknown",
-                senderName: m.from || "Unknown",
-                recipientId: process.env.EMAIL_USER,
-                content: m.text || "",
-                messageType: "text",
-                direction:
-                  m.fromId === process.env.EMAIL_USER ? "outgoing" : "incoming",
-                status: "delivered",
-                externalId: m.id,
-                timestamp: m.time,
-              },
-            },
-            upsert: true,
-          },
-        });
-      }
-
       return conv;
     });
 
-    if (syncOps.length > 0) {
-      bulkUpsert(Message, syncOps).catch((err) =>
-        console.error("Email message sync error (non-fatal):", err.message),
-      );
-    }
+    // Sync messages to DB (non-blocking)
+    storeFetchedEmails(list);
 
     // Sort conversations by latest message
-    conversations.sort((a, b) => {
+    list.sort((a, b) => {
       const timeA = a.lastMessage?.time ? new Date(a.lastMessage.time) : 0;
       const timeB = b.lastMessage?.time ? new Date(b.lastMessage.time) : 0;
       return timeB - timeA;
     });
 
-    _emailCache = conversations;
+    _emailCache = list;
     _emailCacheTime = Date.now();
-    return res.json({ conversations });
+    return res.json({ conversations: list });
   } catch (error) {
     console.error("Email fetch error:", error.message);
     return res
@@ -315,15 +329,16 @@ router.post("/send", protect, async (req, res) => {
     // conversation for the duration of the send. An admin passing another
     // agent's claim gets no claim of their own.
     releaseClaim = takeEmailSendClaim(lockConvId, myId) || noopRelease;
-    const existingLock = await ConversationLock.findOne({
-      conversationId: lockConvId,
-      platform: "email",
-    });
+    const existing = await conversations.resolve("email", [
+      lockConvId,
+      String(to),
+    ]);
+    const existingLock = existing?.lockedBy ? existing : null;
     // The lock exists and is only refreshed: the claim is not needed.
     if (existingLock) releaseClaim();
     if (
       existingLock &&
-      existingLock.lockedBy.toString() !== req.user._id.toString() &&
+      existingLock.lockedBy !== String(req.user._id) &&
       req.user.role !== "admin"
     ) {
       return res.status(403).json({
@@ -386,53 +401,47 @@ router.post("/send", protect, async (req, res) => {
       attachments: mailAttachments,
     });
 
+    // Sync sent email to DB. The mail is already sent, so a database error
+    // here must never fail the request: log it and carry on.
+    let savedConversation = null;
+    try {
+      const saved = await storeCrmSend({
+        platform: "email",
+        customerId: String(to),
+        externalId: info.messageId,
+        content: text || "",
+        attachments: storedAttachments,
+        userId: req.user._id,
+      });
+      savedConversation = saved.conversation;
+    } catch (dbErr) {
+      console.error("[Email] DB save error after send (non-fatal):", dbErr.message);
+    }
+
     // A dispatched agent's first answer: the admin's board shows it as started
     noteDispatchReply("email", [lockConvId, to], req.user._id);
 
     // --- Auto-lock functionality ---
-    // Runs only after the mail was accepted. The mail is already sent, so a
-    // lock failure here must never fail the request: log it and carry on.
+    // Runs only after the mail was accepted, and never fails the request.
     try {
       if (!existingLock) {
-        await ConversationLock.create({
-          conversationId: lockConvId,
-          platform: "email",
-          lockedBy: req.user._id,
-          lockedAt: new Date(),
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
-        });
+        const target = savedConversation || existing;
+        if (target) {
+          const locked = await conversations.lock(target.id, req.user._id, {
+            expiresInMs: LOCK_EXPIRY_MS,
+          });
+          if (!locked) console.log("[Email:Lock] Lock race detected (non-fatal)");
+        }
       } else {
-        existingLock.expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-        await existingLock.save();
+        await conversations.refreshLockExpiry(existingLock.id, LOCK_EXPIRY_MS);
       }
     } catch (lockErr) {
-      if (lockErr.code === 11000) {
-        console.log("[Email:Lock] Lock race detected (non-fatal)");
-      } else {
-        console.error(
-          "[Email:Lock] Lock update failed after send (non-fatal):",
-          lockErr.message,
-        );
-      }
+      console.error(
+        "[Email:Lock] Lock update failed after send (non-fatal):",
+        lockErr.message,
+      );
     }
     releaseClaim();
-
-    // Sync sent email to DB
-    await Message.create({
-      platform: "email",
-      conversationId: to,
-      senderId: process.env.EMAIL_USER,
-      senderName: process.env.EMAIL_FROM_NAME || "Unified Inbox",
-      recipientId: to,
-      content: text || "",
-      messageType: messageTypeFor(storedAttachments),
-      attachments: storedAttachments,
-      direction: "outgoing",
-      status: "sent",
-      externalId: info.messageId,
-      sentBy: req.user._id,
-      timestamp: new Date(),
-    });
 
     // Emit via Socket.IO
     const io = req.app.get("io");

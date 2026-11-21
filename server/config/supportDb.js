@@ -1,10 +1,10 @@
 /**
  * supportDb.js — connection to the shared "Better Call Fedi" help-desk cluster.
  *
- * This is a SEPARATE database from the app's own MongoDB: the `bettercallfedi`
- * cluster is shared with other agency projects, and Fedi's triage app reads
- * the same `tickets` collection. We therefore use the raw driver here rather
- * than Mongoose — the documents follow Fedi's wire contract, not our schemas.
+ * This is a SEPARATE database from the app's own (SQL Server): the
+ * `bettercallfedi` MongoDB cluster is shared with other agency projects, and
+ * Fedi's triage app reads the same `tickets` collection. We use the raw
+ * driver — the documents follow Fedi's wire contract, not our schemas.
  *
  * Wire contract: "The Fedi Wire" v1.
  *

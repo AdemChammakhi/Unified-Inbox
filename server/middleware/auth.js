@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const User = require("../models/User");
+const users = require("../db/users");
 
 // Same wording as the login refusal in routes/auth.js.
 const ACCOUNT_DISABLED = "Ce compte est désactivé. Contactez un administrateur.";
@@ -22,7 +22,9 @@ const protect = async (req, res, next) => {
     try {
       token = req.headers.authorization.split(" ")[1];
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.id).select("-password");
+      // Tokens issued before the SQL Server migration carry a MongoDB id,
+      // which is no user id any more: they are refused like any unknown user.
+      req.user = await users.findById(decoded.id);
       if (!req.user) {
         return res.status(401).json({ message: "Not authorized, user not found" });
       }

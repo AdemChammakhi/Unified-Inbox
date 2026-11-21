@@ -55,7 +55,10 @@ const toForm = (p) => ({
 const Partners = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const canEdit = user?.role === "admin" || user?.role === "manager";
+  // The server says whether the directory can be edited: the SQL Server
+  // build serves the embedded directory read-only (decision D11).
+  const [readOnly, setReadOnly] = useState(false);
+  const canEdit = (user?.role === "admin" || user?.role === "manager") && !readOnly;
   const fileRef = useRef(null);
 
   const [partners, setPartners] = useState([]);
@@ -92,6 +95,7 @@ const Partners = () => {
         },
       });
       setPartners(res.data.partners || []);
+      setReadOnly(res.data.readOnly === true);
       setGovernorates(res.data.governorates || []);
     } catch (err) {
       if (err.response?.status === 401) {

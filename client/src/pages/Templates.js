@@ -36,7 +36,10 @@ const platformLabel = (k) => PLATFORM_OPTIONS.find((p) => p.key === k)?.label ||
 const Templates = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const canEdit = user?.role === "admin" || user?.role === "manager";
+  // The server says whether the library can be edited: the SQL Server
+  // build serves MEDTOURS' official library read-only (decision D11).
+  const [readOnly, setReadOnly] = useState(false);
+  const canEdit = (user?.role === "admin" || user?.role === "manager") && !readOnly;
 
   const [templates, setTemplates] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -65,6 +68,7 @@ const Templates = () => {
         params: { q: q || undefined, includeInactive: showInactive ? "1" : undefined },
       });
       setTemplates(res.data.templates || []);
+      setReadOnly(res.data.readOnly === true);
       setCategories(res.data.categories || []);
     } catch (err) {
       if (err.response?.status === 401) {

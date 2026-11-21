@@ -1,12 +1,10 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const router = express.Router();
-const Classification = require("../models/Classification");
-const Partner = require("../models/Partner");
+const conversations = require("../db/conversations");
+const { findPartner, agencyLabel } = require("./partners");
 const { protect } = require("../middleware/auth");
 const { sanitizeId, sanitizePlatform } = require("../utils/sanitize");
 const {
-  DEFAULT_STAGE,
   STAGE_KEYS,
   TYPOLOGY_KEYS,
   isStage,
@@ -14,31 +12,23 @@ const {
 } = require("../constants/pipeline");
 
 /**
- * The customer "dossier": pipeline stage, typologie of the request, priority
- * flag, RDV date and invoice reference, one record per customer per platform
- * (keyed by the customer id — see CLAUDE.md §6).
+ * The customer "dossier": pipeline stage, typologie of the request, invoice
+ * reference, phone, PAX, priority flag, comment, and the RDV (date, place,
+ * agency, responsible agent), one per customer per platform. It lives on the
+ * customer's conversation row and on their contact
+ * (server/db/conversations.js: the stage as its (Étape, Qualification) pair,
+ * the typologie as motif_id, the RDV date as appointment_*, the phone in
+ * contacts.phone, everything else in the "dossier" custom field).
  *
  * The response keeps the historical shape the pages read — `classifications`
- * is a map customerId → STAGE code, `appointments` a map customerId → date —
- * and adds `dossiers`, a map customerId → { stage, typologie, invoiceRef,
- * isPriority, appointmentAt }.
+ * is a map key → STAGE code, `appointments` a map key → date — and adds
+ * `dossiers`, a map key → { stage, typologie, invoiceRef, phone, pax,
+ * isPriority, appointmentAt, appointmentPlace, appointmentAgencyId,
+ * appointmentAgencyName, appointmentAgent, comment, commentAt }. Every entry
+ * is listed under the customer id AND the thread id when one is recorded, so
+ * the client's lookup by conversation id or first participant finds it
+ * either way (CLAUDE.md §6).
  */
-
-const publicDossier = (c) => ({
-  stage: c.stage || DEFAULT_STAGE,
-  typologie: c.typologie || "",
-  invoiceRef: c.invoiceRef || "",
-  phone: c.phone || "",
-  pax: Number.isInteger(c.pax) ? c.pax : null,
-  isPriority: c.isPriority === true,
-  appointmentAt: c.appointmentAt || null,
-  appointmentPlace: c.appointmentPlace || "",
-  appointmentAgencyId: c.appointmentAgency ? String(c.appointmentAgency) : "",
-  appointmentAgencyName: c.appointmentAgencyName || "",
-  appointmentAgent: c.appointmentAgent || "",
-  comment: c.comment || "",
-  commentAt: c.commentAt || null,
-});
 
 const COMMENT_MAX = 1000;
 const PLACE_MAX = 60;
@@ -47,35 +37,23 @@ const AGENT_MAX = 120;
 const oneLine = (v, max) =>
   String(v || "").replace(/\s+/g, " ").trim().slice(0, max);
 
-/** "MEDTOUR Sousse", or "Agence X — Sousse" when the name does not say where. */
-const agencyLabel = (p) => {
-  const name = oneLine(p.name, 120);
-  const city = oneLine(p.city, 60);
-  return city && !name.toLowerCase().includes(city.toLowerCase())
-    ? `${name} — ${city}`
-    : name;
-};
-
 // GET /api/classifications?platform=instagram
 router.get("/", protect, async (req, res) => {
   try {
     const { platform } = req.query;
     const safePlatform = platform ? sanitizePlatform(platform) : null;
-    const filter = safePlatform ? { platform: safePlatform } : {};
-    const rows = await Classification.find(filter)
-      .select(
-        "conversationId stage typologie invoiceRef phone pax isPriorityappointmentAt appointmentPlace appointmentAgency appointmentAgencyName appointmentAgent comment commentAt",
-      )
-      .lean();
+    const rows = await conversations.dossiers(safePlatform);
 
     const classifications = {};
     const appointments = {};
     const dossiers = {};
     rows.forEach((c) => {
-      const d = publicDossier(c);
-      classifications[c.conversationId] = d.stage;
-      if (d.appointmentAt) appointments[c.conversationId] = d.appointmentAt;
-      dossiers[c.conversationId] = d;
+      const d = conversations.publicDossier(c);
+      for (const key of new Set([c.customerId, c.externalId].filter(Boolean))) {
+        classifications[key] = d.stage;
+        if (d.appointmentAt) appointments[key] = d.appointmentAt;
+        dossiers[key] = d;
+      }
     });
 
     return res.json({ classifications, appointments, dossiers });
@@ -87,10 +65,10 @@ router.get("/", protect, async (req, res) => {
 
 // PUT /api/classifications
 // Body: { conversationId, participantId?, platform, and any of:
-//   classification (stage code) | stage, typologie, invoiceRef, isPriority,
-//   comment, appointmentAt (ISO date, or null to clear the whole RDV),
-//   appointmentPlace (gouvernorat), appointmentAgencyId (partners directory
-//   id, or null), appointmentAgent (free text) }
+//   classification (stage code) | stage, typologie, invoiceRef, phone, pax,
+//   isPriority, comment, appointmentAt (ISO date, or null to clear the whole
+//   RDV), appointmentPlace (gouvernorat), appointmentAgencyId (partners
+//   directory id, or null), appointmentAgent (free text) }
 router.put("/", protect, async (req, res) => {
   try {
     const conversationId = sanitizeId(req.body.conversationId);
@@ -183,7 +161,7 @@ router.put("/", protect, async (req, res) => {
         });
       }
       set.comment = comment;
-      set.commentBy = comment ? req.user._id : null;
+      set.commentBy = comment ? String(req.user._id) : null;
       set.commentAt = comment ? new Date() : null;
     }
 
@@ -203,7 +181,7 @@ router.put("/", protect, async (req, res) => {
     // Removing the date removes them too: they describe that appointment.
     if (set.appointmentAt === null) {
       set.appointmentPlace = "";
-      set.appointmentAgency = null;
+      set.appointmentAgencyId = "";
       set.appointmentAgencyName = "";
       set.appointmentAgent = "";
     } else {
@@ -217,21 +195,20 @@ router.put("/", protect, async (req, res) => {
       if (body.appointmentAgencyId !== undefined) {
         const id = body.appointmentAgencyId;
         if (id === null || id === "") {
-          set.appointmentAgency = null;
+          set.appointmentAgencyId = "";
           set.appointmentAgencyName = "";
         } else {
-          if (typeof id !== "string" || !mongoose.Types.ObjectId.isValid(id)) {
+          if (typeof id !== "string") {
             return res.status(400).json({ message: "Agence invalide." });
           }
-          const partner = await Partner.findById(id)
-            .select("name city governorate")
-            .lean();
+          // The read-only partners library (routes/partners.js)
+          const partner = findPartner(id);
           if (!partner) {
             return res.status(400).json({
               message: "Agence introuvable dans l'annuaire.",
             });
           }
-          set.appointmentAgency = partner._id;
+          set.appointmentAgencyId = partner._id;
           set.appointmentAgencyName = agencyLabel(partner);
           // The agency settles the place: a Sousse agency is in Sousse
           // whatever was picked before it.
@@ -254,45 +231,36 @@ router.put("/", protect, async (req, res) => {
     }
 
     // A conversation has no single stable id: Meta's list keys an Instagram
-    // thread as "t_…", while the DB-built list (webhook rows, or Meta in
-    // backoff) keys it by the sender's id. Only the sender's id appears in
-    // BOTH shapes (as the first participant), so that is the canonical key:
-    // find the row under either id, and re-key it to the participant.
-    const canonical = String(participantId || conversationId);
-    const keys = [String(conversationId)];
-    if (canonical !== String(conversationId)) keys.push(canonical);
-    // Rows may exist under BOTH keys (one saved before the re-keying, one
-    // after). Re-keying the thread row while a customer row exists would
-    // trip the unique (conversationId, platform) index and fail the save —
-    // so merge first: keep one row, delete the rest, then write.
-    const rows = await Classification.find({
-      conversationId: { $in: keys },
-      platform: String(platform),
-    })
-      .sort({ updatedAt: -1 })
-      .lean();
-
-    set.conversationId = canonical;
-    set.classifiedBy = req.user._id;
-
-    let result;
-    if (rows.length === 0) {
-      result = await Classification.create({
-        ...set,
-        platform: String(platform),
-      });
-    } else {
-      const keep = rows.find((r) => r.conversationId === canonical) || rows[0];
-      const dropIds = rows.filter((r) => r._id !== keep._id).map((r) => r._id);
-      if (dropIds.length > 0) {
-        await Classification.deleteMany({ _id: { $in: dropIds } });
-      }
-      result = await Classification.findByIdAndUpdate(
-        keep._id,
-        { $set: set },
-        { new: true, runValidators: true },
-      );
+    // thread as "t_…", while the DB-built list keys it by the sender's id.
+    // Either key finds the customer's conversation; without one yet, it is
+    // created for the customer (the participant when given), or for the
+    // thread alone when the customer is not known.
+    let conv = await conversations.resolve(
+      platform,
+      [conversationId, participantId].filter(Boolean),
+      { includeDeleted: true },
+    );
+    if (!conv) {
+      const customer =
+        participantId ||
+        (conversations.isThreadId(platform, conversationId) ? null : conversationId);
+      conv = customer
+        ? await conversations.ensureForCustomer({ platform, customerId: customer })
+        : await conversations.ensureForThread({ platform, threadId: conversationId });
+    } else if (conv.deletedAt) {
+      conv = conv.customerId
+        ? await conversations.ensureForCustomer({ platform, customerId: conv.customerId })
+        : await conversations.ensureForThread({ platform, threadId: conv.externalId });
     }
+
+    // The row's own fields go to their parameters; the rest is the contact's
+    // "dossier" custom field (see db/conversations.setDossier).
+    const { stage: newStage, typologie, appointmentAt, phone, ...extras } = set;
+    const result = await conversations.setDossier(
+      conv.id,
+      { stage: newStage, typologie, appointmentAt, phone, extras },
+      req.user._id,
+    );
 
     // Maturity reads the stage, the priority flag and the RDV date, so cached
     // lead insights are stale, and so is the Leads sheet. Required lazily:
@@ -310,13 +278,24 @@ router.put("/", protect, async (req, res) => {
       console.error("Leads cache clear failed:", err.message);
     }
 
+    const dossier = conversations.publicDossier(result);
     return res.json({
       success: true,
-      classification: result,
-      dossier: publicDossier(result),
-      conversationId: canonical,
+      classification: {
+        conversationId: result.key,
+        platform: result.platform,
+        ...dossier,
+        classifiedBy: result.classifiedBy,
+        updatedAt: result.classifiedAt,
+      },
+      dossier,
+      conversationId: result.key,
     });
   } catch (error) {
+    // The phone number is unique per contact (contacts.phone)
+    if (error && error.status === 409) {
+      return res.status(409).json({ message: error.message });
+    }
     console.error("Classification update error:", error.message);
     return res.status(500).json({ message: "Impossible de mettre à jour le dossier." });
   }

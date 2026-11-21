@@ -2186,7 +2186,7 @@ const ManagerDashboard = () => {
                             ...mgrChip(dossierOpen ? "var(--accent)" : "var(--text-muted)"),
                             cursor: "pointer",
                           }}
-                          title="Dossier client : typologie, facture, priorité, RDV, pièces jointes"
+                          title="Dossier client : typologie, PAX, facture, priorité, RDV"
                           onClick={() => setDossierOpen((v) => !v)}
                         >
                           📁 Dossier
@@ -2322,7 +2322,7 @@ const ManagerDashboard = () => {
                       </div>
                     </div>
 
-                    {/* Dossier client: typologie, facture, priorité, RDV, pièces jointes */}
+                    {/* Dossier client: typologie, PAX, facture, priorité, RDV */}
                     {dossierOpen && (
                       <DossierPanel
                         key={`${activeTab}:${selectedConv.id}`}

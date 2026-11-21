@@ -2,14 +2,14 @@ const express = require("express");
 const crypto = require("crypto");
 const axios = require("axios");
 const router = express.Router();
-const Message = require("../models/Message");
 const { protect, authorize } = require("../middleware/auth");
 const instagramRoute = require("./instagram");
 const facebookRoute = require("./facebook");
-const emailRoute = require("./email");
-const { getOrCreateConversation, updateConversationAfterMessage } = require("../services/conversationService");
+const { storeCustomerMessage } = require("../services/conversationService");
+const conversations = require("../db/conversations");
+const messageStore = require("../db/messages");
+const { db } = require("../db/sql");
 const { sanitizeId, isValidGraphId } = require("../utils/sanitize");
-const { retryOnDuplicateKey } = require("../utils/duplicateKey");
 const {
   parseMetaReferral,
   parseWhatsAppReferral,
@@ -17,7 +17,6 @@ const {
   parseMetaAttachments,
   parseWhatsAppAttachments,
   whatsAppMessageText,
-  messageTypeFor,
 } = require("../utils/metaPayload");
 const { isBlocked, reportGraphError } = require("../utils/graphAuthGate");
 
@@ -43,20 +42,37 @@ function logWebhook(platform, type, summary) {
 // GET /api/webhooks/debug — check webhook health & recent DB messages (admin only)
 router.get("/debug", protect, authorize("admin"), async (req, res) => {
   try {
-    const recentMessages = await Message.find()
-      .sort({ createdAt: -1 })
-      .limit(20)
-      .select(
-        "platform conversationId senderId senderName direction content createdAt externalId",
-      );
+    const recentRows = (
+      await db.query(
+        `SELECT TOP (20) ${messageStore.SELECT_API} ${messageStore.FROM_API}
+         ORDER BY m.created_date DESC, m.created_time DESC, m.message_id DESC`,
+      )
+    ).rows;
+    const recentMessages = recentRows.map((r) => {
+      const m = messageStore.toApiMessage(r);
+      return {
+        platform: r.platform,
+        conversationId: r.participant_external_id || r.conversation_external_id,
+        senderId: m.fromId,
+        senderName: m.from,
+        direction: m.direction,
+        content: m.text,
+        createdAt: r.created_at,
+        externalId: r.external_id,
+      };
+    });
 
     // Count messages per platform
-    const igCount = await Message.countDocuments({ platform: "instagram" });
-    const fbCount = await Message.countDocuments({ platform: "facebook" });
-    const igIncoming = await Message.countDocuments({
-      platform: "instagram",
-      direction: "incoming",
-    });
+    const counts = await db.one(
+      `SELECT
+         ig = SUM(CASE WHEN c.platform = N'instagram' THEN 1 ELSE 0 END),
+         igIncoming = SUM(CASE WHEN c.platform = N'instagram' AND m.sender_type = N'contact' THEN 1 ELSE 0 END),
+         fb = SUM(CASE WHEN c.platform = N'facebook' THEN 1 ELSE 0 END)
+       FROM dbo.message m JOIN dbo.conversations c ON c.conversation_id = m.conversation_id`,
+    );
+    const igCount = counts?.ig || 0;
+    const fbCount = counts?.fb || 0;
+    const igIncoming = counts?.igIncoming || 0;
 
     return res.json({
       webhookHits: webhookLog,
@@ -183,7 +199,7 @@ async function getSenderProfile(senderId, platform) {
 // Messenger delivers ad referrals for EXISTING threads as a standalone
 // messaging_referrals event, separate from the message the user then types.
 // We cache the parsed context briefly and attach it to the sender's next
-// message so the inbox can show "replied to this ad" on the right bubble.
+// message, which attributes the conversation to the ad (dbo.campaigns).
 const _pendingReferrals = new Map(); // "<platform>:<senderId>" -> { context, at }
 const REFERRAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const REFERRAL_MAX_ENTRIES = 500;
@@ -215,8 +231,8 @@ function takeReferral(platform, senderId) {
 // Meta sends a copy ("echo", message.is_echo = true) of every message the
 // Page / Instagram account sends: sender = our account, recipient = the
 // customer. Echoes of replies typed OUTSIDE the CRM (Business Suite, the
-// Messenger or Instagram apps) are the only way those replies reach MongoDB
-// in real time, so we store them as outgoing rows.
+// Messenger or Instagram apps) are the only way those replies reach the
+// database in real time, so we store them as outgoing rows.
 //
 // Dedupe contract with the CRM send routes (routes/facebook.js and
 // routes/instagram.js), which store their own row keyed by the message id:
@@ -226,9 +242,9 @@ function takeReferral(platform, senderId) {
 //  - a text-only echo is skipped when the CRM already stored the same text
 //    for the same customer within 2 minutes (a text + attachment send is
 //    stored as ONE row under the attachment's id);
-//  - the write is an upsert by externalId with $setOnInsert only, so it never
-//    overwrites a row the CRM stored; the CRM's own upsert claims (sets
-//    sentBy on) a row an echo stored first.
+//  - the write inserts only when the conversation does not hold that message
+//    id yet, so it never overwrites a row the CRM stored; the CRM's own write
+//    claims (sets the sender on) a row an echo stored first.
 const ECHO_DEFAULT_DELAY_MS = 5000;
 const ECHO_MAX_DELAY_MS = 2147483647; // setTimeout's ceiling
 const ECHO_DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
@@ -269,24 +285,19 @@ function isOwnAppEcho(message) {
 }
 
 /**
- * True when the CRM already stored `content` as an outgoing reply (sentBy set)
- * to this customer within the duplicate window around `timestamp`.
- * @param {string} [excludeId] - _id of a row to ignore (the echo's own row)
+ * True when the CRM already stored `content` as an outgoing reply (sent by a
+ * CRM user) to this customer within the duplicate window around `timestamp`.
+ * @param {number} [excludeId] - message_id of a row to ignore (the echo's own row)
  */
 async function hasCrmTextCopy(platform, customerId, content, timestamp, excludeId) {
-  const query = {
-    platform,
-    recipientId: customerId,
-    direction: "outgoing",
-    sentBy: { $ne: null },
+  const found = await conversations.findByKeys(platform, [customerId]);
+  return messageStore.hasCrmTextCopy(
+    found.map((c) => c.id),
     content,
-    timestamp: {
-      $gte: new Date(timestamp.getTime() - ECHO_DUPLICATE_WINDOW_MS),
-      $lte: new Date(timestamp.getTime() + ECHO_DUPLICATE_WINDOW_MS),
-    },
-  };
-  if (excludeId) query._id = { $ne: excludeId };
-  return Boolean(await Message.exists(query));
+    timestamp,
+    ECHO_DUPLICATE_WINDOW_MS,
+    excludeId || null,
+  );
 }
 
 /**
@@ -375,41 +386,17 @@ async function storeEcho(platform, event, io, waitedMs = 0) {
     }
   }
 
-  let saved;
-  try {
-    saved = await Message.findOneAndUpdate(
-      { externalId: mid },
-      {
-        $setOnInsert: {
-          platform,
-          conversationId: customerId,
-          senderId: ownId,
-          senderName: "Page",
-          recipientId: customerId,
-          content,
-          messageType: messageTypeFor(attachments),
-          attachments,
-          direction: "outgoing",
-          status: "sent",
-          sentBy: null,
-          externalId: mid,
-          timestamp,
-        },
-      },
-      { upsert: true, new: true, includeResultMetadata: true },
-    );
-  } catch (err) {
-    // A concurrent insert of the same message id won (only possible with a
-    // unique index on externalId): the message is stored already.
-    if (err?.code === 11000) {
-      console.log(`[DB] ${platform} echo already stored, skipping:`, mid);
-      return;
-    }
-    throw err;
-  }
+  const saved = await storeCustomerMessage({
+    platform,
+    customerId,
+    senderType: "agent",
+    externalId: mid,
+    content,
+    attachments,
+    sentAt: timestamp,
+  });
 
-  const wasInserted = saved?.lastErrorObject?.updatedExisting === false;
-  if (!wasInserted) {
+  if (!saved.inserted) {
     console.log(`[DB] ${platform} echo already stored, skipping:`, mid);
     return;
   }
@@ -419,12 +406,12 @@ async function storeEcho(platform, event, io, waitedMs = 0) {
   // last, the echo copy is then removed (the send routes do the same after
   // storing their row), so a text is never stored twice.
   if (isTextOnly) {
-    const insertedId = saved?.value?._id;
+    const insertedId = saved.messageId;
     if (
       insertedId &&
       (await hasCrmTextCopy(platform, customerId, content, timestamp, insertedId))
     ) {
-      await Message.deleteOne({ _id: insertedId, sentBy: null });
+      await messageStore.deleteEchoCopy([saved.conversation.id], null, insertedId);
       console.log(`[Webhook:${tag}] Echo removed (stored by the CRM meanwhile):`, mid);
       return;
     }
@@ -568,12 +555,6 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
               const waName =
                 contact?.profile?.name || contact?.wa_id || msg.from;
 
-              const { conversation } = await getOrCreateConversation({
-                platform: "whatsapp",
-                externalSenderId: msg.from,
-                senderName: waName,
-              });
-
               const safeMsgId = sanitizeId(msg.id);
               const safeMsgFrom = sanitizeId(msg.from);
               if (!safeMsgId || !safeMsgFrom) continue;
@@ -583,34 +564,25 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
               const waContext = parseWhatsAppReferral(msg.referral);
               const waText = whatsAppMessageText(msg);
 
-              const newMessage = await retryOnDuplicateKey(() => Message.findOneAndUpdate(
-                { externalId: safeMsgId },
-                {
-                  $setOnInsert: {
-                    platform: "whatsapp",
-                    conversationId: msg.from,
-                    senderId: msg.from,
-                    senderName: waName,
-                    recipientId: value.metadata.phone_number_id,
-                    content: waText,
-                    messageType:
-                      msg.type === "reaction"
-                        ? "reaction"
-                        : messageTypeFor(waAttachments),
-                    attachments: waAttachments,
-                    context: waContext,
-                    direction: "incoming",
-                    status: "delivered",
-                    externalId: msg.id,
-                    timestamp: new Date(),
-                  },
-                },
-                { upsert: true, new: true }
-              ));
+              // Resolves the customer's conversation (creates contact and
+              // conversation if needed); a repeated webhook inserts nothing
+              const saved = await storeCustomerMessage({
+                platform: "whatsapp",
+                customerId: safeMsgFrom,
+                name: waName,
+                senderType: "contact",
+                externalId: safeMsgId,
+                content: waText,
+                attachments: waAttachments,
+                context: waContext,
+                sentAt: new Date(),
+              });
 
-              console.log("[Webhook:WhatsApp] Message saved/upserted:", newMessage._id);
-
-              await updateConversationAfterMessage(conversation._id, newMessage);
+              if (!saved.inserted) {
+                console.log("[Webhook:WhatsApp] Message already stored (duplicate webhook):", safeMsgId);
+                continue;
+              }
+              console.log("[Webhook:WhatsApp] Message saved:", saved.messageId);
 
               // Emit real-time event with formatted data
               if (io) {
@@ -623,7 +595,6 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
                     fromId: msg.from,
                     time: new Date().toISOString(),
                     attachments: waAttachments,
-                    context: waContext,
                   },
                   conversationId: msg.from,
                   senderId: msg.from,
@@ -632,16 +603,21 @@ router.post("/whatsapp", verifyMetaSignature, async (req, res) => {
               }
             }
 
-            // Handle status updates
+            // Handle status updates. Only "read" is stored (message.is_read);
+            // sent / delivered / failed have no column (decision D3).
             const statuses = value.statuses || [];
             for (const status of statuses) {
               const safeStatusId = sanitizeId(status.id);
               const safeStatusVal = sanitizeId(status.status);
               if (!safeStatusId || !safeStatusVal) continue;
-              await Message.findOneAndUpdate(
-                { externalId: safeStatusId },
-                { status: safeStatusVal },
-              );
+              const recipient = sanitizeId(status.recipient_id);
+              if (safeStatusVal === "read" && recipient) {
+                const found = await conversations.findByKeys("whatsapp", [recipient]);
+                await messageStore.markReadByExternalId(
+                  found.map((c) => c.id),
+                  safeStatusId,
+                );
+              }
 
               if (io) {
                 io.emit("messageStatus", {
@@ -697,7 +673,6 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
 
         for (const event of events) {
           const senderId = event.sender?.id;
-          const recipientId = event.recipient?.id;
 
           // Messages sent by our own account (echoes) are stored as outgoing
           // replies, after a delay (see storeEcho). is_echo decides when Meta
@@ -776,7 +751,6 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
                   fromId: senderId,
                   time: msgTime,
                   attachments: igAttachments,
-                  context: igContext,
                 },
                 conversationId: senderId,
                 senderId: senderId,
@@ -785,52 +759,32 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
               console.log("[Socket] IG newMessage emitted immediately (placeholder):", msgMid);
             }
 
-            // --- Now do the slow work: profile resolution, DB upsert, conversation sync ---
+            // --- Now do the slow work: profile resolution, DB insert, conversation sync ---
             const igProfile = await getSenderProfile(senderId, "instagram");
             const igDisplayName = igProfile.name || placeholderName;
 
-            // Resolve Conversation document (creates Channel + Contact if needed)
-            const { conversation: igConv } = await getOrCreateConversation({
-              platform: "instagram",
-              externalSenderId: senderId,
-              senderName: igDisplayName,
-              senderAvatar: igProfile.avatar,
-            });
-
-            // Upsert to DB (avoids duplicate errors if webhook fires twice)
             const safeMsgMid = sanitizeId(msgMid);
-            if (!safeMsgMid) {
-              console.warn("[Webhook:IG] Skipping message with invalid mid");
+            const safeSenderId = sanitizeId(senderId);
+            if (!safeMsgMid || !safeSenderId) {
+              console.warn("[Webhook:IG] Skipping message with invalid mid or sender");
               continue;
             }
-            const igSavedMsg = await retryOnDuplicateKey(() => Message.findOneAndUpdate(
-              { externalId: safeMsgMid },
-              {
-                $setOnInsert: {
-                  platform: "instagram",
-                  conversationId: senderId,
-                  senderId: senderId,
-                  senderName: igDisplayName,
-                  recipientId: recipientId,
-                  content: msgText,
-                  messageType: messageTypeFor(igAttachments),
-                  attachments: igAttachments,
-                  context: igContext,
-                  direction: "incoming",
-                  status: "delivered",
-                  externalId: msgMid,
-                  timestamp: new Date(),
-                },
-              },
-              { upsert: true, new: true, includeResultMetadata: true },
-            ));
+            // Resolves the customer's conversation (creates contact and
+            // conversation if needed); a repeated webhook inserts nothing
+            const igSaved = await storeCustomerMessage({
+              platform: "instagram",
+              customerId: safeSenderId,
+              name: igDisplayName,
+              avatar: igProfile.avatar,
+              senderType: "contact",
+              externalId: safeMsgMid,
+              content: msgText,
+              attachments: igAttachments,
+              context: igContext,
+              sentAt: new Date(),
+            });
 
-            const wasInserted = igSavedMsg.lastErrorObject?.updatedExisting === false;
-            if (wasInserted) {
-              const savedDoc = igSavedMsg.value;
-              // Update Conversation lastMessage/counters
-              await updateConversationAfterMessage(igConv._id, savedDoc);
-
+            if (igSaved.inserted) {
               console.log("[DB] Instagram message saved:", msgMid);
               instagramRoute.clearCache();
 
@@ -846,7 +800,6 @@ router.post("/instagram", verifyMetaSignature, async (req, res) => {
                     fromId: senderId,
                     time: msgTime,
                     attachments: igAttachments,
-                    context: igContext,
                   },
                   conversationId: senderId,
                   senderId: senderId,
@@ -984,44 +937,29 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
             const fbSenderName =
               fbProfile.name || `User ${senderId.slice(-4)}`;
 
-            // Resolve Conversation document (creates Channel + Contact if needed)
-            const { conversation: fbConv } = await getOrCreateConversation({
+            const safeFbMid = sanitizeId(message.mid);
+            const safeFbSender = sanitizeId(senderId);
+            if (!safeFbMid || !safeFbSender) {
+              console.warn("[Webhook:FB] Skipping message with invalid mid or sender");
+              continue;
+            }
+            // Resolves the customer's conversation (creates contact and
+            // conversation if needed); a repeated webhook inserts nothing
+            const fbSaved = await storeCustomerMessage({
               platform: detectedPlatform,
-              externalSenderId: senderId,
-              senderName: fbSenderName,
-              senderAvatar: fbProfile.avatar,
+              customerId: safeFbSender,
+              name: fbSenderName,
+              avatar: fbProfile.avatar,
+              senderType: "contact",
+              externalId: safeFbMid,
+              content: message.text || "",
+              attachments: fbAttachments,
+              context: fbContext,
+              sentAt: new Date(),
             });
 
-            const safeFbMid = sanitizeId(message.mid);
-            const fbSavedMsg = await retryOnDuplicateKey(() => Message.findOneAndUpdate(
-              { externalId: safeFbMid },
-              {
-                $setOnInsert: {
-                  platform: detectedPlatform,
-                  conversationId: senderId,
-                  senderId: senderId,
-                  senderName: fbSenderName,
-                  recipientId: recipientId,
-                  content: message.text || "",
-                  messageType: messageTypeFor(fbAttachments),
-                  attachments: fbAttachments,
-                  context: fbContext,
-                  direction: "incoming",
-                  status: "delivered",
-                  externalId: message.mid,
-                  timestamp: new Date(),
-                },
-              },
-              { upsert: true, new: true, includeResultMetadata: true },
-            ));
-
-            // Only emit socket event if this was a NEW insert (not a duplicate upsert)
-            const fbWasInserted = fbSavedMsg.lastErrorObject?.updatedExisting === false;
-            if (fbWasInserted) {
-              const savedDoc = fbSavedMsg.value;
-              // Update Conversation lastMessage/counters
-              await updateConversationAfterMessage(fbConv._id, savedDoc);
-
+            // Only emit socket event if this was a NEW insert (not a repeated webhook)
+            if (fbSaved.inserted) {
               console.log(`[DB] ${detectedPlatform} message saved:`, message.mid);
               facebookRoute.clearCache();
 
@@ -1036,7 +974,6 @@ router.post("/facebook", verifyMetaSignature, async (req, res) => {
                     fromId: senderId,
                     time: new Date().toISOString(),
                     attachments: fbAttachments,
-                    context: fbContext,
                   },
                   conversationId: senderId,
                   senderId: senderId,

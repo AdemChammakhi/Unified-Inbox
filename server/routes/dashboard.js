@@ -33,7 +33,8 @@ router.get("/manager", protect, authorize("manager"), (req, res) => {
   });
 });
 
-// GET /api/dashboard/marketing - Marketing only
+// GET /api/dashboard/marketing - Marketing only (the API role of the agents;
+// the SQL Server scripts store it as "agent", see server/db/users.js)
 router.get("/marketing", protect, authorize("marketing"), (req, res) => {
   res.json({
     role: "marketing",

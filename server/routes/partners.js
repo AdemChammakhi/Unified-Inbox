@@ -1,82 +1,130 @@
 /**
- * partners.js — the directory of MEDTOUR agencies and B2B partners.
+ * partners.js — the directory of MEDTOUR agencies and B2B partners, served as
+ * a READ-ONLY library.
  *
- *   GET    /api/partners            any role     list (filters: kind, governorate, q, includeInactive)
- *   GET    /api/partners/export     any role     the list as an .xlsx, same columns as the source sheet
- *   POST   /api/partners            admin/manager create
- *   PUT    /api/partners/:id        admin/manager update
- *   DELETE /api/partners/:id        admin/manager deactivate (hard delete with ?hard=1)
- *   POST   /api/partners/import     admin/manager .xlsx upload in the source layout
+ * The SQL Server schema (database/sqlserver/schema/dbunifedbox.sql) has no
+ * table for the directory and is never extended (decisions D5, D6: rows
+ * only, never schema). The entries therefore come from
+ * server/data/partners.seed.json — the spreadsheet management provided —
+ * loaded once with the module. The HTTP API keeps main's paths, filters and
+ * response shapes so the pages work unchanged; the writes answer 405, and
+ * `readOnly: true` on the list tells the page to hide its editors.
  *
- * Import rows are matched on (kind, name, city) case-insensitively: existing
- * rows are updated, new ones inserted, nothing is ever deleted by an import.
+ *   GET    /api/partners            any role  list (filters: kind, governorate, q)
+ *   GET    /api/partners/export     any role  the list as an .xlsx, same columns as the source sheet
+ *   POST   /api/partners            405
+ *   PUT    /api/partners/:id        405
+ *   DELETE /api/partners/:id        405
+ *   POST   /api/partners/import     405
+ *
+ * The RDV form (routes/classifications.js) resolves an agency by its id
+ * through findPartner(); agencyLabel() is the name kept beside that id.
  */
 
 "use strict";
 
 const express = require("express");
-const multer = require("multer");
 const ExcelJS = require("exceljs");
-const mongoose = require("mongoose");
-const Partner = require("../models/Partner");
 const { protect, authorize } = require("../middleware/auth");
-const { governorateForCity, normalize } = require("../utils/tunisiaGovernorates");
 
 const router = express.Router();
-const write = [protect, authorize("admin", "manager")];
+
+const READ_ONLY_MESSAGE =
+  "L'annuaire est une bibliothèque en lecture seule (fichier server/data/partners.seed.json).";
 
 const KINDS = new Set(["agence", "partenaire"]);
 const KIND_LABEL = { agence: "Agence MEDTOUR", partenaire: "Partenaire BtoB" };
-const MAX = { name: 120, contactName: 120, city: 80, governorate: 60, address: 300, notes: 1000 };
 
 const str = (v, max) =>
   typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
 
-/** Accept "98 407 489", "26392129/71481042", ["..."] → clean digit strings. */
-function parsePhones(v) {
-  const raw = Array.isArray(v) ? v.join("/") : String(v == null ? "" : v);
-  return [...new Set(
-    raw
-      .split(/[/,;]|\s{2,}|\s-\s/)
-      .map((p) => p.replace(/[^\d+]/g, ""))
-      .filter((p) => /^\+?\d{6,15}$/.test(p)),
-  )].slice(0, 5);
+const oneLine = (v, max) => String(v || "").replace(/\s+/g, " ").trim().slice(0, max);
+
+/** "MEDTOUR Sousse", or "Agence X — Sousse" when the name does not say where. */
+const agencyLabel = (p) => {
+  const name = oneLine(p.name, 120);
+  const city = oneLine(p.city, 60);
+  return city && !name.toLowerCase().includes(city.toLowerCase())
+    ? `${name} — ${city}`
+    : name;
+};
+
+/** The library, in main's partner shape; the seed key stands in for the id. */
+function loadLibrary() {
+  let rows;
+  try {
+    rows = require("../data/partners.seed.json");
+  } catch (err) {
+    console.error("[Partners] seed file unreadable:", err.message);
+    return [];
+  }
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .filter((r) => r && typeof r.seedKey === "string" && r.seedKey && r.name && KINDS.has(r.kind))
+    .map((r) => ({
+      _id: r.seedKey,
+      kind: r.kind,
+      name: str(r.name, 120),
+      contactName: str(r.contactName, 120),
+      phones: Array.isArray(r.phones) ? r.phones.map(String) : [],
+      city: str(r.city, 80),
+      governorate: str(r.governorate, 60),
+      address: str(r.address, 300),
+      notes: "",
+      isActive: true,
+      seedKey: r.seedKey,
+    }));
 }
 
-function sanitize(body) {
-  const out = {};
-  if (body.kind !== undefined) out.kind = KINDS.has(body.kind) ? body.kind : null;
-  for (const k of Object.keys(MAX)) if (body[k] !== undefined) out[k] = str(body[k], MAX[k]);
-  if (body.phones !== undefined) out.phones = parsePhones(body.phones);
-  if (body.isActive !== undefined) out.isActive = body.isActive === true || body.isActive === "true";
-  // The gouvernorat is derived from the city when left blank or omitted.
-  if (!out.governorate && out.city) out.governorate = governorateForCity(out.city);
-  return out;
+const PARTNERS = Object.freeze(loadLibrary());
+const BY_ID = new Map(PARTNERS.map((p) => [p._id, p]));
+
+/** The partner behind an id (its seed key), or null. */
+function findPartner(id) {
+  return typeof id === "string" ? BY_ID.get(id) || null : null;
 }
 
-const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const validId = (id) => mongoose.Types.ObjectId.isValid(id);
+// Main sorted on MongoDB's default (binary) string order
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const byDirectoryOrder = (a, b) =>
+  cmp(a.governorate, b.governorate) ||
+  cmp(a.city, b.city) ||
+  cmp(a.kind, b.kind) ||
+  cmp(a.name, b.name);
+
+const sorted = (list) => [...list].sort(byDirectoryOrder);
+
+const governoratesOf = (list) =>
+  [...new Set(list.map((p) => p.governorate).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, "fr"),
+  );
+
+const readOnly = (req, res) => res.status(405).json({ message: READ_ONLY_MESSAGE });
+const write = [protect, authorize("admin", "manager")];
 
 // ── List ────────────────────────────────────────────────────────────────────
-router.get("/", protect, async (req, res) => {
+router.get("/", protect, (req, res) => {
   try {
-    const filter = {};
-    if (req.query.includeInactive !== "1") filter.isActive = true;
-    if (KINDS.has(req.query.kind)) filter.kind = req.query.kind;
-    const gov = str(req.query.governorate, 60);
-    if (gov) filter.governorate = new RegExp("^" + escapeRegex(gov) + "$", "i");
-    const q = str(req.query.q, 80);
+    let list = PARTNERS;
+    if (KINDS.has(req.query.kind)) list = list.filter((p) => p.kind === req.query.kind);
+    const gov = str(req.query.governorate, 60).toLowerCase();
+    if (gov) list = list.filter((p) => p.governorate.toLowerCase() === gov);
+    const q = str(req.query.q, 80).toLowerCase();
     if (q) {
-      const rx = new RegExp(escapeRegex(q), "i");
-      filter.$or = [{ name: rx }, { contactName: rx }, { city: rx }, { governorate: rx }, { phones: rx }];
+      list = list.filter(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          p.contactName.toLowerCase().includes(q) ||
+          p.city.toLowerCase().includes(q) ||
+          p.governorate.toLowerCase().includes(q) ||
+          p.phones.some((n) => n.toLowerCase().includes(q)),
+      );
     }
-    const partners = await Partner.find(filter)
-      .sort({ governorate: 1, city: 1, kind: 1, name: 1 })
-      .lean();
-    const governorates = await Partner.distinct("governorate", { isActive: true });
+    // includeInactive is accepted and ignored: a library entry is never inactive
     return res.json({
-      partners,
-      governorates: governorates.filter(Boolean).sort((a, b) => a.localeCompare(b, "fr")),
+      partners: sorted(list),
+      governorates: governoratesOf(PARTNERS),
+      readOnly: true,
     });
   } catch (err) {
     console.error("[Partners] list failed:", err.message);
@@ -87,9 +135,7 @@ router.get("/", protect, async (req, res) => {
 // ── Export (.xlsx, source layout) ───────────────────────────────────────────
 router.get("/export", protect, async (req, res) => {
   try {
-    const partners = await Partner.find({ isActive: true })
-      .sort({ governorate: 1, city: 1, kind: 1, name: 1 })
-      .lean();
+    const partners = sorted(PARTNERS);
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Agences & partenaires");
     ws.columns = [
@@ -118,153 +164,13 @@ router.get("/export", protect, async (req, res) => {
   }
 });
 
-// ── Create ──────────────────────────────────────────────────────────────────
-router.post("/", ...write, async (req, res) => {
-  try {
-    const data = sanitize(req.body || {});
-    if (!data.kind) return res.status(400).json({ message: "Type invalide (agence ou partenaire)." });
-    if (!data.name) return res.status(400).json({ message: "Le nom est obligatoire." });
-    const partner = await Partner.create({ ...data, createdBy: req.user._id, updatedBy: req.user._id });
-    return res.status(201).json({ partner });
-  } catch (err) {
-    console.error("[Partners] create failed:", err.message);
-    return res.status(500).json({ message: "Création impossible." });
-  }
-});
-
-// ── Update ──────────────────────────────────────────────────────────────────
-router.put("/:id", ...write, async (req, res) => {
-  try {
-    if (!validId(req.params.id)) return res.status(400).json({ message: "Identifiant invalide." });
-    const data = sanitize(req.body || {});
-    if (data.kind === null) return res.status(400).json({ message: "Type invalide (agence ou partenaire)." });
-    if (data.name === "") return res.status(400).json({ message: "Le nom est obligatoire." });
-    const partner = await Partner.findByIdAndUpdate(
-      req.params.id,
-      { $set: { ...data, updatedBy: req.user._id } },
-      { new: true, runValidators: true },
-    ).lean();
-    if (!partner) return res.status(404).json({ message: "Fiche introuvable." });
-    return res.json({ partner });
-  } catch (err) {
-    console.error("[Partners] update failed:", err.message);
-    return res.status(500).json({ message: "Mise à jour impossible." });
-  }
-});
-
-// ── Deactivate / delete ─────────────────────────────────────────────────────
-router.delete("/:id", ...write, async (req, res) => {
-  try {
-    if (!validId(req.params.id)) return res.status(400).json({ message: "Identifiant invalide." });
-    if (req.query.hard === "1" && req.user.role === "admin") {
-      const r = await Partner.findByIdAndDelete(req.params.id);
-      if (!r) return res.status(404).json({ message: "Fiche introuvable." });
-      return res.json({ deleted: true });
-    }
-    const partner = await Partner.findByIdAndUpdate(
-      req.params.id,
-      { $set: { isActive: false, updatedBy: req.user._id } },
-      { new: true },
-    ).lean();
-    if (!partner) return res.status(404).json({ message: "Fiche introuvable." });
-    return res.json({ partner });
-  } catch (err) {
-    console.error("[Partners] delete failed:", err.message);
-    return res.status(500).json({ message: "Suppression impossible." });
-  }
-});
-
-// ── Import (.xlsx in the source layout) ─────────────────────────────────────
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  fileFilter: (req, file, cb) =>
-    cb(null, /\.xlsx$/i.test(file.originalname || "") &&
-      /spreadsheetml|octet-stream|excel/i.test(file.mimetype || "")),
-});
-
-const HEADER_ALIASES = {
-  name: /agence|partenaire|nom de l.agence|^nom$/i,
-  contactName: /responsable|contact/i,
-  phones: /mobile|t[ée]l[ée]phone|phone/i,
-  city: /localisation|ville/i,
-  governorate: /gouvernorat|r[ée]gion/i,
-  address: /adresse/i,
-  kind: /statut|type/i,
-};
-
-const cellText = (x) => {
-  if (x == null) return "";
-  if (typeof x === "object") return String(x.text || x.result || (x.richText ? x.richText.map((r) => r.text).join("") : "")).trim();
-  return String(x).trim();
-};
-
-router.post("/import", ...write, upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ message: "Joignez un fichier .xlsx." });
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(req.file.buffer);
-    const ws = wb.worksheets[0];
-    if (!ws) return res.status(400).json({ message: "Le classeur est vide." });
-
-    // Map columns by header text so the sheet can be in any column order.
-    const cols = {};
-    ws.getRow(1).eachCell((cell, n) => {
-      const h = cellText(cell.value);
-      for (const [key, rx] of Object.entries(HEADER_ALIASES)) if (!cols[key] && rx.test(h)) cols[key] = n;
-    });
-    if (!cols.name) {
-      return res.status(400).json({ message: "Colonne « Agence Medtour - Partenaire » introuvable en première ligne." });
-    }
-
-    let inserted = 0, updated = 0, skipped = 0;
-    const errors = [];
-    for (let n = 2; n <= ws.rowCount; n++) {
-      const row = ws.getRow(n);
-      const get = (k) => (cols[k] ? cellText(row.getCell(cols[k]).value) : "");
-      const name = str(get("name"), MAX.name);
-      if (!name) { skipped++; continue; }
-      const statut = get("kind");
-      const kind = /medtour|agence/i.test(statut) ? "agence" : /partenaire|b ?to ?b|b2b/i.test(statut) ? "partenaire" : null;
-      if (!kind) { errors.push(`Ligne ${n} : statut inconnu « ${statut} »`); skipped++; continue; }
-      const city = str(get("city"), MAX.city);
-      const data = {
-        kind, name,
-        contactName: str(get("contactName"), MAX.contactName),
-        phones: parsePhones(get("phones")),
-        city,
-        governorate: str(get("governorate"), MAX.governorate) || governorateForCity(city),
-        address: str(get("address"), MAX.address),
-      };
-      // Same office = same kind, same name, same place. The place matches on
-      // the city ignoring case and accents ("BEJA" is the stored "Béja"), or
-      // failing that on the gouvernorat, so the sheet's own spellings
-      // ("MEDININE", "TATOUINE") still find the corrected rows.
-      const candidates = await Partner.find({
-        kind,
-        name: new RegExp("^" + escapeRegex(name) + "$", "i"),
-      }).select("_id city governorate").lean();
-      const existing =
-        candidates.find((c) => normalize(c.city) === normalize(city)) ||
-        (data.governorate
-          ? candidates.find((c) => normalize(c.governorate) === normalize(data.governorate))
-          : undefined);
-      if (existing) {
-        const set = { ...data, isActive: true, updatedBy: req.user._id };
-        if (!data.governorate) delete set.governorate; // keep a hand-filled gouvernorat
-        if (!data.address) delete set.address;
-        await Partner.updateOne({ _id: existing._id }, { $set: set });
-        updated++;
-      } else {
-        await Partner.create({ ...data, createdBy: req.user._id, updatedBy: req.user._id });
-        inserted++;
-      }
-    }
-    return res.json({ inserted, updated, skipped, errors: errors.slice(0, 20) });
-  } catch (err) {
-    console.error("[Partners] import failed:", err.message);
-    return res.status(400).json({ message: "Import impossible : vérifiez que le fichier est un .xlsx valide." });
-  }
-});
+// ── Writes: refused, the library is a file ──────────────────────────────────
+router.post("/import", ...write, readOnly);
+router.post("/", ...write, readOnly);
+router.put("/:id", ...write, readOnly);
+router.delete("/:id", ...write, readOnly);
 
 module.exports = router;
+module.exports.findPartner = findPartner;
+module.exports.agencyLabel = agencyLabel;
+module.exports.PARTNERS = PARTNERS;
